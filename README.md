@@ -71,22 +71,73 @@
 
 ---
 
-## 🚀 快速开始
+## 🚀 安装
 
-### 环境要求
-- Node.js ≥ 22.19
-- DeepSeek Harness ≥ 0.1.0-rc.7
-- 本地生成需自行启动 [ComfyUI](https://github.com/comfyanonymous/ComfyUI)（默认地址 `http://127.0.0.1:8188`）
+### 0. 环境要求
+- **Node.js** ≥ 22.19 + **pnpm**
+- **DeepSeek Harness** ≥ 0.1.0-rc.7（桌面版 / Web 版都行）
+- 要跑**本地生成**才需要 [ComfyUI](https://github.com/comfyanonymous/ComfyUI)（默认地址 `http://127.0.0.1:8188`）；只用云端通道不需要
 
-### 安装
+### 1. 准备上游 AIFISHER 源码
+构建链的第一步 `pnpm vendor` 每次都会从一份**完整的上游 AIFISHER 源码树**重新复制到 `vendor/aifisher/`，再逐条打补丁（每条补丁都带「命中 N 次」断言）——仓库里 `vendor/aifisher/` 现存的内容是上一次构建的产物，**不是这一步的输入**。上游源码按其原版权方的许可证分发，请自行获取（版权方 Work-Fisher）。
+
+默认按候选顺序自动探测，最省事是把它放在与本仓库同级的 `AIFISHER-main/`；也可以显式指定：
+
+```powershell
+# PowerShell
+$env:AIFISHER_SRC = 'D:\path\to\AIFISHER-main'
+```
+
 ```bash
-# 安装依赖
-pnpm install
+# bash
+export AIFISHER_SRC=/path/to/AIFISHER-main
+```
 
-# 构建插件（构建链顺序不可变）
+> 报 `[vendor] 找不到 AIFISHER 源码` 就是这一步目录没找对。
+
+### 2. 构建
+```bash
+git clone <本仓库> dsh-aifisher-canvas
+cd dsh-aifisher-canvas
+pnpm install
 pnpm build
 ```
-重启 DSH 后，侧边栏点击「无限画布」即可开始使用。
+
+`pnpm build` = `clean → vendor-aifisher → build-canvas-css → tsdown`，**顺序不可变**。产物三件，DSH 加载的就是它们：
+
+- `lib/index.js` — host 半（路由、ComfyUI、生成、媒体库、诊断）
+- `lib/client/apply.js` — 浏览器半（panel / slot 注册）
+- `lib/canvas/canvas-app.js` — 画布应用本体
+
+### 3. 装进 DSH
+1. 打开 DSH → **设置 → 插件 →「添加插件」**。
+2. 填**插件目录的绝对路径**（就是第 2 步构建出 `lib/` 的那个目录），点安装。
+   DSH 会把这个目录 link 进当前 profile，并把 `dsh-aifisher-canvas` 追加进 profile 的 `dsh.profile.bundles`，默认启用。
+3. **重启 DSH**。host 半是进程内加载的，只刷新页面不会更新它。
+
+不想用界面时，手工等价做法是改 `$DSH_HOME/profiles/<profile>/package.json`，然后在 profile 目录跑 `pnpm install`、重启 DSH：
+
+```jsonc
+{
+  "dependencies": { "dsh-aifisher-canvas": "link:D:/path/to/dsh-aifisher-canvas" },
+  "dsh": { "profile": { "bundles": [ /* …原有组合包… */, "dsh-aifisher-canvas" ] } }
+}
+```
+
+### 4. 验证
+侧边栏出现 **「无限画布」** → 打开 → 新建项目。要用本地生成的话，画布左上角 ComfyUI 胶囊应变绿；云端通道在 **设置 → 闭源服务** 里配。具体上手见 [`使用说明.md`](使用说明.md)。
+
+### 5. 更新与卸载
+- **更新**：改完源码重新 `pnpm build` → 重启 DSH。DSH 不自动更新插件，换版本要在插件页重装。
+- **卸载**：设置 → 插件里移除（DSH 会先把组合包摘出 `dsh.profile.bundles`，再执行 `pnpm remove`）。画布数据留在 `$DSH_HOME/storages/dsh-aifisher-canvas/`，不会被删。
+
+### 安装常见报错
+| 现象 | 原因 / 处理 |
+|---|---|
+| `[vendor] 找不到 AIFISHER 源码` | 上游源码没准备或路径不对 → 见第 1 步 |
+| 构建报「找不到模块 tsdown / jsdom」 | 盘符变过，`node_modules` 里 junction 存的是绝对路径已悬空 → `node scripts/fix-node-modules-junctions.mjs --dry` 先看计数，去掉 `--dry` 真改 |
+| 装完侧边栏没有「无限画布」 | 组合包没启用，或没重启 DSH → 设置 → 插件 里确认 `dsh-aifisher-canvas` 已开启，再重启 |
+| 画布能打开但接口 404 | host 半没重新加载（只刷新页面不够）→ 重启 DSH |
 
 ### 基础操作速查
 | 操作 | 方式 |
