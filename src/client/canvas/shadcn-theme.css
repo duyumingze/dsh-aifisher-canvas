@@ -1,0 +1,161 @@
+/**
+ * shadcn/ui 主题桥接层（全局注入，但全部落在 .af-canvas-mount 作用域内）。
+ *
+ * 背景：画布 UI 是 AIFISHER 的独立应用（自带 React 19 + Tailwind 4），它自己有一套
+ * 「语义 token + 变量」设计系统：`themeTokens.ts` 把 46 个颜色写成 `--af-*`，由
+ * `html[data-af-theme="dark|light"]` 切换。上游组件里几乎全部用
+ * `bg-[var(--af-surface)]` 这种写法消费它们。
+ *
+ * 所以 shadcn/ui 接进来的正确姿势不是「另起一套配色」，而是：
+ *
+ *   1. 把 shadcn 的语义变量（--background / --primary / --border / --ring …）
+ *      直接**别名到** `--af-*`，shadcn 组件立刻跟随画布的深/浅色主题，
+ *      而且任何一处改 `--af-*` 两边同时变；
+ *   2. 把 shadcn 默认的 **有彩色 primary**（近黑/白）与 **蓝色 ring** 换成 nova 的
+ *      中性锐利风（focus ring 用中性灰、选中态用 surface-raised），符合无限画布
+ *      「界面退后、画面在前」的诉求；
+ *   3. 补上 shadcn 组件依赖而 `@import 'tailwindcss/utilities.css'` 不提供的两个
+ *      灰色 scale（`muted-foreground` 会用到 `gray-*`），以及 `dark` 变体
+ *      （本项目的暗色不是 `.dark` 类，而是 `[data-af-theme=dark]` 属性）；
+ *   4. 提供 `.af-canvas-mount` 作用域的 base 复位 —— **绝不能**引入 Tailwind 的
+ *      preflight 全局版：这段 CSS 是注入进 DSH 自己的页面的，全局 `*{margin:0}`
+ *      会把 DSH 整个界面改样（早期版本就是因此才只取 theme + utilities 两层）。
+ *
+ * 关键约束：画布产物被 DSH 页面共享，所以这里所有新样式都必须以
+ * `.af-canvas-mount`（或其后代 / 画布 portal 容器）打头。
+ */
+
+/* ---------- 1. 暗色变体：画布用属性切换主题，不是 .dark 类 ---------- */
+/* 画布自身的容器与 portal 挂在 body 上的浮层都能命中；DSH 自己的组件不在
+   .af-canvas-mount 内、也不带 data-af-theme，因此不会被误伤。 */
+@custom-variant dark (&:is([data-af-theme="dark"] *), &:is([data-af-theme="dark"]));
+
+/* ---------- 2. shadcn 语义变量 → 画布 token ---------- */
+@theme inline {
+  --color-background: var(--af-canvas);
+  --color-foreground: var(--af-text);
+  --color-card: var(--af-surface);
+  --color-card-foreground: var(--af-text);
+  --color-popover: var(--af-input);
+  --color-popover-foreground: var(--af-text);
+  --color-primary: var(--af-primary);
+  --color-primary-foreground: var(--af-on-primary);
+  --color-secondary: var(--af-surface-raised);
+  --color-secondary-foreground: var(--af-text);
+  --color-muted: var(--af-surface-raised);
+  --color-muted-foreground: var(--af-text-muted);
+  --color-accent: var(--af-hover);
+  --color-accent-foreground: var(--af-text);
+  --color-destructive: var(--af-danger);
+  --color-border: var(--af-border);
+  --color-input: var(--af-border-control);
+  --color-ring: var(--af-text-secondary);
+
+  /* nova 风：控制件几何（官方 nova = radius default、控件 h-9/文字 14px）。
+     画布是密集工具界面，圆角比默认再收一档、控件略矮。 */
+  --radius-none: 0px;
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+  --radius-3xl: 20px;
+  --radius-4xl: 24px;
+
+  /* shadcn 组件里用到、tailwindcss/utilities.css 不自带的两条灰阶 */
+  --color-red-500: oklch(63.7% 0.237 25.331);
+  --color-blue-500: oklch(62.3% 0.214 259.815);
+}
+
+/* ---------- 3. 缺失的 Tailwind 调色板（仅补 shadcn 组件真正用到的） ---------- */
+/* 只取 utilities 层时 tailwind 的默认调色板变量不存在，shadcn 组件里的
+   `focus-visible:ring-ring/50`、`text-muted-foreground`、`dark:bg-input/30` 等
+   需要它们才能算出颜色。这里补全灰阶 + 少量语义色，全部来自 Tailwind v4 官方值。 */
+@theme {
+  --color-gray-50: oklch(98.5% 0.002 247.839);
+  --color-gray-100: oklch(96.7% 0.003 264.542);
+  --color-gray-200: oklch(92.8% 0.006 264.531);
+  --color-gray-300: oklch(87.2% 0.01 258.338);
+  --color-gray-400: oklch(70.7% 0.022 261.325);
+  --color-gray-500: oklch(55.1% 0.027 264.364);
+  --color-gray-600: oklch(44.6% 0.03 256.802);
+  --color-gray-700: oklch(37.3% 0.034 259.733);
+  --color-gray-800: oklch(27.8% 0.033 256.848);
+  --color-gray-900: oklch(21% 0.034 264.665);
+  --color-gray-950: oklch(13% 0.028 261.692);
+}
+
+/* ---------- 4. shadcn 组件需要的 base 复位（作用域版） ---------- */
+/* 这是 Tailwind preflight + shadcn init 写的 base 层里、**被 shadcn 组件依赖**的
+   最小集合，全部限制在 .af-canvas-mount 内。改这里要连带跑一次
+   scripts/browser-check.mjs（它断言画布头部不越界、节点几何不变）。 */
+@layer base {
+  .af-canvas-mount,
+  .af-canvas-mount *,
+  .af-canvas-mount *::before,
+  .af-canvas-mount *::after {
+    box-sizing: border-box;
+    border: 0 solid var(--color-border);
+    margin: 0;
+    padding: 0;
+  }
+  .af-canvas-mount :where(button, input, select, textarea, optgroup) {
+    font: inherit;
+    color: inherit;
+    letter-spacing: inherit;
+  }
+  .af-canvas-mount :where(button, [role='button']) {
+    cursor: pointer;
+  }
+  .af-canvas-mount :where(button:disabled, [aria-disabled='true']) {
+    cursor: not-allowed;
+  }
+  .af-canvas-mount :where(button, input, select, textarea) {
+    background-color: transparent;
+    background-image: none;
+  }
+  .af-canvas-mount :where(h1, h2, h3, h4, h5, h6) {
+    font-size: inherit;
+    font-weight: inherit;
+  }
+  .af-canvas-mount :where(ul, ol) {
+    list-style: none;
+  }
+  .af-canvas-mount :where(img, svg, video, canvas, audio, iframe, embed, object) {
+    display: block;
+    vertical-align: middle;
+  }
+  .af-canvas-mount :where(img, video) {
+    max-width: 100%;
+    height: auto;
+  }
+  .af-canvas-mount :where(table) {
+    border-collapse: collapse;
+    border-color: inherit;
+    text-indent: 0;
+  }
+  .af-canvas-mount :focus-visible {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 2px;
+  }
+  .af-canvas-mount :where([hidden]:not([hidden='until-found'])) {
+    display: none !important;
+  }
+}
+
+/* ---------- 5. 画布内的 shadcn 补充视觉 ---------- */
+@layer base {
+  /* portal 挂在 body 上的浮层（菜单/弹窗/下拉）也要拿到 token：
+     它们不在 .af-canvas-mount 里，但 html[data-af-theme] 一直在，
+     shadcn 变量本身来自 --af-*，继承同样生效。这里只补一条字体/前景色兜底。 */
+  body:has(.af-canvas-mount) > [data-slot='tooltip-content'],
+  body:has(.af-canvas-mount) > [data-slot='dropdown-menu-content'],
+  body:has(.af-canvas-mount) > [data-slot='popover-content'],
+  body:has(.af-canvas-mount) > [data-slot='dialog-content'],
+  body:has(.af-canvas-mount) > [data-slot='alert-dialog-content'],
+  body:has(.af-canvas-mount) > [data-slot='select-content'] {
+    color: var(--af-text);
+    font-family: inherit;
+  }
+}

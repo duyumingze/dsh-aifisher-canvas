@@ -1,0 +1,54 @@
+dsh-aifisher-canvas
+Copyright (c) 2026, the dsh-aifisher-canvas contributors.
+
+This product is a DSH (DeepSeek Harness) web-plugin adaptation of AIFISHER 2.0.7.
+It is distributed under the AIFISHER Noncommercial Source License 1.0 — see LICENSE.
+That license is noncommercial and source-available; it is NOT an OSI-approved open-source
+license. Commercial use requires a separate written agreement from the AIFISHER
+copyright holder (Work-Fisher).
+
+Modifications made in this repository (host runtime, DSH-side agent chat, cloud-channel
+generation, workflow library, UI reskin and assembly layer under `src/`) are derived
+works built on top of the vendored AIFISHER source and are licensed under the same
+noncommercial terms. They are not dual-licensed under a permissive license.
+
+----------------------------------------------------------------------
+Third-party notices
+----------------------------------------------------------------------
+
+1. Vendored upstream: AIFISHER 2.0.7
+   - Source: vendor/aifisher/ (copied from the upstream AIFISHER source tree by
+     scripts/vendor-aifisher.mjs; do not edit in place).
+   - License: AIFISHER Noncommercial Source License 1.0 (see vendor/aifisher/LICENSE).
+   - Scope and exclusions: see vendor/aifisher/SOURCE-SCOPE.md and
+     vendor/aifisher/THIRD-PARTY-NOTICES.md.
+   - Brand assets under public/brand/ and style/filter thumbnails under
+     public/mj-styles/ and public/creative-presets/ are redistributed under the
+     upstream's existing grant; they are not relicensed by this project.
+
+2. Prompt fragments adapted from T8-penguin-canvas
+   - Retained under the MIT License; see public/notices/T8-penguin-canvas.txt.
+
+3. Runtime framework: DeepSeek Harness / Cordis
+   - @deepseek-ai/cordis, @deepseek-ai/dsh-client-runtime, @deepseek-ai/dsh-tools
+     are consumed as peer/dev dependencies and are distributed under the MIT License
+     by their respective copyright holders.
+
+4. npm dependencies
+   - React, React DOM, Radix UI, TipTap, wavesurfer.js, tippy.js, html-to-image,
+     react-markdown, remark-gfm, lucide-react, class-variance-authority, clsx,
+     tailwind-merge, Tailwind CSS, tsdown, TypeScript and their transitive
+     dependencies remain under their own original licenses (see node_modules/*/LICENSE
+     and pnpm-lock.yaml). No license in this repository overrides them.
+
+5. External services
+   - This plugin can call Volcengine Ark, OpenAI-compatible endpoints, ModelScope
+     and FisherAI (api.work-fisher.com). Using those services requires your own
+     credentials and compliance with their respective terms of service. This project
+     bundles no API keys, model weights or closed-source SKILL content.
+
+----------------------------------------------------------------------
+Trademark note
+----------------------------------------------------------------------
+"DeepSeek", "AIFISHER", "Work-Fisher", "ComfyUI", "ModelScope" and other names are
+trademarks of their respective owners. Mentioning them does not imply endorsement.

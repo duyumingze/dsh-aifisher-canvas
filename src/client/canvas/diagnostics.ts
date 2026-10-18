@@ -1,0 +1,81 @@
+/**
+ * 画布运行时诊断上报（client 半，跑在画布应用里）。
+ *
+ * 画布是独立 ESM 应用、在浏览器里跑；出问题时 agent 看不到控制台。
+ * 这里把全局错误 / 未处理 Promise / React 错误边界捕获到的异常
+ * POST 回 host 的 /api/aifisher/canvas/diagnostics，之后用
+ * GET /api/aifisher/canvas/diagnostics 就能读到我需要的信息。
+ *
+ * 上报本身出任何问题都必须静默：诊断通道不能变成新的错误源。
+ */
+const ENDPOINT = '/api/aifisher/canvas/diagnostics';
+
+interface ReportDetail {
+  stack?: string;
+  source?: string;
+  line?: number;
+  column?: number;
+  [key: string]: unknown;
+}
+
+let installed = false;
+
+function post(level: 'error' | 'warn' | 'info', message: string, detail?: ReportDetail): void {
+  const body = JSON.stringify({
+    level,
+    message: String(message ?? '').slice(0, 4000),
+    detail,
+    url: location.pathname,
+  });
+  try {
+    // keepalive 保证页面正在卸载时也能发出去
+    void fetch(ENDPOINT, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body,
+      keepalive: true,
+    }).catch(() => {});
+  } catch {
+    /* 诊断上报失败就放弃 */
+  }
+}
+
+/** 手动上报（React 错误边界、关键分支用）。 */
+export function reportCanvasError(message: string, detail?: ReportDetail): void {
+  console.error('[aifisher-canvas]', message, detail);
+  post('error', message, detail);
+}
+
+export function reportCanvasInfo(message: string, detail?: ReportDetail): void {
+  post('info', message, detail);
+}
+
+/** 安装全局错误钩子（幂等）。 */
+export function installCanvasDiagnostics(): () => void {
+  if (installed) return () => {};
+  installed = true;
+
+  const onError = (event: ErrorEvent) => {
+    post('error', event.message || 'window.onerror', {
+      stack: event.error instanceof Error ? event.error.stack : undefined,
+      source: event.filename,
+      line: event.lineno,
+      column: event.colno,
+    });
+  };
+  const onRejection = (event: PromiseRejectionEvent) => {
+    const reason = event.reason;
+    post('error', reason instanceof Error ? reason.message : String(reason), {
+      stack: reason instanceof Error ? reason.stack : undefined,
+      kind: 'unhandledrejection',
+    });
+  };
+
+  window.addEventListener('error', onError);
+  window.addEventListener('unhandledrejection', onRejection);
+  return () => {
+    installed = false;
+    window.removeEventListener('error', onError);
+    window.removeEventListener('unhandledrejection', onRejection);
+  };
+}

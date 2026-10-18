@@ -1,0 +1,8 @@
+# pnpm 的构建脚本白名单（v11 默认不跑依赖的 postinstall，需要显式表态）。
+#
+# @parcel/watcher：只有 Tailwind CLI 的 `--watch` 才用到它的原生模块；
+# 本仓库的构建是「一次性编译」（scripts/build-canvas-css.mjs 不带 --watch），
+# 所以这里给 false —— 不编译它的原生件，安装不再报 ERR_PNPM_IGNORED_BUILDS。
+# 若要改回 `pnpm dev` 那种监听式开发，把它设成 true（或跑 pnpm approve-builds）即可。
+allowBuilds:
+  '@parcel/watcher': false

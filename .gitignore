@@ -1,0 +1,14 @@
+# 记忆库数据（误删不可恢复，禁止提交）
+.dsh-meow/
+
+# 构建与排查中间产物（临时备份、测试日志、截图、tailwind 原始产物）。
+# 为什么必须列在这里：Tailwind v4 的自动内容探测**会扫整个仓库**（除了 .gitignore 里的东西），
+# 于是 .dsh-tmp 里随手留的备份/日志会让 CSS 多出一堆没被用到的工具类 ——
+# 工作区与已装插件两边的构建产物就不再一致（实测差 2.3 KB）。
+.dsh-tmp/
+.dsh-build/
+
+node_modules/
+lib/
+*.tsbuildinfo
+.DS_Store

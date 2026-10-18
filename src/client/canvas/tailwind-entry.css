@@ -1,0 +1,28 @@
+/**
+ * 画布样式编译入口（给 Tailwind CLI 用的，不是运行时 CSS）。
+ *
+ * Tailwind v4 的 `@import "tailwindcss"` = theme + preflight + utilities。
+ * 这段 CSS 会被注入到 DSH 页面里，**全局 preflight 必须排除**，
+ * 否则 `*{margin:0;border:0;box-sizing:border-box}` 会把 DSH 整个界面改样。
+ * 所以这里只取 theme（设计变量）和 utilities（工具类）两层；
+ * shadcn/ui 组件需要的那部分 base 复位，由 ./shadcn-theme.css 以 .af-canvas-mount
+ * 作用域的形式补回来（见该文件说明）。
+ *
+ * @source 指向要扫描 class 的源码：vendored 的 AIFISHER 画布 + 插件自己的 client 半
+ *         + src/canvas-ui（vendor 进来的 shadcn 组件）。
+ *
+ * `source(none)` 关掉**自动内容探测**（Tailwind v4 默认会扫整个仓库，只认 .gitignore）。
+ * 不关的话，工作区里随手留的中间产物（.dsh-tmp 里的备份/日志、.dsh-build 里的旧产物）
+ * 也会被当成 class 来源：实测同一份源码在「工作区」与「已装插件」两处编出不同的 CSS
+ * （多出 `.\!start` / `.bottom-1` 这类谁都没用的工具类，差 1～2 KB），产物对不上号。
+ * 下面三条 @source 已覆盖所有会写 class 的目录。
+ */
+@layer theme, base, components, utilities;
+@import 'tailwindcss/theme.css' layer(theme);
+@import 'tailwindcss/utilities.css' layer(utilities) source(none);
+
+@import './shadcn-theme.css';
+
+@source "../../../vendor/aifisher/src";
+@source "../../../src/client";
+@source "../../../src/canvas-ui";

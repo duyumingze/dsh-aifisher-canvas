@@ -1,0 +1,8 @@
+# DSH 插件配置补丁：把本插件插进 profile 的图层栈里。
+#
+# 行里只写 id + name：host 入口由包名解析（exports["."] → lib/index.js），
+# client 入口由 package.json 的 dsh.client 声明解析（exports["./client"] → lib/client/apply.js）。
+# 所以这里不需要（也不应该）手写 apply 路径。
+- insert:
+    - id: dsh-aifisher-canvas
+      name: dsh-aifisher-canvas
