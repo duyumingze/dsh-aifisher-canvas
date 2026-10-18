@@ -9,6 +9,12 @@
 .dsh-build/
 
 node_modules/
-lib/
+
+# 构建产物。**必须锚定根目录**：不写 `/` 的 `lib/` 会连带吞掉
+# `src/canvas-ui/lib/`（React 实例桥 + 浮层 portal 容器）与 `scripts/lib/`
+# （测试用的 canvas harness / png 编码）—— 那是源码，不是产物。
+# 曾经因为没锚定，跑一次 `git clean -Xdf` 就把这两处源码删了，构建直接断在
+# `Could not resolve '../../canvas-ui/lib/portal'`，而且因为被忽略也进不了版本库。
+/lib/
 *.tsbuildinfo
 .DS_Store

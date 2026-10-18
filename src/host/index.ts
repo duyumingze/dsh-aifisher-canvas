@@ -211,8 +211,20 @@ export function apply(ctx: Context) {
       name: 'canvas_control',
       description:
         'Operate the active AIFISHER infinite canvas. ' +
-        'First call action:"read" to obtain nodes, selection and current revision. ' +
-        'Then use action:"edit" with operations:[] to create/update/delete/connect nodes.',
+        'Shortest path is 3 calls: read (get revision + nodes) → edit (same revision + operations) → read (verify). ' +
+        'An operation is discriminated by "kind": ' +
+        'create{ref,type:"Image"|"Video"|"Audio"|"Text",x,y,title?,prompt?}, ' +
+        'update{nodeId,patch{title?,prompt?,x?,y?}}, ' +
+        'configure{nodeId,model,parameters}, delete{nodeId}, ' +
+        'connect{sourceId,targetId,sourcePort?}, disconnect{sourceId,targetId,targetPort?}, ' +
+        'group{ref,nodeIds,label}, ungroup{groupId}, renameGroup{groupId,label}, ' +
+        'arrange{nodeIds,columns}, duplicate{nodes[{nodeId,ref}],x,y}. ' +
+        'configure rules: "model" must exactly match the canvas catalog display name — create a node then read it back to learn the exact string (never guess); ' +
+        'every "parameters" key must be declared by that model or the whole edit fails with INVALID; ' +
+        'switching model resets any advanced parameter you omit (e.g. generateCount falls back to 1), so always pass model+parameters in the same call. ' +
+        'Generation is human-authorized by design: prepareGeneration only yields an awaiting-approval plan and the approve step is intentionally UI-only. ' +
+        'Your job is to prepare nodes/params/prompt and hand it over — never try to submit or bypass it. ' +
+        'Full contract and error codes: docs/canvas-agent-contract.md.',
       parameters: {
         action: {
           type: 'string',
@@ -227,7 +239,7 @@ export function apply(ctx: Context) {
         },
         /** edit/undo 必须带上一轮 read 返回的 revision（乐观并发令牌）。 */
         revision: { type: 'string' },
-        /** edit 的动作列表（create/update/configure/delete/connect/disconnect/group/…）。 */
+        /** edit 的动作列表（create/update/configure/delete/connect/disconnect/group/…）；字段契约见 docs/canvas-agent-contract.md。 */
         operations: { type: 'array' },
         /** focus / tasks 的目标节点。 */
         nodeIds: { type: 'array' },
