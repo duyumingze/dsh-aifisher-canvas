@@ -172,6 +172,25 @@ export function createCanvasStore(options: CanvasStoreOptions = {}) {
       return data.documents[id] ?? null;
     },
 
+    /**
+     * 按节点 id 反查它所在的项目（v1.51：`@[标题](aifisher-node:id)` 只带节点 id）。
+     *
+     * 节点 id 是画布生成的 UUID，全库唯一；这里按项目逐个找，命中即返回。
+     * 找不到（节点被删了 / 项目被删了）返回 null，调用方安静地跳过。
+     */
+    findNode(nodeId: string): { document: CanvasDocument; node: Record<string, unknown> } | null {
+      for (const document of Object.values(data.documents)) {
+        const node = (document.nodes ?? []).find(
+          (item): item is Record<string, unknown> =>
+            Boolean(item) &&
+            typeof item === 'object' &&
+            (item as { id?: unknown }).id === nodeId,
+        );
+        if (node) return { document, node };
+      }
+      return null;
+    },
+
     hasDocument(id: string): boolean {
       return Boolean(data.documents[id]);
     },

@@ -343,6 +343,49 @@ const KIND_LABELS: Readonly<Record<string, string>> = Object.freeze({
   text: '文本',
 });
 
+/**
+ * 自配 OpenAI 通道 → `SourceBlock`（v1.52）。
+ *
+ * 缺口背景：`/generation/sources` 原先只回方舟一张卡，而 `canvasCreationControl`
+ * 是靠这份 blocks 判断模型是否 configured —— 于是自配通道的模型（比如 Fisher 的
+ * GPT-Image-2.5-flare）在节点上手点能生成，agent 的 prepareGeneration 却恒 UNAVAILABLE。
+ *
+ * 现在每条通道合成一张 block：
+ *   - `source: "channel:<id>"`、`accountManaged: true`：设置页不会渲染密钥输入框和
+ *     「保存密钥」按钮，只显示通道名与模型目录；密钥仍然只在「OpenAI 通道」面板里管；
+ *   - 模型名用 `channelModelName()` 的**画布显示名** —— 节点上存的就是它，必须逐字对上；
+ *   - 一律 `configured: true`：通道存在且勾选了这条模型，就是可用的
+ *     （真正调用失败由 generate 阶段报错，不在这里预判）。
+ *
+ * **与生成确认无关**：审批仍然只在画布 UI 上（canvasCreationControl.approve 不暴露给
+ * canvas_control）。这里只是让「准备生成」能看到这些模型。
+ */
+function channelBlocks(channels: readonly CloudChannel[]): Record<string, unknown>[] {
+  return channels.map((channel) => {
+    const media = new Map<string, Array<Record<string, unknown>>>();
+    for (const entry of channelModelEntries([channel])) {
+      const models = media.get(entry.kind) ?? [];
+      models.push({
+        name: entry.name,
+        vision: 'unknown',
+        tier: 'standard',
+        variantLabel: KIND_LABELS[entry.kind] ?? null,
+        requiredSecrets: [],
+        configured: true,
+      });
+      media.set(entry.kind, models);
+    }
+    return {
+      source: `channel:${channel.id}`,
+      label: `${channel.label}（自配通道）`,
+      singleKey: false,
+      accountManaged: true,
+      secrets: [],
+      media: [...media.entries()].map(([kind, models]) => ({ kind, models })),
+    };
+  });
+}
+
 /** 私网/环回地址不探测（避免把 host 变成内网探针）。 */
 function isPrivateHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, '');
@@ -448,8 +491,11 @@ export async function handleSourceSettingsApi(input: {
       sendJson(res, 405, { error: 'method not allowed', code: 'METHOD_NOT_ALLOWED' });
       return true;
     }
-    // v1.13 起只有方舟一张卡片；用户自配端点走「OpenAI 通道」面板（另一条路由 + 另一块 UI）。
-    sendJson(res, 200, { blocks: [arkBlock(process.env)] });
+    // 方舟直连 + 用户自配的 OpenAI 通道（v1.52）。
+    // 后者是 canvas_creation 的「准备生成」能认出通道模型的前提（见 channelBlocks 的注释）；
+    // 用户自配端点仍走「OpenAI 通道」面板管理，这里只是合成只读的来源描述。
+    const channels = await readCloudChannels(deps.dataDir);
+    sendJson(res, 200, { blocks: [arkBlock(process.env), ...channelBlocks(channels)] });
     return true;
   }
 

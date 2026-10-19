@@ -265,7 +265,9 @@ export function CanvasShell({ onExit, renderSlot }: CanvasShellProps = {}) {
     React.createElement(
       'div',
       { 'data-dsh-aifisher-canvas': 'canvas-area', style: CANVAS_AREA_STYLE },
-      React.createElement(CanvasPanel, { onExit }),
+      // CanvasPanel 的 props 参数带默认值，createElement 推不出 P（详见
+      // src/canvas-ui/lib/react.ts 的 createElement 注释）；这里显式给 P。
+      React.createElement<{ onExit?: () => void }>(CanvasPanel, { onExit }),
     ),
     chatColumn,
     open ? null : React.createElement(CollapsedRail, { onOpen: () => setOpenPersisted(true) }),

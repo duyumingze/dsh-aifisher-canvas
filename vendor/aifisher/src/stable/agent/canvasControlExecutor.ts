@@ -80,7 +80,20 @@ export function createCanvasControlExecutor(getRuntime: () => Runtime | null) {
           if (!availableRef(operation.ref)) return { ok: false, code: 'INVALID' };
           const node = runtime.create(operation.type, { x: operation.x, y: operation.y }, runtime.projectId);
           node.title = operation.title || '';
-          node.prompt = operation.prompt || '';
+          // dsh-aifisher-canvas：Text 节点的正文是 textContent，prompt 是「转换模板」。
+          // 混用会让 agent 写入的文字出现在提示词框里、正文一片空白（下游也读不到）。
+          // ① 只给 prompt → 当正文；② 显式 text → 正文 + prompt 作模板。
+          if (node.type === 'Text') {
+            if (typeof operation.text === 'string') {
+              node.textContent = operation.text;
+              node.prompt = operation.prompt || '';
+            } else {
+              node.textContent = operation.prompt || '';
+              node.prompt = '';
+            }
+          } else {
+            node.prompt = operation.prompt || '';
+          }
           next.nodes.push(node);
           ids.set(operation.ref, node.id);
           created.push({ ref: operation.ref, id: node.id });
@@ -146,7 +159,20 @@ export function createCanvasControlExecutor(getRuntime: () => Runtime | null) {
             const patch = configureCanvasModel(next.nodes[index], operation.model, operation.parameters);
             if (!patch) return { ok: false, code: 'INVALID' };
             next.nodes = runtime.configure(next.nodes, id, patch);
-          } else if (operation.kind === 'update') next.nodes[index] = { ...next.nodes[index], ...operation.patch };
+          } else if (operation.kind === 'update') {
+            const current = next.nodes[index];
+            const fields: Partial<CanvasNode> & { text?: string } = { ...operation.patch };
+            if (typeof fields.text === 'string') {
+              // 显式 text：正文写入 textContent；prompt 留给转换模板。
+              if (current.type === 'Text') fields.textContent = fields.text;
+              delete fields.text;
+            } else if (current.type === 'Text' && typeof fields.prompt === 'string') {
+              // 只给 prompt（旧口径）：当正文改，避免同样落进提示词框。
+              fields.textContent = fields.prompt;
+              fields.prompt = '';
+            }
+            next.nodes[index] = { ...current, ...fields };
+          }
           else {
             next.nodes = deleteCanvasNodes(next.nodes, [id]);
             next.groups = next.groups.map(group => ({ ...group, nodeIds: group.nodeIds.filter(nodeId => nodeId !== id) }));

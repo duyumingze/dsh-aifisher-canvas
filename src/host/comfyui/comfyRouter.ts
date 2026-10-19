@@ -344,17 +344,19 @@ async function handleComfy(
         baseUrl: process.env.COMFYUI_URL?.trim() || 'http://127.0.0.1:8188',
       });
       sendJson(res, 200, {
-        ok: true,
+        // summary 里自带 ok（= 快照是否存在），必须先展开再显式写本次扫描的结果，
+        // 否则「扫描失败但读到了旧快照」会被覆盖成 ok:true。
         ...widgetSnapshotSummary(snapshot),
+        ok: true,
         classes: snapshot.classes,
       });
     } catch (error) {
       const cached = readWidgetSnapshot();
       sendJson(res, 200, {
+        ...widgetSnapshotSummary(cached),
         ok: false,
         code: 'COMFY_UNAVAILABLE',
         error: error instanceof Error ? error.message : '扫描 ComfyUI 失败',
-        ...widgetSnapshotSummary(cached),
         classes: cached?.classes ?? {},
       });
     }

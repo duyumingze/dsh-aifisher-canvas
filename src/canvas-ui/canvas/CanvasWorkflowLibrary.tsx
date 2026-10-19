@@ -26,6 +26,7 @@
  *    产物里 React 有两份副本，用错那分量 React 19 不报错也不渲染（整块面板会消失）。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import { createPortal } from 'react-dom';
 import {
   CircleCheckIcon,
@@ -140,7 +141,7 @@ function fileToDataUrl(file: File): Promise<string> {
 }
 
 export function CanvasWorkflowLibrary(react: Runtime, props: Props) {
-  const h = react.createElement;
+  const h = createElement(react);
   const store = react.useSyncExternalStore(
     subscribeWorkflowLibraryRequest,
     workflowLibrarySnapshot,

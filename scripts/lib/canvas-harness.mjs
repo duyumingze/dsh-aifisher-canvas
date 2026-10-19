@@ -85,11 +85,31 @@ export async function startHost(options = {}) {
   };
   /**
    * 直接派发一个宿主事件（绕过 cordis，直接调插件注册的监听器）。
-   * 返回第一个非 undefined 的返回值 —— `agent/pre-step` 这种瀑布用它拿回决定。
+   *
+   * 两种形状：
+   *   - 第二个入参是函数 → 按**瀑布**跑（真实 cordis 的语义）：每个监听器拿到
+   *     `(payload, next)`，`next()` 继续往下一个监听器走，最后一个落到调用方给的那个
+   *     `next`。`agent/pre-step` 靠这个形状改消息列表 —— v1.51 起有多个 pre-step
+   *     监听器（上下文提示 + @画布节点快照），必须真的串起来才测得到叠加结果。
+   *   - 其它（`agent/assistant-stream` / `session/event` …）→ 仍然逐个独立调用，
+   *     返回第一个非 undefined 的返回值（这些事件的第二个入参本身就是数据，不是 next）。
    */
   const emit = async (name, ...args) => {
+    const list = [...(listeners.get(name) ?? [])];
+    if (typeof args[1] === 'function') {
+      const run = async (index, payload) => {
+        if (index >= list.length) return args[1]();
+        try {
+          return await list[index](payload, () => run(index + 1, payload));
+        } catch (error) {
+          logs.push(`error listener ${name}: ${error instanceof Error ? error.message : error}`);
+          return undefined;
+        }
+      };
+      return run(0, args[0]);
+    }
     const results = [];
-    for (const listener of [...(listeners.get(name) ?? [])]) {
+    for (const listener of list) {
       try {
         results.push(await listener(...args));
       } catch (error) {

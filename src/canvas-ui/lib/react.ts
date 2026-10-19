@@ -46,3 +46,28 @@ export const jsx = h;
 export const jsxs = h;
 export const jsxDEV = h;
 export { ReactRuntime as React };
+
+/**
+ * 画布组件的「宽松元素工厂」——只在类型层放宽 props，运行时仍是传入的那份
+ * `react.createElement`（组件签名里的注入 React）。
+ *
+ * 为什么需要它：
+ *   1. 画布组件大量用 `data-fisherai-*` 身份属性当回归/真机选择器（结构契约见
+ *      docs/canvas-ui-shadcn.md），但 React 的组件 props 类型不认任意 `data-*` 键，
+ *      `react.createElement(Button, { 'data-…': '…' })` 会被 TS2769 拒绝；
+ *   2. `react.createElement(Component, props)` 对「带默认值的可选参数组件」推不出
+ *      P（TS 会推成 `{}`），props 里每个字段都变成多余属性。
+ * 这里只放行「运行时合法、类型上多余」的 props，不改运行时。
+ */
+export type CanvasCreateElement = (
+  type: unknown,
+  props?: Record<string, unknown> | null,
+  ...children: unknown[]
+) => ReactRuntime.ReactElement;
+
+/** 组件签名里注入的 React 只需要一个 createElement（各文件都收窄成 Pick<typeof React, …>）。 */
+export type CanvasRuntimeLike = { createElement: unknown };
+
+export function createElement(react: CanvasRuntimeLike): CanvasCreateElement {
+  return react.createElement as unknown as CanvasCreateElement;
+}

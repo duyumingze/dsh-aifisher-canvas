@@ -1205,10 +1205,30 @@ console.log('\n=== 通道表：读取 / 探测 / 保存 ===');
   delete process.env.AIFISHER_CLOUD_BASE_URL;
 
   const sources = (await host.hostApi('GET', '/generation/sources')).json();
+  const sourceBlocks = sources.blocks ?? [];
+  const channelSources = sourceBlocks.filter((block) => String(block.source).startsWith('channel:'));
   check(
-    '闭源服务来源清单只剩方舟卡片（不再有「自配云端端点」卡片）',
-    sources.blocks?.length === 1 && sources.blocks[0].source === 'ark',
-    JSON.stringify(sources.blocks?.map((block) => block.source)),
+    '闭源服务来源清单：方舟卡片仍在，自配通道以只读块出现（v1.52）',
+    sourceBlocks[0]?.source === 'ark' &&
+      channelSources.length >= 1 &&
+      channelSources.every(
+        (block) =>
+          block.accountManaged === true &&
+          Array.isArray(block.secrets) &&
+          block.secrets.length === 0,
+      ),
+    JSON.stringify(sourceBlocks.map((block) => block.source)),
+  );
+  check(
+    '通道块里的模型名是画布显示名且 configured（Agent 准备生成要用它逐字匹配）',
+    channelSources.some((block) =>
+      (block.media ?? []).some(
+        (media) =>
+          media.kind === 'image' &&
+          media.models.some((model) => typeof model.name === 'string' && model.name.length > 0 && model.configured === true),
+      ),
+    ),
+    JSON.stringify(channelSources.map((block) => block.media?.map((media) => media.models?.map((model) => model.name)))).slice(0, 240),
   );
 
   // ---- 6. 删除 ------------------------------------------------------------

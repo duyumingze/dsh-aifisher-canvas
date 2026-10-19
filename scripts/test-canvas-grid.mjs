@@ -119,6 +119,27 @@ const base = gridLayer?.querySelector('.canvas-grid-cross.is-base') ?? null;
 const highlight = gridLayer?.querySelector('.canvas-grid-cross.is-highlight') ?? null;
 check('两层十字星都在（静态底纹 + 提亮层）', !!base && !!highlight);
 
+// ---- v1.48：三层嵌套矩阵（Blender 式：大矩阵包小矩阵，缩小时小的先消失） ----
+const tierElements = gridLayer ? [...gridLayer.querySelectorAll('[data-canvas-grid-tier]')] : [];
+check('三层嵌套矩阵都在（minor → major → super）',
+  tierElements.length === 3,
+  tierElements.map((el) => el.getAttribute('data-canvas-grid-tier')).join(','));
+check('网格层自报三层间距 = 24,120,600（后一层正好包住前一层）',
+  gridLayer?.getAttribute('data-canvas-grid-tiers') === '24,120,600',
+  gridLayer?.getAttribute('data-canvas-grid-tiers') ?? '');
+check('每层都带 base + highlight 两层星号（提亮也按层叠）',
+  tierElements.every((el) =>
+    !!el.querySelector('.canvas-grid-cross.is-base') &&
+    !!el.querySelector('.canvas-grid-cross.is-highlight')),
+  tierElements.map((el) => el.querySelectorAll('.canvas-grid-cross').length).join(','));
+check('每颗大星都压在小星上（120 / 24 = 5、600 / 120 = 5 —— 同心嵌套）',
+  tierElements.length === 3 &&
+    Number(tierElements[1].getAttribute('data-canvas-grid-tier-spacing')) ===
+      5 * Number(tierElements[0].getAttribute('data-canvas-grid-tier-spacing')) &&
+    Number(tierElements[2].getAttribute('data-canvas-grid-tier-spacing')) ===
+      5 * Number(tierElements[1].getAttribute('data-canvas-grid-tier-spacing')),
+  tierElements.map((el) => el.getAttribute('data-canvas-grid-tier-spacing')).join(','));
+
 // ---- v1.8 规格：24px 间距 + 7×1 小十字星 + 1:1 平铺块（参考图量出来的数字） ----
 check('网格层自报间距 = 24px（参考图量出来的规格）',
   gridLayer?.getAttribute('data-canvas-grid-spacing') === '24',
@@ -147,6 +168,13 @@ check('网格层自报墨色 = #ffffff@0.19（深色画布上必须是亮色）'
   check('格子边长 = 24px × zoom（只有一个乘子，不乘 dpr）',
     /background-size:\s*calc\(24px \* var\(--canvas-grid-zoom\)\)/.test(styleText),
     (styleText.match(/background-size:\s*calc\(24px[^;]*;/) ?? ['(未找到规则)'])[0]);
+  // v1.48：三层各有一条「间距 × zoom」的规则，所有乘子都只有 zoom 一个。
+  check('大矩阵的边长也按自己的间距铺（120px × zoom）',
+    styleText.includes('background-size: calc(120px * var(--canvas-grid-zoom))'),
+    (styleText.match(/background-size:\s*calc\(120px[^;]*;/) ?? ['(未找到规则)'])[0]);
+  check('最大一层同样按自己的间距铺（600px × zoom）',
+    styleText.includes('background-size: calc(600px * var(--canvas-grid-zoom))'),
+    (styleText.match(/background-size:\s*calc\(600px[^;]*;/) ?? ['(未找到规则)'])[0]);
   check('dpr 不参与任何几何计算（样式表里没有 var(--canvas-grid-dpr)）',
     !styleText.includes('var(--canvas-grid-dpr)'));
   check('点阵锚在画布原点（没有 background-attachment: fixed，缩放时不相对节点漂移）',
@@ -155,8 +183,15 @@ check('网格层自报墨色 = #ffffff@0.19（深色画布上必须是亮色）'
     /background-image:\s*url\("data:image\/svg\+xml/.test(styleText));
   check('十字图层被定为 fixed 定位的重复背景',
     /\.canvas-grid-cross\s*\{[^}]*background-repeat:\s*repeat/.test(styleText));
-  check('样式表按主题分色（深浅两套星号）',
-    styleText.includes("html[data-af-theme='light']") && styleText.includes("html[data-af-theme='light'] .af-canvas-mount [data-canvas-grid='true'] .canvas-grid-cross.is-base"));
+  check('样式表按主题分色（深浅两套星号，每层各一套）',
+    styleText.includes("html[data-af-theme='light']") &&
+      styleText.includes(
+        "html[data-af-theme='light'] .af-canvas-mount [data-canvas-grid='true'] " +
+          "[data-canvas-grid-tier='minor'] .canvas-grid-cross.is-base",
+      ));
+  check('样式表带三层各自的显隐规则（wrapper 透明度，JS 按屏幕间距写）',
+    /\[data-canvas-grid-tier\]\s*\{[^}]*opacity:\s*0/.test(styleText) ||
+      /\.canvas-grid-tier\s*\{[^}]*opacity:\s*0/.test(styleText));
   check('壁纸打开时隐藏网格（不与背景图打架）',
     /:has\(\.af-wallpaper\)\s*\[data-canvas-grid='true'\]/.test(styleText));
 
@@ -173,8 +208,9 @@ check('网格层自报墨色 = #ffffff@0.19（深色画布上必须是亮色）'
     }
     return found;
   })();
-  // 四张图 = 深/浅主题的基础层 + 深/浅主题的提亮层
-  check('一共四张写死了颜色的星号图（深浅两套 × 基础/提亮）', tiles.length === 4, String(tiles.length));
+  // 12 张图 = 3 层 × 深浅主题 × 基础/提亮；顺序按 GRID_TIERS：minor 4 张、major 4 张、super 4 张。
+  check('一共 12 张写死了颜色的星号图（3 层 × 深浅两套 × 基础/提亮）',
+    tiles.length === 12, String(tiles.length));
   check('SVG 里没有 currentColor（图片文档不继承宿主 color，会解析成黑色 → 看不见）',
     tiles.every((svg) => !svg.includes('currentColor')),
     tiles.filter((svg) => svg.includes('currentColor')).length + ' 张用了 currentColor');
@@ -184,6 +220,14 @@ check('网格层自报墨色 = #ffffff@0.19（深色画布上必须是亮色）'
   check('深色主题墨色是亮色 + 19% 不透明（参考图量出来的 alpha≈0.19）',
     /stroke="#ffffff" stroke-opacity="0.19"/.test(String(tiles[0] ?? '')),
     String(tiles[0] ?? '').slice(0, 140));
+  check('大矩阵的星号更大更亮（11px / alpha 0.26；同尺寸同墨色就分不出层次）',
+    /stroke="#ffffff" stroke-opacity="0.26"/.test(String(tiles[4] ?? '')) &&
+      String(tiles[4] ?? '').includes('M55.5 60.5H65.5'),
+    String(tiles[4] ?? '').slice(0, 160));
+  check('最大一层的星号再大一档（15px / alpha 0.32）',
+    /stroke="#ffffff" stroke-opacity="0.32"/.test(String(tiles[8] ?? '')) &&
+      String(tiles[8] ?? '').includes('M293.5 300.5H307.5'),
+    String(tiles[8] ?? '').slice(0, 160));
 
   const tile = (() => {
     const svg = tiles[0] ?? '';
@@ -200,6 +244,12 @@ check('网格层自报墨色 = #ffffff@0.19（深色画布上必须是亮色）'
   check('平铺块 = 间距（width/viewBox 都是 24）',
     tile?.width === '24' && tile?.viewBox === '24 24',
     `${tile?.width} / ${tile?.viewBox}`);
+  check('三层的平铺块分别 = 24 / 120 / 600（1:1 绘制，星号不被拉伸）',
+    tiles.length === 12 &&
+      tiles.slice(0, 4).every((svg) => /width="24"/.test(svg) && /viewBox="0 0 24 24"/.test(svg)) &&
+      tiles.slice(4, 8).every((svg) => /width="120"/.test(svg) && /viewBox="0 0 120 120"/.test(svg)) &&
+      tiles.slice(8, 12).every((svg) => /width="600"/.test(svg) && /viewBox="0 0 600 600"/.test(svg)),
+    tiles.map((svg) => /width="([\d.]+)"/.exec(svg)?.[1] ?? '?').join(','));
   check('标记是一横一竖的十字（H + V），不是方块点',
     tile?.cross === true, String(tile?.cross));
   check('星号线宽 1px（更细的小星号，参考图的墨色 alpha≈0.19 不变）',
@@ -303,6 +353,67 @@ await settle(60);
   check('dpr=2 时网格平移速度仍是 -160px（不是 -320px）',
     retina !== null && Math.abs(retina.speed - -160) < 0.01,
     retina ? `speed=${retina.speed}（乘了 dpr 会是 ${(-160 * 2).toFixed(0)}）` : '(skip)');
+}
+
+// ---------------------------------------------------------------- 2c) Blender 式三层显隐（v1.48）
+
+/**
+ * 用户原话：「画布背景的星型矩阵，缩小画布就密密麻麻的，能不能参考 blender 的，
+ * 大的矩阵包裹小的矩阵，缩放到一点程度后小的矩阵就消失」。
+ *
+ * 判据是**屏幕上的格子间距**（spacing × zoom）：24×zoom < 8px 时 minor 整层隐藏；
+ * 120×zoom 接棒；缩到 0.05 时只剩 600px 那层（屏幕间距 30px），画面不会变成噪声。
+ */
+{
+  const opacityOf = (probe, id) =>
+    (probe?.tiers ?? []).find((tier) => tier.id === id)?.opacity ?? null;
+  const styleOpacityOf = (id) =>
+    Number.parseFloat(
+      (tierElements.find((el) => el.getAttribute('data-canvas-grid-tier') === id)?.style.opacity) ??
+        'NaN',
+    );
+  const atZoom = async (zoom) => {
+    setViewportTransform(`translate3d(0px, 0px, 0) scale(${zoom})`);
+    await settle(80);
+    return canvasApp.canvasGridReport();
+  };
+
+  const near = await atZoom(1);
+  check('zoom 1：小矩阵亮着（24px 间距）',
+    (opacityOf(near, 'minor') ?? 0) > 0.99, JSON.stringify(near?.tiers ?? null));
+  check('zoom 1：大矩阵也亮着（120px 间距，压在小星上）',
+    (opacityOf(near, 'major') ?? 0) > 0.99, String(opacityOf(near, 'major')));
+  check('zoom 1：最大一层不出现（600px 屏幕间距太大）',
+    (opacityOf(near, 'super') ?? 1) < 0.001, String(opacityOf(near, 'super')));
+  check('显隐真的写到了 DOM 的 opacity 上（不是只算在报告里）',
+    Math.abs(styleOpacityOf('minor') - 1) < 0.01,
+    `style.opacity=${styleOpacityOf('minor')}`);
+
+  const mid = await atZoom(0.2);
+  check('zoom 0.2：小矩阵已经消失（24×0.2 = 4.8px，缩小后不再密密麻麻）',
+    (opacityOf(mid, 'minor') ?? 1) < 0.001, String(opacityOf(mid, 'minor')));
+  check('zoom 0.2：大矩阵接棒（120×0.2 = 24px，仍是原来的疏密观感）',
+    (opacityOf(mid, 'major') ?? 0) > 0.99, String(opacityOf(mid, 'major')));
+  check('zoom 0.2：更大一层补进来（600×0.2 = 120px）',
+    (opacityOf(mid, 'super') ?? 0) > 0.99, String(opacityOf(mid, 'super')));
+  check('诊断里报出每层的屏幕间距（minor→4.8 / major→24 / super→120）',
+    (mid?.tiers ?? []).map((tier) => tier.screenSpacing).join(',') === '4.8,24,120',
+    JSON.stringify((mid?.tiers ?? []).map((tier) => [tier.id, tier.screenSpacing, tier.opacity])));
+
+  const far = await atZoom(0.05);
+  check('zoom 0.05：只剩最大一层（600×0.05 = 30px），画面不会被星号填满',
+    (opacityOf(far, 'minor') ?? 1) < 0.001 &&
+      (opacityOf(far, 'major') ?? 1) < 0.001 &&
+      (opacityOf(far, 'super') ?? 0) > 0.99,
+    JSON.stringify(
+      (far?.tiers ?? []).map((tier) => [tier.id, tier.screenSpacing, tier.opacity]),
+    ));
+  check('最小缩放 0.05 下仍有一层可见（不会整块空白）',
+    (far?.tiers ?? []).some((tier) => tier.visible === true && tier.opacity > 0.99),
+    JSON.stringify((far?.tiers ?? []).filter((tier) => tier.visible)));
+
+  setViewportTransform('translate3d(-120px, 64px, 0) scale(1.5)');
+  await settle(80);
 }
 
 // ---------------------------------------------------------------- 3) 鼠标交互（真实命中路径）

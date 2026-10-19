@@ -30,6 +30,11 @@ import * as React from 'react';
 import { CanvasChatDock, CANVAS_CHAT_SLOT } from './CanvasChatDock';
 import { CanvasShell } from './CanvasShell';
 import { CreativeLibraryPanel } from './library/CreativeLibraryPanel';
+import {
+  CANVAS_NODE_SOURCE,
+  CanvasNodeReferenceChip,
+  installCanvasNodeReferences,
+} from './canvasReferences';
 
 export const name = 'dsh-aifisher-canvas-client';
 export const inject = ['slots'];
@@ -206,6 +211,16 @@ export function apply(ctx: Context & { slots: SlotsLike }) {
   );
   // 会话栏本体：注册进上面声明的子槽位（宿主按 session-maybe 绑定当前会话）。
   registerSlot(CANVAS_CHAT_SLOT, { name: CANVAS_CHAT_SLOT }, CanvasChatDock);
+
+  // ---- 画布节点 @ 引用（v1.51）：候选来源 + 已发送消息里的 chip ----
+  // 两个都 fail-open：没有 inputTriggers / uiConversation 时只是少一组 @ 候选，
+  // 画布面板与对话照常工作（installCanvasNodeReferences 内部自己吞异常）。
+  installCanvasNodeReferences(ctx);
+  registerSlot(
+    'conversation.user.text.node',
+    { name: 'conversation.user.text.node', key: CANVAS_NODE_SOURCE, priority: 100 },
+    CanvasNodeReferenceChip,
+  );
 
   // ---- 素材库：侧边栏图标 + main 面板 ----
   registerSlot(

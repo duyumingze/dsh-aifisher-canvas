@@ -25,6 +25,7 @@
  *    用错那份 React 19 不报错也不渲染（整个舞台会消失）。见 docs/canvas-ui-shadcn.md。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import { createPortal } from 'react-dom';
 import {
   ArrowLeft as ArrowLeftIcon,
@@ -120,7 +121,7 @@ const TOOLS: Array<{ value: AnnotationTool; label: string; icon: unknown }> = [
 ];
 
 export function ImageAnnotationStage(react: Runtime, props: AnnotationStageProps) {
-  const h = react.createElement;
+  const h = createElement(react);
   const overlay = useCanvasOverlayBox(react);
   const rootRef = react.useRef<HTMLDivElement>(null);
   const stageRef = react.useRef<HTMLDivElement>(null);

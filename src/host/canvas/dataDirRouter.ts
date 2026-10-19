@@ -71,20 +71,22 @@ export async function handleDataDirApi(input: DataDirApiInput): Promise<boolean>
       }
       writeDataDirPointer(target.directory);
       sendJson(res, 200, {
+        // 先铺状态再写「这次操作确实需要重启」：dataDirStatus 里也有一个
+        // restartRequired（按 active/pending 算），展开放后面会把它覆盖掉。
+        ...dataDirStatus(activeDir),
         status: 'pending-restart',
         restartRequired: true,
         migration,
-        ...dataDirStatus(activeDir),
       });
       return true;
     }
     if (method === 'DELETE') {
       const removed = clearDataDirPointer();
       sendJson(res, 200, {
+        ...dataDirStatus(activeDir),
         status: 'pending-restart',
         restartRequired: true,
         removed,
-        ...dataDirStatus(activeDir),
       });
       return true;
     }

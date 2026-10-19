@@ -12,7 +12,9 @@
 > **v1.42 项目归档**（头部「项目归档」入口 → 面板里导出 `.fisherai` / 导入备份，
 > 项目看板头部另有「导入项目」按钮；导出会直接写到本机下载目录并回绝对路径）；
 > **v1.43 项目数据目录**（设置 → 存储 → 项目数据目录：把插件的整个数据目录换到别的盘，
-> 写指针 + 重启 DSH 生效，可选「把现有数据复制过去」）。
+> 写指针 + 重启 DSH 生效，可选「把现有数据复制过去」）；
+> **v1.46 补完宫格裁剪**（宫格裁剪舞台换成同一套 nova 工作台，几何/切线/导出仍复用 vendor 纯函数；
+> 全景 / 角度 / 生成全景继续交给 vendor）。
 > 其余画面（节点框内部、其它十几个对话框）仍沿用 AIFISHER 原样，后续可分批迁。
 
 ## 一、整体做法（为什么这么接）
@@ -133,6 +135,7 @@ Radix 默认 portal 到 `document.body`。画布的 shadcn 变量只落在 `.af-
 | 端口发光的诊断读数（v1.25） | `window.__FISHERAI_PORT_GLOW__()` → `{ bound, active, targets, buttons, paints, pointer }` | `browser-check`（BROWSER_DEBUG=1 时打印，用来分清「没绑定 / 没触发 / 画了但没量到」） |
 | 图片编辑工作台（v1.26） | 根 `role="dialog"` + `aria-label="图片编辑"` + `data-fisherai-image-studio="editor"`；工具 `data-fisherai-image-tool="crop\|mask\|brush\|compose"`；保存 `data-fisherai-image-save="studio"`（aria-label「保存为新图片」）；撤销/重做 aria-label「撤销编辑」「重做编辑」；版本 `data-fisherai-image-version`；尺寸 `data-fisherai-image-dimensions`；状态 `data-fisherai-image-status`；素材项 `data-fisherai-image-source="<节点id>"` | `test:canvas-ui`、`browser-check` image-editor / image-saved 场景 |
 | 裁剪舞台（v1.26） | 根 `data-fisherai-image-workbench="crop"`；选区画布 `data-fisherai-crop-canvas`（aria-label「裁剪选择区域」）；比例 `data-fisherai-crop-ratio="Original\|Free\|1:1\|…"` + `aria-pressed`；保存 `data-fisherai-image-save="crop"`（「应用裁剪」） | `browser-check` image-editor 场景（真拖框 → 量 256×192） |
+| 宫格裁剪舞台（v1.46） | 根 `role="dialog"` + `aria-label="宫格裁剪"` + `data-fisherai-image-workbench="grid"`；选区画布 `data-fisherai-crop-canvas`（aria-label「宫格裁剪选择区域」）；预设 `data-fisherai-grid-crop-preset="2x2\|3x3\|3x4\|4x3\|1x4\|4x1"` + `aria-pressed`；行列读数 `data-fisherai-grid-crop-columns` / `-rows`（+「减少/增加横向/竖向分割」）；间隙滑杆 `data-fisherai-grid-crop-row-gap` / `-column-gap`；比例 `data-fisherai-grid-crop-ratio` + `aria-pressed`；导出顺序 `data-fisherai-grid-crop-order="row\|column\|snake\|reverse"` + `aria-pressed`；导出序号 `data-fisherai-grid-crop-selection`（aria-label「导出格子序号」）；张数 `data-fisherai-grid-crop-count`；单格 `data-fisherai-grid-crop-cell`；保存 `data-fisherai-image-save="grid"`（aria-label=保存宫格裁剪，文案「保存 N 张」） | `test:canvas-ui`（结构契约）、`browser-check` image-grid 场景（真拖切线改单格尺寸 → 3×3 → 序号 1,3 → 保存出 2 个媒体节点） |
 | 标注 / 蒙版舞台（v1.26） | 根 `data-fisherai-image-workbench="annotation"`；工具 `data-fisherai-annotation-tool="brush\|eraser\|rectangle\|circle\|arrow\|line"`；绘制区 `data-fisherai-annotation-canvas`（aria-label「标注绘制区域」）；颜色 `data-fisherai-annotation-color`；标准/遮罩 `data-fisherai-annotation-mask`；保存 `data-fisherai-image-save="annotation"`（aria-label 取 `saveLabel`：独立入口「保存」/ studio 内「应用编辑」） | `test:canvas-ui`、`browser-check` image-annotate 场景（真画一笔 → 「1 笔标注」） |
 | 工作流节点面板（v1.28） | 左栏按钮 `aria-label="工作流节点"` + `data-fisherai-workflow-node-trigger`（**不再**接 `onAddClick` —— 那正是「点了像画布右键菜单」的根因）；面板根 `role="dialog"` + `aria-label="工作流节点"` + `data-fisherai-workflow-node-panel`（带 `data-fisherai-workflow-node-count`）；卡片 `data-fisherai-workflow-node-item="<工作流id>"` + `data-fisherai-workflow-node-cover-state="custom\|placeholder"`；封面 `data-fisherai-workflow-node-cover`（有图是 `<img>`，没图是 `="placeholder"` 的占位 div）；搜索框 `data-fisherai-workflow-node-search`（aria-label「搜索工作流」）；空态 `data-fisherai-workflow-node-empty`；提示条 `data-fisherai-workflow-node-notice="ok\|error"`；隐藏 file input `data-fisherai-workflow-node-cover-input` | `test:workflow-library`（jsdom 真点真传）、`verify:workflow-library`（真机：点开的是面板而不是 role=menu 的右键菜单、卡片封面有真高度、配图 POST/GET/DELETE 往返） |
 | 工作流节点（卡片按钮 aria） | 「配图」「清除配图」；头部「刷新工作流清单」「关闭工作流节点」；底部与空态里的「打开工作流配置」 | `test:workflow-library` |
@@ -144,6 +147,7 @@ Radix 默认 portal 到 `document.body`。画布的 shadcn 变量只落在 `.af-
 | 项目归档接口（v1.42） | `GET /workflows/<id>/backup`（下载形态，`Content-Disposition` + RFC 5987 文件名）、`GET /workflows/<id>/backup/info`（规模预览，只 stat 不读内容）、`POST /workflows/<id>/backup/save`（body `{directory?}`，写本机目录，回执给绝对路径）、`POST /workflows/restore`（`application/json` body `{path}` = 本机路径；其它 Content-Type = 原始归档字节；旧版 `.json` 画布文档也认，回执带 `legacy:true`）。导出目录 = **素材下载目录**（`downloads.json`），且拒绝相对路径 / 指进素材目录 | `test:project-archive` 的 host 段（四种错误码 + 同名不覆盖 + 素材改写） |
 | 项目数据目录面板（v1.43） | 挂在 **设置 → 存储** 分区（宿主 = vendor 那页的 `[data-fisherai-settings-page="storage"]`，与「下载目录」那张卡同一个 div）：根 `[data-fisherai-data-dir="panel"]`（带 `data-fisherai-data-dir-overridden="true\|false"` / `-restart`）；当前目录读数 `[data-fisherai-data-dir-current]`、默认目录 `[data-fisherai-data-dir-default]`、状态 `[data-fisherai-data-dir-status]`；输入框 `aria-label="项目数据目录"` + `[data-fisherai-data-dir-input]`；按钮 aria-label = 应用数据目录 / 恢复默认数据目录 / 刷新数据目录；勾选 `aria-label="复制现有数据"` + `[data-fisherai-data-dir-migrate]`；提示 `[data-fisherai-data-dir-notice="ok\|error"]`。**文案不许说「已切换」**：host 写指针、重启 DSH 才生效 | `test:data-dir`（jsdom：真开设置 → 存储 → 面板读数 → 相对路径报错 → 合法路径应用 → 恢复默认）、`test:data-dir` 的 host 段（五条边界 + 复制 + 重启语义） |
 | 项目数据目录接口（v1.43） | `GET/POST/DELETE /api/aifisher/canvas/data-dir`；指针固定是 `<默认数据目录>/data-dir.json`；校验绝对路径 / 不是文件 / 不是当前或默认目录 / 不互为父子；复制只复制不覆盖；回执一律 `restartRequired` | `test:data-dir` |
+| 节点搜索（v1.10，v1.44 修交互） | 面板根 `role="dialog"` + `data-fisherai-node-search-panel`（带 `-state` / `-active` / `-count` / `-query`）；输入框 `data-fisherai-node-search-input`；候选 `data-fisherai-node-search-item` + `data-command-id`；工具栏入口 `data-fisherai-node-search-trigger`；空态 `data-fisherai-node-search-empty`。**建节点是 Blender 式「新建并移动」**：确认（Enter / 点选）→ 节点落在光标处 → 跟随鼠标 → 下一次左键放下（这一次 pointerdown 由 vendor 桥吞掉）。派发的事件是 `fisherai:add-canvas-node`，`detail.place === true` 才跟随（工作流库等其它调用方不传，行为不变） | `test:node-search`（一次 Enter 只建一个节点、跟随位移、左键放下后不再跟手、↑↓ 一次一格）、`browser-check` node-search 场景 |
 
 ### 顶部重排（v1.36）：头部被画布盖住的老 bug、返回项目库、ComfyUI 胶囊左移、任务队列上移
 
@@ -415,10 +419,11 @@ dialogs/imageAnnotationDrawing  renderAnnotations（含遮罩的 destination-out
 | 部件 | 谁实现 | 说明 |
 |---|---|---|
 | 图片编辑首页（工具 / 版本 / 素材 / 保存） | canvas-ui `CanvasImageStudio.tsx` | mode==='editor'；versions 时间线（上与上游同款：past/present/future + 50 上限） |
-| 裁剪舞台 | canvas-ui `ImageCropStage.tsx` | 单帧裁剪 + 7 个比例；宫格切线不在这里 |
+| 裁剪舞台 | canvas-ui `ImageCropStage.tsx` | 单帧裁剪 + 7 个比例；宫格切线在宫格舞台 |
+| 宫格裁剪舞台（v1.46） | canvas-ui `ImageGridCropStage.tsx` | 宫格预设 / 切线拖动 / 间隙 / 导出顺序 / 导出序号；`exportGridPieces`（`imageWorkbench.ts`）负责切图与白底 |
 | 标注 / 蒙版舞台 | canvas-ui `ImageAnnotationStage.tsx` | 6 个工具、8 个常用色、粗细/不透明度、缩放平移、Ctrl+S/Z |
 | 独立标注器（节点工具条「标注」） | canvas-ui `CanvasImageAnnotation.tsx` | 复用同一个舞台，多一个「标准 / 遮罩」切换 |
-| 宫格裁剪 / 全景 / 角度 / 生成全景 | **vendor** | `mode !== 'editor'` 时整棵树交回 `Components.ImageCrop` |
+| 全景 / 角度 / 生成全景 | **vendor** | 依赖 three.js 全景球采景与角度草稿，`mode !== 'editor' && mode !== 'grid'` 时整棵树交回 `Components.ImageCrop` |
 | 组合（多图层） | **vendor** `CompositePreview` | 工作台只负责以选中的素材唤起它 |
 
 两个坑（都在 `imageWorkbenchOverlay.ts` 的注释里）：
@@ -432,13 +437,33 @@ dialogs/imageAnnotationDrawing  renderAnnotations（含遮罩的 destination-out
 标注的指针处理有一个必须保留的细节：`setPointerCapture` 用 try/catch 包着 —— 合成事件
 （回归/真机脚本派发的 PointerEvent）没有真实指针，捕获会抛 `NotFoundError`，真实鼠标不会。
 
+#### 宫格裁剪（v1.46）：只换壳，切图语义一字没动
+
+用户 2026-10-19 原话：「画布宫格裁剪ui还没有更新」。v1.26 换图片编辑族时，`mode !== 'editor'`
+整棵交回 vendor，于是宫格裁剪（工具条里每天都点得到的那个）还是上游那圈「胶囊里塞 fieldset +
+原生 select + 手写 range」的外观。
+
+- **新舞台** `ImageGridCropStage.tsx`：header / toolbar / stage / footer 四段，与 `ImageCropStage`
+  同一套变量与间距；工具条两行 —— 第一行宫格预设（2×2…4×1）+ 横向/竖向分割步进器 + 恢复等分 + 比例，
+  第二行上下/左右间隙滑杆 + 导出顺序 + 导出序号。**顺序改用按钮组，不用 Radix Select**
+  （见上面第 2 条坑）。
+- **切图语义复用上游**：`cropOutputRects`（切线/间隙 → 源图像素）、`moveCropCut`（切线拖动的
+  24px 最小间距）、`equalCuts`、`gridExportIndices`（顺序 + `1,3,5-8` 语法 + 错误文案）。
+  真正落像素的是 `imageWorkbench.ts` 的 `exportGridPieces`：**行优先出一遍，宫格时每块先铺白底**
+  ——与上游 grid 分支逐条对齐，导出顺序由调用方再重排（`row`/`column` 保留原位，画布按它排节点）。
+- **默认态改了**：上游打开是 1×1 + 居中 80% 选区（要先挑预设才看得到格子），nova 版默认
+  **2×2 + 选区铺满整张图**；改行列数仍走「重新等分 + 铺满原图」（与上游 `restoreGrid` 一致）。
+- **能力一个不丢**：拖切线微调单行/单列、间隙（源图像素 0–100）、逐行/逐列/蛇形/倒序、
+  导出序号、恢复等分、比例锁定、保存后每格成为画布上的一张图（`useCanvasCropSave` 原样）。
+- 全景 / 角度 / 生成全景仍交给 vendor：它们要 three.js 的全景球与角度草稿，不是同一类画面。
+
 ## 四、怎么改 / 怎么验
 
 ```bash
 pnpm sync:shadcn          # 重新拉 shadcn registry 组件（幂等）
 pnpm build                # clean → vendor → build:css → tsdown
-pnpm test                 # 27 套（含 test:canvas-ui、test:workflow-library 与 verify:ui）
-node scripts/browser-check.mjs   # 真机几何/视觉（需本机 Chrome；22 场景）
+pnpm test                 # 29 套（含 test:canvas-ui、test:workflow-library 与 verify:ui）
+node scripts/browser-check.mjs   # 真机几何/视觉（需本机 Chrome；25 场景）
 node scripts/verify-live-dock.mjs   # 真机验收右侧会话栏（滚动契约 + v1.41 输入区贴底 A/B）
 node scripts/verify-live-workflow-library.mjs   # 真机验收「工作流节点」面板 + 配图（需 DSH 在跑）
 ```
@@ -455,7 +480,9 @@ node scripts/verify-live-workflow-library.mjs   # 真机验收「工作流节点
   —— 工具条本轮只做了功能（拿掉 HD、加扩图面板），视觉还是上游那一套；
 - 其它对话框（设置 / 素材库 / 历史 / 保存…）仍是上游外观；
   —— 图片编辑 / 裁剪 / 标注 / 独立标注器已在 v1.26 补完（见上）；
-  —— 「尺寸」对话框已在 **v1.38** 换成 nova 版（见上）；「组合」仍是上游实现
+  —— 「尺寸」对话框已在 **v1.38** 换成 nova 版（见上）；
+  —— **宫格裁剪**已在 **v1.46** 换成 nova 版（见上）；全景 / 角度仍走上游；
+  —— 「组合」仍是上游实现
      （多图层编辑器：拖放/缩放/层级/布局序列化，值得单独一轮）；
 - 画布右键菜单的 DOM 仍在 vendor（只换了观感，未换 shadcn 组件）；
 - DSH 侧的画布面板外壳（`src/client/CanvasPanel.tsx`、`PanelExitButton`）仍用内联样式；

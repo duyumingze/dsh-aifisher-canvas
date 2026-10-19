@@ -16,6 +16,7 @@
  * 独立入口会显示「标准 / 遮罩」切换（`data-fisherai-annotation-mask`）。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import { ImageAnnotationStageView } from './ImageAnnotationStage';
 
 type Runtime = Pick<typeof ReactTypes, 'createElement'>;
@@ -34,7 +35,7 @@ export interface AnnotationSlotProps {
 }
 
 export function CanvasImageAnnotation(react: Runtime, props: AnnotationSlotProps) {
-  const h = react.createElement;
+  const h = createElement(react);
   return h(ImageAnnotationStageView, {
     node: props.node,
     initialMask: props.initialMask,

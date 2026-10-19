@@ -17,6 +17,7 @@
  *   - 尺寸读数 `data-fisherai-image-dimensions`。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import {
   ArrowLeft as ArrowLeftIcon,
   Check as CheckIcon,
@@ -78,7 +79,7 @@ interface Gesture {
 }
 
 export function ImageCropStage(react: Runtime, props: CropStageProps) {
-  const h = react.createElement;
+  const h = createElement(react);
   const overlay = useCanvasOverlayBox(react);
   const rootRef = react.useRef<HTMLDivElement>(null);
   const stageRef = react.useRef<HTMLDivElement>(null);

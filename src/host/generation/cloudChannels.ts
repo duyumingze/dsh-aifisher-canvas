@@ -1136,7 +1136,10 @@ export async function uploadChannelAsset(input: {
     return cached.url;
   }
   const form = new FormData();
-  form.append('file', new Blob([input.bytes], { type: mime }), `reference${extension}`);
+  // TS 5.9 的 BlobPart 要求 ArrayBufferView<ArrayBuffer>，而 Buffer 的类型是
+  // Uint8Array<ArrayBufferLike>（可能包 SharedArrayBuffer 的签名）；运行时 Blob
+  // 完全接受，这里只做类型收窄，不复制字节。
+  form.append('file', new Blob([input.bytes as unknown as BlobPart], { type: mime }), `reference${extension}`);
   const attemptTimeoutMs = input.timeoutMs ?? 120_000;
 
   const started = Date.now();

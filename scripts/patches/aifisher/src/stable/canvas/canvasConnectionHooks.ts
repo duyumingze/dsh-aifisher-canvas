@@ -13,6 +13,11 @@
  *      所有可用槽位 —— 用户瞄的是「遮罩图」，线最后却接在「原图」或「正面提示词」上。
  *   3. **松手那一下不重判**。快速拖动时最后一个 pointermove 与 pointerup 之间有位移，
  *      落点用的是上一帧的位置。
+ *   4. **拖出来的线不跟鼠标**。`tempConnectionEnd` 存的是 `clientX/clientY`，
+ *      canvasEdges 却按「画布内屏幕坐标」用 `(end - viewport) / zoom` 换算 —— 这只有在
+ *      画布底盘贴着窗口左上角 (0,0) 时才对。嵌进 DSH 面板后底盘左边是侧边栏、上边是顶栏，
+ *      虚线整体偏出（左, 上）/zoom 那么多（用户报障原话：「从图像拉出的线与鼠标指针有很大偏差」）。
+ *      同一个根因也让「按节点矩形判落点」跟着偏 —— 所以上面第 2 条才改成 DOM 命中。
  *
  * 改法（只用 DOM 事实，不加新机制）：
  *   - 节点/端口按钮都带 `data-fisherai-connector-node-id / -side / -port-index`
@@ -20,7 +25,10 @@
  *   - 命中顺序：`elementFromPoint` 精确命中 → 圆心吸附（圆 + 10px 光晕）→ 节点矩形；
  *   - 指着具体某个端口时记 `hoveredPortExact`，落点**只认它**，不兼容就不接
  *     （拖动过程中虚线已经变红，用户看得见）；
- *   - pointerup 时按松手坐标再判一次（只在这一帧还没有判定结果时才用，保持老行为可预期）。
+ *   - pointerup 时按松手坐标再判一次（只在这一帧还没有判定结果时才用，保持老行为可预期）；
+ *   - 指针进到这个 hook 时一律是**视口坐标**（clientX/clientY）；进画布坐标系（viewport 与
+ *     edges 用的那套）之前先减掉 `#canvas-background` 的 rect 左上角 —— 量不到 rect
+ *     （jsdom）时偏移是 (0,0)，与上游行为逐字一致。
  *
  * jsdom 里 `getBoundingClientRect()` 全是 0、`elementFromPoint` 也没有布局可算，
  * 所以所有 DOM 命中都要求 rect 可用（> 1px）；不满足就整体退回上游那套公式 —— 回归用例
@@ -82,6 +90,10 @@ interface DragState {
   isPendingConnection: boolean;
   pendingBatchSourceNodeIds: string[];
   connectionStart: Start | null;
+  /**
+   * 拖拽中那根虚线的自由端，**画布内屏幕坐标**（已减掉 `#canvas-background` 的 rect 左上角；
+   * canvasEdges 按 `(end - viewport) / zoom` 换成世界坐标）。不要往里塞 clientX/clientY。
+   */
   tempConnectionEnd: Point | null;
   hoveredNodeId: string | null;
   hoveredSide: Side | null;
@@ -131,6 +143,21 @@ const PORT_EXACT_DISTANCE = 20;
 /** 真实布局才有意义：jsdom 里所有 rect 都是 0×0。 */
 const measurable = (rect: { width: number; height: number } | null | undefined): boolean =>
   !!rect && rect.width > 1 && rect.height > 1;
+
+/**
+ * 画布底盘（`#canvas-background`）在视口里的左上角 —— 指针坐标进画布坐标系的换算原点。
+ *
+ * 上游把画布当成独占整个窗口的应用（底盘在 0,0），所以连线拖拽直接拿 `clientX/clientY`
+ * 当画布内坐标用。嵌进 DSH 面板后底盘左边是侧边栏、上边是顶栏，必须减掉这一偏移，
+ * 否则拖出来的虚线整体跟着偏 —— 偏差 = (rect.left, rect.top) / zoom，缩放越小越夸张。
+ *
+ * 量不到（jsdom / 尚未挂载）时返回 (0,0)：老行为原样保留，回归用例的判定不变。
+ */
+function canvasOrigin(): Point {
+  if (typeof document === 'undefined') return { x: 0, y: 0 };
+  const rect = document.getElementById('canvas-background')?.getBoundingClientRect();
+  return rect ? { x: rect.left, y: rect.top } : { x: 0, y: 0 };
+}
 
 function portIndexOf(button: Element): number {
   const raw = Number(button.getAttribute(CONNECTOR_PORT_ATTRIBUTE));
@@ -234,6 +261,8 @@ export function useCanvasConnections(hooks: Hooks, runtime: ConnectionRuntime) {
   const current = hooks.useRef(state);
   /** 最近一次的视口（pointerup 上按松手点补判要用）。 */
   const viewportRef = hooks.useRef<CanvasViewport | null>(null);
+  /** 本次拖线手势的画布原点：pointerdown 量一次（拖线期间画布自己不会挪）。 */
+  const originRef = hooks.useRef<Point>({ x: 0, y: 0 });
   const [selectedConnection, publishSelected] = hooks.useState<CanvasConnectionIdentity | null>(
     null,
   );
@@ -324,9 +353,13 @@ export function useCanvasConnections(hooks: Hooks, runtime: ConnectionRuntime) {
     }
     return port;
   };
-  const hover = (point: Point, nodes: Node[], viewport: CanvasViewport): DragState => {
+  /** `client` 是视口坐标（clientX/clientY）；画布内坐标只在这里换算一次。 */
+  const hover = (client: Point, nodes: Node[], viewport: CanvasViewport): DragState => {
     const value = current.current,
       start = value.connectionStart;
+    const canvas = originRef.current;
+    /** 画布内屏幕坐标：与 viewport、canvasEdges 同一个坐标系（`tempConnectionEnd` 存的就是它）。 */
+    const point = { x: client.x - canvas.x, y: client.y - canvas.y };
     const next = {
       ...value,
       tempConnectionEnd: point,
@@ -342,11 +375,12 @@ export function useCanvasConnections(hooks: Hooks, runtime: ConnectionRuntime) {
     const side: Side = start.handle === 'right' ? 'left' : 'right';
     const origin = nodes.find((item) => item.id === start.nodeId);
     // ① 指针指着端口按钮（含圆心吸附 / 圆露在节点框外的那半圈）
-    const pointedAt = portAtPoint(point.x, point.y);
+    //    这一路必须用**视口坐标**：DOM rect 就是视口坐标。
+    const pointedAt = portAtPoint(client.x, client.y);
     const snapped =
       pointedAt && pointedAt.side === side && pointedAt.nodeId !== start.nodeId
         ? pointedAt
-        : portNearPoint(point.x, point.y, side, start.nodeId);
+        : portNearPoint(client.x, client.y, side, start.nodeId);
     let node = snapped ? nodes.find((item) => item.id === snapped.nodeId) : undefined;
     let port = snapped ? snapped.portIndex : 0;
     let exact = Boolean(snapped);
@@ -361,7 +395,7 @@ export function useCanvasConnections(hooks: Hooks, runtime: ConnectionRuntime) {
           y <= item.y + runtime.getHeight(item),
       );
       if (!node) return next;
-      const rendered = node.type === 'ComfyUI' ? portNearY(node.id, side, point.y) : null;
+      const rendered = node.type === 'ComfyUI' ? portNearY(node.id, side, client.y) : null;
       if (rendered) {
         port = rendered.portIndex;
         exact = rendered.distance <= PORT_EXACT_DISTANCE;
@@ -454,11 +488,14 @@ export function useCanvasConnections(hooks: Hooks, runtime: ConnectionRuntime) {
     handleConnectorPointerDown(event: Pointer, nodeId: string, handle: Side, portIndex?: number) {
       event.stopPropagation();
       event.preventDefault();
+      // 手势起点先量一次画布原点：后面所有视口坐标 → 画布坐标的换算都用它。
+      const canvas = canvasOrigin();
+      originRef.current = canvas;
       update({
         ...empty(),
         isDraggingConnection: true,
         connectionStart: { nodeId, handle, portIndex },
-        tempConnectionEnd: { x: event.clientX, y: event.clientY },
+        tempConnectionEnd: { x: event.clientX - canvas.x, y: event.clientY - canvas.y },
       });
     },
     updateConnectionDrag(event: Pointer, nodes: Node[], viewport: CanvasViewport) {
@@ -478,8 +515,11 @@ export function useCanvasConnections(hooks: Hooks, runtime: ConnectionRuntime) {
       const value = current.current,
         start = value.connectionStart;
       if (!value.isDraggingConnection || !start) return false;
-      const x = event?.clientX ?? value.tempConnectionEnd?.x ?? 0,
-        y = event?.clientY ?? value.tempConnectionEnd?.y ?? 0;
+      // 菜单是 fixed 定位的（left/top 直接吃 clientX/clientY），所以这里必须留在视口坐标系。
+      // 没有 event 时（只有老调用方才会这样）把记着的画布内坐标换回视口坐标。
+      const canvas = originRef.current;
+      const x = event?.clientX ?? (value.tempConnectionEnd ? value.tempConnectionEnd.x + canvas.x : 0),
+        y = event?.clientY ?? (value.tempConnectionEnd ? value.tempConnectionEnd.y + canvas.y : 0);
       const ids = [...new Set(batch?.length ? batch : [start.nodeId])];
       // 拖得快的时候最后一次 pointermove 与松手位置之间有位移：这一帧还没有判定结果
       // （指针一直在空白处）就按松手点补判一次，别让用户「明明拖到槽上了却弹新建菜单」。

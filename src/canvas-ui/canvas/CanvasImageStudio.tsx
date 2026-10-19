@@ -10,9 +10,12 @@
  *     · 蒙版 / 笔刷：`ImageAnnotationStage`（initialMask 区分，保存后回到首页成为一版）；
  *     · 组合：仍走 vendor 的 `CompositePreview`（多图层拖放/缩放/层级是另一套编辑器，
  *       不在这轮范围内 —— 见 docs/canvas-ui-shadcn.md 第五节）。
- *   mode !== 'editor'（宫格裁剪 / 全景 / 角度 / 生成全景）→ **原样交给 vendor** 的
- *     `Components.ImageCrop`：这些模式带行列切线、全景球采景、角度草稿，本轮不动，
- *     保证既有能力一个不丢（vendor 内部会再分发给自己的 CropEditor / Angle / Panorama）。
+ *   mode !== 'editor'：
+ *     · `grid`（v1.46）→ `ImageGridCropStage`（同样是 nova 工作台，几何/切线/导出全复用
+ *       vendor 纯函数，见 docs/canvas-ui-shadcn.md 第三节）；
+ *     · 其余（全景 / 角度 / 生成全景）→ **原样交给 vendor** 的 `Components.ImageCrop`：
+ *       全景球采景依赖 three.js 场景、角度草稿走另一套编辑器，本轮不动，保证既有能力一个不丢
+ *       （vendor 内部会再分发给自己的 CropEditor / Angle / Panorama）。
  *
  * 保存链路（也是 v1.26 修的 bug 的下游）：`onSave(node.id, [current])` →
  * `useCanvasCropSave` → `POST /api/aifisher/canvas/assets/images`（data URL 落盘）→
@@ -31,6 +34,7 @@
  *    docs/canvas-ui-shadcn.md 第 1 条；hook 也不能放到「!node return null」之后。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import { createPortal } from 'react-dom';
 import {
   Check as CheckIcon,
@@ -55,6 +59,7 @@ import {
 } from '../../../vendor/aifisher/src/stable/app/canvasComponents';
 import { ImageAnnotationStageView } from './ImageAnnotationStage';
 import { ImageCropStageView } from './ImageCropStage';
+import { ImageGridCropStageView } from './ImageGridCropStage';
 import {
   fitInside,
   loadWorkbenchImage,
@@ -114,7 +119,7 @@ const TOOLS: Array<{ value: Stage; label: string; hint: string; icon: unknown }>
 ];
 
 export function CanvasImageStudio(react: Runtime, props: StudioProps) {
-  const h = react.createElement;
+  const h = createElement(react);
   const mode = props.mode ?? 'editor';
   const overlay = useCanvasOverlayBox(react);
   const rootRef = react.useRef<HTMLDivElement>(null);
@@ -204,8 +209,15 @@ export function CanvasImageStudio(react: Runtime, props: StudioProps) {
     setError('');
   };
 
-  // ---- 非 editor 模式：原样交回 vendor（宫格 / 全景 / 角度 / 生成全景）----
-  if (mode !== 'editor') return h(VendorImageCrop, props as Record<string, unknown>);
+  // ---- 宫格裁剪（v1.46）：nova 版独立舞台，保存后每格变成画布上的一张图 ----
+  if (mode === 'grid')
+    return h(ImageGridCropStageView, {
+      node: node ? { id: node.id, resultUrl: node.resultUrl, title: node.title } : undefined,
+      onSave: props.onSave,
+      onClose: props.onClose,
+    });
+  // ---- 其余非 editor 模式：原样交回 vendor（全景 / 角度 / 生成全景）----
+  if (mode !== 'editor') return h(VendorImageCrop, props as unknown as Record<string, unknown>);
   if (!node?.resultUrl) return null;
 
   // ---- 子舞台（整块对话框由子组件渲染）----

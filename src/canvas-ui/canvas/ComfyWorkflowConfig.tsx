@@ -34,6 +34,7 @@
  *    产物里 React 有两份副本，用错那分量 React 19 不报错也不渲染（整块面板会消失）。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import { createPortal } from 'react-dom';
 import {
   CheckIcon,
@@ -215,7 +216,7 @@ function onPanelWheel(event: ReactTypes.WheelEvent<HTMLDivElement>) {
 }
 
 export function ComfyWorkflowConfig(react: Runtime, props: Props) {
-  const h = react.createElement;
+  const h = createElement(react);
 
   /**
    * 开关状态来自 store（不是本地 useState）：Controls 槽位的绑定层每次渲染都会造新的

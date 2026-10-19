@@ -287,7 +287,11 @@ async function execute(args) {
   check('没有画布时 read → NO_OPEN_CANVAS', noCanvas.ok === false && noCanvas.code === 'NO_OPEN_CANVAS', JSON.stringify(noCanvas));
 
   const editWithoutRevision = await execute({ action: 'edit', operations: [{ kind: 'create', ref: 'a', type: 'Text', x: 0, y: 0 }] });
-  check('edit 缺 revision → NEED_COMMAND', editWithoutRevision.ok === false && editWithoutRevision.code === 'NEED_COMMAND');
+  check(
+    'edit 缺 revision 时 host 先读画布补 revision（没有画布 → NO_OPEN_CANVAS）',
+    editWithoutRevision.ok === false && editWithoutRevision.code === 'NO_OPEN_CANVAS',
+    JSON.stringify(editWithoutRevision).slice(0, 200),
+  );
 
   const skills = await execute({ action: 'skills' });
   check('skills 动作仍可用', skills.ok === true && Array.isArray(skills.skills));

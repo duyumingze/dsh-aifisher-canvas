@@ -582,6 +582,73 @@ const lastModelProjectId = 'browser-last-model-proj';
 }
 
 /**
+ * 切刀场景（v1.49，?xknife=1）的种子项目。
+ *
+ * 用户原话（2026-10-19）：
+ *   「现在做一个新功能，像blender一样按住ctrl加鼠标右键切换到切刀工具，划过的线会断开连接」。
+ *
+ * C 同时接 A、B（`parentIds: [A, B]`）：切刀只能断开**被划过**的那条，
+ * 另一条必须原样在 —— 身份读错（去拆 `data-edge-key` 之类）时这一场立刻红。
+ * 三张图直接复用叠图场景现场编出来的 PNG（真浏览器能解码，截图里不是破图）。
+ */
+const knifeProjectId = 'browser-knife-proj';
+const KNIFE_FILES = ['knife-a.png', 'knife-b.png', 'knife-c.png'];
+const knifeUrl = (file) => `/api/aifisher/canvas/media/${knifeProjectId}/images/${file}`;
+{
+  const source = join(
+    fakeHome,
+    'storages',
+    'dsh-aifisher-canvas',
+    'media',
+    stackProjectId,
+    'images',
+    'stack-a.png',
+  );
+  const dir = join(fakeHome, 'storages', 'dsh-aifisher-canvas', 'media', knifeProjectId, 'images');
+  mkdirSync(dir, { recursive: true });
+  for (const file of KNIFE_FILES) copyFileSync(source, join(dir, file));
+  const knifeNode = (id, title, x, y, extra = {}) => ({
+    id,
+    type: 'Image',
+    x,
+    y,
+    title,
+    prompt: title,
+    status: 'success',
+    model: 'Upload',
+    resultUrl: knifeUrl(`${id}.png`),
+    resultUrls: [knifeUrl(`${id}.png`)],
+    resultAspectRatio: '320/240',
+    aspectRatio: '4:3',
+    parentIds: [],
+    projectId: knifeProjectId,
+    width: 320,
+    height: 240,
+    ...extra,
+  });
+  const saved = await dispatchApi(
+    'POST',
+    new URL('/api/aifisher/canvas/workflows', ORIGIN),
+    Buffer.from(
+      JSON.stringify({
+        id: knifeProjectId,
+        revision: 0,
+        title: '切刀真机验证',
+        nodes: [
+          knifeNode('knife-a', '上游 A', 120, 120),
+          knifeNode('knife-b', '上游 B', 120, 520),
+          knifeNode('knife-c', '下游 C', 760, 320, { parentIds: ['knife-a', 'knife-b'] }),
+        ],
+        groups: [],
+        viewport: { x: 0, y: 0, zoom: 1 },
+      }),
+      'utf8',
+    ),
+  );
+  console.log(`[browser] 预置切刀项目 ${knifeProjectId}（C 同时接 A、B）→ ${saved.status}`);
+}
+
+/**
  * 「项目归档」场景（v1.42，?xarchive=1）的种子项目。
  *
  * 带两个节点 + 两张素材：面板上「2 个节点 · 素材 2 个（x KB）」才有真数字可对，
@@ -981,6 +1048,10 @@ const HOST_PAGE = `<!doctype html>
      * jsdom 没有布局与 CSS 计算，这三条在那边只能验「DOM 在不在」。
      */
     const gridProbe = () => {
+      // v1.45：节点搜索场景要量「新建并移动」的屏幕位移 —— 这个探针每 250ms 会派发一次
+      // pointermove(200,150)，还会临时改 #canvas-viewport-content 的 transform，会把跟随测出来
+      // 的位移冲成 0。那一场在测量期间自己把开关打开，其它场景不受影响。
+      if (window.__DSH_SKIP_GRID_PROBE__ === true) return { present: false, skipped: 'node-placement' };
       const canvas = document.getElementById('canvas-background');
       const layer = canvas?.querySelector('[data-canvas-grid="true"]');
       if (!canvas || !layer) return { present: false };
@@ -1323,6 +1394,8 @@ const HOST_PAGE = `<!doctype html>
         queueLayers: queueLayerSteps,
         /** v1.42：项目归档（?xarchive=1 场景，见 buildArchiveScene） */
         archive: archiveSteps,
+        /** v1.49：切刀（?xknife=1 场景，见 buildKnifeScene） */
+        knife: knifeSteps,
       };
       // 网格探针会临时把底盘钉到视口左上角（让 offsetX 可预测），
       // 所以必须放在 leaks 采完之后 —— 否则那次临时移动会被当成「越界压住侧边栏」。
@@ -1615,21 +1688,87 @@ const HOST_PAGE = `<!doctype html>
         const edgesBefore = [...document.querySelectorAll('[data-edge-key]')].length;
         portFire(outButton, 'pointerdown', start.x, start.y);
         await portSleep(60);
-        portFire(surfaceEl, 'pointermove', start.x + 24, start.y + 8);
-        await portSleep(50);
-        portFire(surfaceEl, 'pointermove', aim.x, aim.y);
-        await portSleep(120);
-        // 网格探针每 250ms 会把指针挪到它钉住的位置，所以量发光前再补一次移动，
-        // 并等两帧（发光走 rAF 节流）后再读样式。
-        portFire(surfaceEl, 'pointermove', aim.x, aim.y);
+        // ---- v1.47：拖出来的虚线必须**跟着指针**（底盘不在窗口左上角时也不许偏）
+        //
+        // 用户报障原话「从图像拉出的线与鼠标指针有很大偏差」：上游把 clientX/clientY 直接
+        // 当画布内坐标用，本插件的画布底盘左边是 DSH 侧边栏（这个宿主页复刻了 240px），
+        // 于是虚线整体偏 (底盘左, 底盘上) / zoom。这里的判定只认一件事：
+        // 指针停在空白处时，虚线自由端换算回屏幕坐标必须落回指针上（±2px）。
+        const blankPoint = (() => {
+          for (let step = 0; step < 8; step += 1) {
+            const point = { x: start.x + 40 + step * 24, y: start.y + 20 + step * 12 };
+            const hit = document.elementFromPoint(point.x, point.y);
+            if (!hit) continue;
+            if (hit.id === 'canvas-background' || hit.tagName.toLowerCase() === 'svg') return point;
+          }
+          return { x: start.x + 40, y: start.y + 20 };
+        })();
+        portFire(surfaceEl, 'pointermove', blankPoint.x, blankPoint.y);
         await new Promise((done) =>
           window.requestAnimationFrame(() => window.requestAnimationFrame(done)),
         );
-        const glowStyle = getComputedStyle(slotButtons[imageSlot.index]);
-        portDragSteps.glow = {
-          transform: String(glowStyle.transform || ''),
-          boxShadow: String(glowStyle.boxShadow || 'none').slice(0, 90),
-        };
+        portDragSteps.tempLine = (() => {
+          const surface = document.getElementById('canvas-background');
+          const layer = document.getElementById('canvas-viewport-content');
+          const dashed = [
+            ...document.querySelectorAll('#canvas-viewport-content svg path[stroke-dasharray]'),
+          ].pop();
+          const d = dashed ? String(dashed.getAttribute('d') || '') : '';
+          const tail = d.slice(d.lastIndexOf(',') + 1).trim().split(' ');
+          const worldX = parseFloat(tail[0]);
+          const worldY = parseFloat(tail[1]);
+          const transform = String((layer && layer.style && layer.style.transform) || '');
+          const openIndex = transform.indexOf('(');
+          const closeIndex = transform.indexOf(')');
+          const shift = transform.slice(openIndex + 1, closeIndex).split(',');
+          const vx = parseFloat(shift[0]) || 0;
+          const vy = parseFloat(shift[1]) || 0;
+          const scaleIndex = transform.lastIndexOf('scale(');
+          const zoom = scaleIndex < 0 ? 1 : parseFloat(transform.slice(scaleIndex + 6)) || 1;
+          const rect = surface ? surface.getBoundingClientRect() : { left: 0, top: 0 };
+          return {
+            found: Number.isFinite(worldX) && Number.isFinite(worldY),
+            pointer: [Math.round(blankPoint.x), Math.round(blankPoint.y)],
+            world: [Math.round(worldX), Math.round(worldY)],
+            canvasRect: [Math.round(rect.left), Math.round(rect.top)],
+            zoom: zoom,
+            /** 虚线端点换算回屏幕后与指针的差（像素）：0 = 跟手 */
+            delta: [
+              Math.round(rect.left + worldX * zoom + vx - blankPoint.x),
+              Math.round(rect.top + worldY * zoom + vy - blankPoint.y),
+            ],
+            path: d.slice(0, 60),
+          };
+        })();
+        portFire(surfaceEl, 'pointermove', aim.x, aim.y);
+        await portSleep(120);
+        // 网格探针每 250ms 会把指针挪到它钉住的位置，所以量发光前再补一次移动，
+        // 并等两帧（发光走 rAF 节流）后再读样式。探针那一拍如果正好插在「补移动」和
+        // 「读样式」之间，读到的是复位后的 identity —— 全量跑时偶发（2026-10-19 踩到：
+        // 单独跑这一场绿、全量跑红）。这里改成轮询几轮，每轮都补一次指针移动，
+        // 拿到「真的放大 + 有发光」就停。
+        let glowStyle = null;
+        portDragSteps.glow = { transform: '', boxShadow: 'none' };
+        for (let glowAttempt = 0; glowAttempt < 6; glowAttempt += 1) {
+          portFire(surfaceEl, 'pointermove', aim.x, aim.y);
+          await new Promise((done) =>
+            window.requestAnimationFrame(() => window.requestAnimationFrame(done)),
+          );
+          glowStyle = getComputedStyle(slotButtons[imageSlot.index]);
+          portDragSteps.glow = {
+            transform: String(glowStyle.transform || ''),
+            boxShadow: String(glowStyle.boxShadow || 'none').slice(0, 90),
+          };
+          const glowTransformNow = portDragSteps.glow.transform;
+          const glowOpen = glowTransformNow.indexOf('(');
+          const glowComma = glowTransformNow.indexOf(',');
+          const glowScaleNow =
+            glowOpen >= 0 && glowComma > glowOpen
+              ? Number(glowTransformNow.slice(glowOpen + 1, glowComma)) || 1
+              : 1;
+          if (glowScaleNow > 1.05 && portDragSteps.glow.boxShadow !== 'none') break;
+          await portSleep(40);
+        }
         // 诊断读数（BROWSER_DEBUG 时才看）：手势到底起没起来、发光模块绑没绑上、
         // 以及「瞄准点下面到底是哪个元素」（这是命中判定的第一现场）
         const aimElement = document.elementFromPoint(aim.x, aim.y);
@@ -1953,6 +2092,8 @@ const HOST_PAGE = `<!doctype html>
       }
       const box = background.getBoundingClientRect();
       const point = { x: Math.round(box.left + box.width * 0.42), y: Math.round(box.top + box.height * 0.38) };
+      // 网格探针的 pointermove 会干扰下面「新建并移动」的位移测量（见 gridProbe 顶部）
+      window.__DSH_SKIP_GRID_PROBE__ = true;
       background.dispatchEvent(new MouseEvent('pointermove', { bubbles: true, clientX: point.x, clientY: point.y }));
       await sleep(200);
 
@@ -2015,7 +2156,6 @@ const HOST_PAGE = `<!doctype html>
         top: panel.style.top,
         width: panel.style.width,
       };
-      searchSteps.placementLog = window.__DSH_NODE_SEARCH_PLACEMENT__ ?? null;
       searchSteps.placementLog = window.__DSH_NODE_SEARCH_PLACEMENT__ ?? null;
       searchSteps.pointerLog = null;
       searchSteps.panelParent = (() => {        const chain = [];
@@ -2096,6 +2236,43 @@ const HOST_PAGE = `<!doctype html>
           point.x <= createdBox.right + 20 &&
           point.y >= createdBox.top - 20 &&
           point.y <= createdBox.bottom + 20;
+
+        // ---- ③b v1.45「新建并移动」：先跟手，左键放下后不再跟手
+        const createdRect = () => (created ? created.getBoundingClientRect() : null);
+        const followBefore = createdRect();
+        const transformBefore = created.style.transform;
+        // 第一次 pointermove 只定基线（面板可能刚建完节点，鼠标没动过）
+        background.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true, clientX: point.x, clientY: point.y }),
+        );
+        await sleep(50);
+        background.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true, clientX: point.x + 60, clientY: point.y + 40 }),
+        );
+        await sleep(250);
+        const followAfter = createdRect();
+        searchSteps.follow = {
+          dx: followBefore && followAfter ? Math.round(followAfter.left - followBefore.left) : null,
+          dy: followBefore && followAfter ? Math.round(followAfter.top - followBefore.top) : null,
+          transformBefore: transformBefore,
+          transformAfter: created.style.transform,
+        };
+        // 左键放下（这一次要被画布侧吞掉）
+        background.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }),
+        );
+        await sleep(150);
+        const droppedBefore = createdRect();
+        background.dispatchEvent(
+          new MouseEvent('pointermove', { bubbles: true, clientX: point.x + 220, clientY: point.y + 160 }),
+        );
+        await sleep(250);
+        const droppedAfter = createdRect();
+        searchSteps.dropped = {
+          dx: droppedBefore && droppedAfter ? Math.round(droppedAfter.left - droppedBefore.left) : null,
+          dy: droppedBefore && droppedAfter ? Math.round(droppedAfter.top - droppedBefore.top) : null,
+        };
+        searchSteps.placementDiag = window.__DSH_NODE_PLACEMENT__ ?? null;
       }
       await sleep(200);
 
@@ -2869,6 +3046,168 @@ const HOST_PAGE = `<!doctype html>
     const buildImageEditorScene = async () => {
       // xedit=saved 只用来回看「保存之后画布上多了个节点」，不跑交互
       if (!editScene || editScene === 'saved') return;
+      /**
+       * 宫格裁剪（v1.46，?xedit=grid）：用户「画布宫格裁剪ui还没有更新」的真机回归。
+       *
+       *  ① 工具条「宫格裁剪」→ nova 版宫格舞台（不是 vendor 的整屏 role=dialog aria-label=裁切图片）；
+       *  ② 舞台铺满画布、图片解码成功（画布 > 100px）、默认 2×2 = 4 格；
+       *  ③ **真拖第一条竖向切线**（pointerdown/move/up）→ 单格尺寸读数必须变；
+       *  ④ 点 3×3 预设 → 张数变 9；导出序号填 1,3 → 张数变 2；
+       *  ⑤ 保存 → 画布上多出 2 个带 /api/aifisher/canvas/media/ 结果图的节点；
+       *  ⑥ 再打开一次宫格舞台，截图停在 nova 版界面上（交付图）。
+       */
+      if (editScene === 'grid') {
+        try {
+          await wait(900);
+          imageEditorSteps.selected = await selectEditNode();
+          const toolbar = await until(
+            () => document.querySelector('[data-fisherai-media-toolbar]'),
+            10000,
+          );
+          const open = toolbar
+            ? [...toolbar.querySelectorAll('button')].find(
+                (node) => (node.getAttribute('aria-label') || '') === '宫格裁剪',
+              )
+            : null;
+          if (!open) throw new Error('工具条里没有「宫格裁剪」');
+          open.click();
+          const stage = await until(
+            () => document.querySelector('[data-fisherai-image-workbench="grid"]'),
+            10000,
+          );
+          if (!stage) throw new Error('宫格裁剪舞台没打开');
+          await wait(700);
+          const mountBox = document.querySelector('.af-canvas-mount').getBoundingClientRect();
+          const stageBox = stage.getBoundingClientRect();
+          const canvas = stage.querySelector('[data-fisherai-crop-canvas]');
+          const canvasBox = canvas.getBoundingClientRect();
+          const headerBox = stage.querySelector('header').getBoundingClientRect();
+          const footerBox = stage.querySelector('footer').getBoundingClientRect();
+          const presets = [...stage.querySelectorAll('[data-fisherai-grid-crop-preset]')];
+          const cellValue = () =>
+            String(stage.querySelector('[data-fisherai-grid-crop-cell]')?.textContent || '');
+          imageEditorSteps.grid = {
+            stage: true,
+            coversCanvas:
+              Math.abs(stageBox.width - mountBox.width) <= 2 &&
+              Math.abs(stageBox.height - mountBox.height) <= 2,
+            width: Math.round(stageBox.width),
+            height: Math.round(stageBox.height),
+            headerHeight: Math.round(headerBox.height),
+            footerHeight: Math.round(footerBox.height),
+            canvasWidth: Math.round(canvasBox.width),
+            canvasHeight: Math.round(canvasBox.height),
+            presets: presets.length,
+            presetsInside: presets.every((node) => {
+              const box = node.getBoundingClientRect();
+              return (
+                box.left >= Math.round(mountBox.left) && box.right <= Math.round(mountBox.right)
+              );
+            }),
+            countText: String(
+              stage.querySelector('[data-fisherai-grid-crop-count]')?.textContent || '',
+            ),
+            cellBefore: cellValue(),
+            saveText: String(
+              stage.querySelector('[data-fisherai-image-save="grid"]')?.textContent || '',
+            ),
+            vendorDialog: !!document.querySelector('[role="dialog"][aria-label="裁切图片"]'),
+            sliders: stage.querySelectorAll('[data-slot="slider"]').length,
+            ratios: stage.querySelectorAll('[data-fisherai-grid-crop-ratio]').length,
+            orders: stage.querySelectorAll('[data-fisherai-grid-crop-order]').length,
+          };
+          if (canvasBox.width < 40 || canvasBox.height < 40) {
+            imageEditorSteps.error = '宫格画布没量到尺寸（图片没加载？）';
+            imageEditorSteps.done = true;
+            return;
+          }
+          // ③ 真拖第一条竖向切线（2×2 默认等分 → 切线正好在画布中央）
+          const cutX = Math.round(canvasBox.left + canvasBox.width / 2);
+          const cutY = Math.round(canvasBox.top + canvasBox.height / 2);
+          firePointerOn(canvas, 'pointerdown', cutX, cutY);
+          firePointerOn(canvas, 'pointermove', cutX + 26, cutY);
+          firePointerOn(canvas, 'pointerup', cutX + 26, cutY);
+          await wait(350);
+          imageEditorSteps.grid.cellAfterDrag = cellValue();
+          // ④ 3×3 预设 + 导出序号 1,3
+          stage.querySelector('[data-fisherai-grid-crop-preset="3x3"]')?.click();
+          await wait(300);
+          imageEditorSteps.grid.countAfterPreset = String(
+            stage.querySelector('[data-fisherai-grid-crop-count]')?.textContent || '',
+          );
+          imageEditorSteps.grid.saveTextAfterPreset = String(
+            stage.querySelector('[data-fisherai-image-save="grid"]')?.textContent || '',
+          );
+          const selection = stage.querySelector('[data-fisherai-grid-crop-selection]');
+          if (selection) {
+            // React 19 会接管 input.value 的 setter：直接赋值再派发 input 不会进 state，
+            // 必须走原型上的原生 setter（与 scripts/browser-check 里别处改受控输入同一手法）。
+            const setValue = Object.getOwnPropertyDescriptor(
+              HTMLInputElement.prototype,
+              'value',
+            ).set;
+            setValue.call(selection, '1,3');
+            selection.dispatchEvent(new Event('input', { bubbles: true }));
+            await wait(300);
+          }
+          imageEditorSteps.grid.countAfterSelection = String(
+            stage.querySelector('[data-fisherai-grid-crop-count]')?.textContent || '',
+          );
+          imageEditorSteps.grid.saveTextAfterSelection = String(
+            stage.querySelector('[data-fisherai-image-save="grid"]')?.textContent || '',
+          );
+          // ⑤ 保存 → 画布上多节点（每格一张）
+          // 注意：本场景与 image-editor / image-annotate 共用同一个项目，
+          // 全量跑时画布上已经有前面两场存下的图 —— 这里只认「这一次新增」的节点
+          // （按节点 id 差集，不能拿全量 img 数当断言，否则全量跑必红、单跑才绿）。
+          const beforeIds = new Set(
+            [...document.querySelectorAll('[data-node-id]')].map((node) =>
+              node.getAttribute('data-node-id'),
+            ),
+          );
+          const before = beforeIds.size;
+          const saveButton = stage.querySelector('[data-fisherai-image-save="grid"]');
+          imageEditorSteps.grid.saveEnabled = !!saveButton && !saveButton.disabled;
+          if (saveButton) saveButton.click();
+          const added = await until(() => {
+            const frames = [...document.querySelectorAll('[data-node-id]')];
+            return frames.length > before ? frames : null;
+          }, 20000);
+          imageEditorSteps.grid.saved = {
+            nodeCountBefore: before,
+            nodeCountAfter: document.querySelectorAll('[data-node-id]').length,
+            stageClosed: !document.querySelector('[data-fisherai-image-workbench="grid"]'),
+            imageSrcs: added
+              ? added
+                  .filter(
+                    (node) => !beforeIds.has(node.getAttribute('data-node-id')),
+                  )
+                  .map((node) => String(node.querySelector('img')?.getAttribute('src') || ''))
+              : [],
+          };
+          // ⑥ 再打开一次（截图停在 nova 版宫格舞台上）
+          await wait(500);
+          await selectEditNode();
+          const again = await until(
+            () => document.querySelector('[data-fisherai-media-toolbar]'),
+            10000,
+          );
+          const openAgain = again
+            ? [...again.querySelectorAll('button')].find(
+                (node) => (node.getAttribute('aria-label') || '') === '宫格裁剪',
+              )
+            : null;
+          openAgain?.click();
+          imageEditorSteps.grid.reopened = !!(await until(
+            () => document.querySelector('[data-fisherai-image-workbench="grid"]'),
+            10000,
+          ));
+        } catch (error) {
+          imageEditorSteps.error = String((error && error.stack) || error);
+        }
+        imageEditorSteps.done = true;
+        return;
+      }
       try {
         await wait(900);
         imageEditorSteps.selected = await selectEditNode();
@@ -3173,6 +3512,25 @@ const HOST_PAGE = `<!doctype html>
           gridPanSteps.ratio = Number((gridPanX / -160).toFixed(4));
           gridPanSteps.ratioY = gridPanY === null ? null : Number((gridPanY / 96).toFixed(4));
         }
+        /*
+         * v1.48（用户「缩小画布就密密麻麻」）：三层嵌套矩阵在真机上的显隐。
+         * 判据是屏幕间距 = spacing × zoom，结果写在每层 wrapper 的 inline opacity 上。
+         * 量三档：1（小+大）、0.2（大+更大）、0.05（只剩最大一层）。
+         */
+        const readTiers = () =>
+          [...document.querySelectorAll('[data-canvas-grid-tier]')].map((element) => ({
+            id: element.getAttribute('data-canvas-grid-tier'),
+            spacing: Number(element.getAttribute('data-canvas-grid-tier-spacing')),
+            opacity: Number.parseFloat(element.style.opacity || '0'),
+            visible: element.getAttribute('data-canvas-grid-tier-visible'),
+          }));
+        await setTransform('translate3d(0px, 0px, 0) scale(1)');
+        const tiersAt1 = readTiers();
+        await setTransform('translate3d(0px, 0px, 0) scale(0.2)');
+        const tiersAt02 = readTiers();
+        await setTransform('translate3d(0px, 0px, 0) scale(0.05)');
+        const tiersAt005 = readTiers();
+        gridPanSteps.tiers = { at1: tiersAt1, at02: tiersAt02, at005: tiersAt005 };
         /*
          * 量完把画布摆回原位。
          *
@@ -3810,6 +4168,117 @@ const HOST_PAGE = `<!doctype html>
       lastModelSteps.done = true;
     };
 
+    /**
+     * 切刀场景（?xknife=1，v1.49）。
+     *
+     * 用户原话：「现在做一个新功能，像blender一样按住ctrl加鼠标右键切换到切刀工具，
+     * 划过的线会断开连接」。
+     *
+     * jsdom 那边验的是逻辑（采样/命中/断开），这一场验的是**真浏览器里的手势与画面**：
+     *   ① Ctrl + 右键真拖一刀 → 画布上出现刀口浮层、被划过的连线变红（预览）；
+     *   ② 松手 → 只有被划过的那条连线从 DOM 里消失（C 同时接 A、B，只切 A 那条）；
+     *   ③ 第二刀停在**拖拽中**当交付图：截图里能直接看到切刀线与红色高亮。
+     * 取点用真浏览器的 getTotalLength / getPointAtLength / getScreenCTM，
+     * 与画布缩放无关（点在哪、屏幕坐标就是哪）。
+     */
+    const knifeScene = new URLSearchParams(location.search).get('xknife') === '1';
+    const knifeSteps = {
+      done: false,
+      bridge: null,
+      before: null,
+      after: null,
+      preview: null,
+      delivery: null,
+      report: null,
+      error: '',
+    };
+    const buildKnifeScene = async () => {
+      if (!knifeScene) return;
+      try {
+        // ⚠️ 底盘/桥都要**等到画布真挂上**再取：场景函数与 mountCanvas 是同一条脚本，
+        // 一开始这里还是空的（第一版就把 surface 在等之前抓死了，后面 dispatchEvent 直接 null）。
+        const surfaceOf = () => document.getElementById('canvas-background');
+        const edgeGroups = () =>
+          [...document.querySelectorAll('#canvas-viewport-content g[data-fisherai-edge-parent-id]')];
+        await until(() => surfaceOf() && edgeGroups().length >= 2, 20000);
+        const surface = surfaceOf();
+        if (!surface) throw new Error('画布底盘没挂上（#canvas-background 不存在）');
+        knifeSteps.bridge = typeof window.__FISHERAI_CANVAS_KNIFE__?.cut === 'function';
+        await wait(700);
+        const edgeOf = (parentId) =>
+          edgeGroups().find((group) => group.getAttribute('data-fisherai-edge-parent-id') === parentId) || null;
+        /** 一条连线在屏幕上的点（progress 是曲线参数，0.18 处离另一条线足够远）。 */
+        const pointOn = (group, progress) => {
+          const path = group && group.querySelector('path[data-fisherai-edge-hit-target]');
+          if (!path) return null;
+          const matrix = path.getScreenCTM();
+          if (!matrix) return null;
+          const local = path.getPointAtLength(path.getTotalLength() * progress);
+          const screen = new DOMPoint(local.x, local.y).matrixTransform(matrix);
+          return { x: screen.x, y: screen.y };
+        };
+        const pointer = (type, x, y, extra) => {
+          const options = extra || {};
+          return new PointerEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            clientX: x,
+            clientY: y,
+            button: 2,
+            buttons: options.buttons === undefined ? 2 : options.buttons,
+            ctrlKey: true,
+            pointerId: 71,
+            pointerType: 'mouse',
+            isPrimary: true,
+          });
+        };
+        knifeSteps.before = edgeGroups().map((group) => group.getAttribute('data-fisherai-edge-parent-id'));
+
+        // ---- 第一刀：真拖、真松手 → 只断开 A→C
+        const target = pointOn(edgeOf('knife-a'), 0.18);
+        if (!target) throw new Error('量不到 A→C 连线上的点');
+        surface.dispatchEvent(pointer('pointerdown', target.x, target.y - 46));
+        await wait(60);
+        surface.dispatchEvent(pointer('pointermove', target.x, target.y - 20));
+        await wait(60);
+        surface.dispatchEvent(pointer('pointermove', target.x, target.y + 20));
+        await wait(150);
+        const overlay = document.querySelector('[data-fisherai-knife-overlay]');
+        const hint = overlay?.querySelector('[data-fisherai-knife-hint]')?.getAttribute('d') || '';
+        const stroke = overlay?.querySelector('[data-fisherai-knife-stroke]')?.getAttribute('d') || '';
+        knifeSteps.preview = {
+          overlay: !!overlay,
+          strokeChars: stroke.length,
+          hintChars: hint.length,
+          hintCount: hint ? hint.split('M').length - 1 : 0,
+        };
+        surface.dispatchEvent(pointer('pointerup', target.x, target.y + 20));
+        await wait(500);
+        knifeSteps.after = edgeGroups().map((group) => group.getAttribute('data-fisherai-edge-parent-id'));
+
+        // ---- 第二刀停在「拖到一半」：交付图里就是切刀正在切的样子
+        const second = pointOn(edgeOf('knife-b'), 0.5);
+        if (second) {
+          surface.dispatchEvent(pointer('pointerdown', second.x, second.y - 70));
+          await wait(80);
+          surface.dispatchEvent(pointer('pointermove', second.x + 4, second.y - 30));
+          await wait(80);
+          surface.dispatchEvent(pointer('pointermove', second.x, second.y + 30, { buttons: 2 }));
+          await wait(160);
+          knifeSteps.delivery = {
+            overlay: !!document.querySelector('[data-fisherai-knife-overlay]'),
+            hint: !!document.querySelector('[data-fisherai-knife-hint]')?.getAttribute('d'),
+          };
+        }
+        knifeSteps.report = window.__canvasHandle && typeof window.__canvasHandle.knifeReport === 'function'
+          ? window.__canvasHandle.knifeReport()
+          : null;
+      } catch (error) {
+        knifeSteps.error = String((error && error.stack) || error);
+      }
+      knifeSteps.done = true;
+    };
+
     // ⚠️ 探针定时器必须在任何 await 之前立起来：headless 的 --virtual-time-budget
     //    会等页面的微任务/定时器都跑完，如果前面有长 await 把这段脚本卡住，探针一次都发不出去
     //    （现象：没收到页面探针）。所以这里先装探针，再启动那些要等 DOM 的场景流程。
@@ -3828,6 +4297,7 @@ const HOST_PAGE = `<!doctype html>
     void buildResizeScene();
     void buildLastModelScene();
     void buildArchiveScene();
+    void buildKnifeScene();
   </script>
 </body>
 </html>`;
@@ -4170,6 +4640,13 @@ const SCENES = [
   ['image-saved', `${ORIGIN}/?resume=${editProjectId}&xedit=saved`, `?resume=${editProjectId}&xedit=saved`,
     (probe) => Array.isArray(probe.editCanvas) && probe.editCanvas.length >= 2, 20000],
   /**
+   * 宫格裁剪（v1.46）：用户「画布宫格裁剪 ui 还没有更新」。
+   * 场景 = 工具条「宫格裁剪」→ nova 舞台 → 真拖竖向切线 → 3×3 → 导出序号 1,3 →
+   * 保存（画布上真的多出 2 个媒体节点）→ 再打开舞台截图（交付图）。
+   */
+  ['image-grid', `${ORIGIN}/?resume=${editProjectId}&xedit=grid`, `?resume=${editProjectId}&xedit=grid`,
+    (probe) => probe.imageEditor?.done === true, 34000],
+  /**
    * 网格跟随画布的**速度**（v1.33）：用户报「移动画布时网格比节点快」。
    * 同一块空画布跑两遍 —— dpr=1（历史默认，也是这个 bug 一直没被抓到的原因）与
    * dpr=1.25（本机 125% 缩放；根因就是网格把 translate 乘了 dpr）。
@@ -4216,6 +4693,12 @@ const SCENES = [
    */
   ['data-dir', `${ORIGIN}/?resume=${projectId}&settings=1&ddir=1`, `?resume=${projectId}&settings=1&ddir=1`,
     (probe) => probe.settings?.dataDirShot?.panel === true, 24000],
+  /**
+   * 切刀（v1.49）：用户「像blender一样按住ctrl加鼠标右键切换到切刀工具，划过的线会断开连接」。
+   * 场景：真派发 Ctrl + 右键拖拽划过 A→C → 只断开这一条（B→C 还在）→ 第二刀停在拖拽中当交付图。
+   */
+  ['knife', `${ORIGIN}/?resume=${knifeProjectId}&xknife=1`, `?resume=${knifeProjectId}&xknife=1`,
+    (probe) => probe.knife?.done === true, 26000],
 ];
 const onlyScenes = String(process.env.BROWSER_ONLY ?? '')
   .split(',')
@@ -4337,6 +4820,12 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     portReport('接入口探针跑完了（真拖线，没有半途报错）',
       port.done === true && !port.error,
       String(port.error ?? '').slice(0, 240));
+    // v1.47「从图像拉出的线与鼠标指针有很大偏差」：虚线自由端必须落在指针上
+    portReport('拖出来的虚线跟着指针（自由端与指针偏差 ≤ 2px）',
+      port.tempLine?.found === true &&
+        Math.abs(Number(port.tempLine?.delta?.[0])) <= 2 &&
+        Math.abs(Number(port.tempLine?.delta?.[1])) <= 2,
+      JSON.stringify(port.tempLine ?? null));
     // v1.31「新建节点默认模型不是我配的那个」：现场预置的通道模型别名是「魔搭出图」，
     // 这颗新建的图片节点上就该是它，而不是上游内置的 GPT Image 2 · API。
     portReport('新建 Image 节点的默认模型 = 通道里勾的模型（不再是上游内置 GPT Image 2 · API）',
@@ -4662,8 +5151,18 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
           JSON.stringify({ ...pattern, quiet: { left: quiet.left, top: quiet.top, std: Number(quiet.std.toFixed(2)) } }));
         report('像素级间距 = 24px（这一行左移 24px 与原图差异最小）',
           pattern.pitch === 24, `pitch=${pattern.pitch} diff=${pattern.pitchDiff}`);
-        report('星号墨色够淡（比底色亮 ≤90，不是一片白）',
-          pattern.inkMax - pattern.background <= 90,
+        /**
+         * v1.48：大矩阵的星号更大更亮，而大星圆心**压在小星上**（同心嵌套），
+         * 交点处会叠出 4 层 1px 笔画（小星 H/V + 大星 H/V）—— 真机实测 160，
+         * 但只是**孤立的交点像素**，画面整体仍是淡的（p99≈52）。
+         * 所以「不是一片白」分两条守：p99 仍按参考图的 0.19 口径 ≤90；
+         * 最亮交点放宽到 ≤170（再亮就真的刺眼了）。
+         */
+        report('星号整体够淡（p99 比底色亮 ≤90，不是一片白）',
+          pattern.inkP99 - pattern.background <= 90,
+          `bg=${pattern.background} p99=${pattern.inkP99} max=${pattern.inkMax}`);
+        report('最亮的大星交点也不刺眼（比底色亮 ≤170；v1.48 三层同心嵌套的叠墨）',
+          pattern.inkMax - pattern.background <= 170,
           `bg=${pattern.background} max=${pattern.inkMax} p99=${pattern.inkP99}`);
       } catch (error) {
         browserFailures += 1;
@@ -4715,6 +5214,35 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
         `background-size=${measure.sizeZoom1_5}px`);
       report('读数里报出 dpr（这一场跑在哪种缩放下，可回查）',
         Number(measure.dpr) > 0, `dpr=${measure.dpr}`);
+      /**
+       * v1.48（用户「缩小画布就密密麻麻」）：三层嵌套矩阵真机显隐。
+       * 真浏览器里量的是每层 wrapper 的 inline opacity（JS 按屏幕间距算），不是只读报告。
+       */
+      const tiers = steps.tiers ?? null;
+      const opacityOf = (list, id) =>
+        (list ?? []).find((tier) => tier.id === id)?.opacity ?? null;
+      report('三层嵌套矩阵都挂上了（24 / 120 / 600）',
+        ['minor', 'major', 'super'].every(
+          (id) =>
+            (tiers?.at1 ?? []).find((tier) => tier.id === id)?.spacing ===
+            { minor: 24, major: 120, super: 600 }[id],
+        ),
+        JSON.stringify(tiers?.at1 ?? null));
+      report('zoom 1：小矩阵 + 大矩阵亮着，最大一层不出现',
+        opacityOf(tiers?.at1, 'minor') > 0.99 &&
+          opacityOf(tiers?.at1, 'major') > 0.99 &&
+          opacityOf(tiers?.at1, 'super') < 0.001,
+        JSON.stringify(tiers?.at1 ?? null));
+      report('zoom 0.2：小矩阵已消失、大矩阵接棒、更大一层补进来（不再密密麻麻）',
+        opacityOf(tiers?.at02, 'minor') < 0.001 &&
+          opacityOf(tiers?.at02, 'major') > 0.99 &&
+          opacityOf(tiers?.at02, 'super') > 0.99,
+        JSON.stringify(tiers?.at02 ?? null));
+      report('zoom 0.05：只剩最大一层（30px），画面不会被星号填满',
+        opacityOf(tiers?.at005, 'minor') < 0.001 &&
+          opacityOf(tiers?.at005, 'major') < 0.001 &&
+          opacityOf(tiers?.at005, 'super') > 0.99,
+        JSON.stringify(tiers?.at005 ?? null));
     }
   }
 
@@ -5015,6 +5543,13 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
       `bridgeCalls=${search.bridgeCalls} created=${JSON.stringify(search.createdNodeIds ?? null)}`);
     report('新节点就落在鼠标那一点上（节点框覆盖光标，容差 20px）',
       search.nodeCoversPointer === true, JSON.stringify(search.nodeAtPointerDelta ?? null));
+    // v1.45：Blender 式「新建并移动」—— 确认后节点跟着鼠标，左键才放下
+    report('确认后节点跟着鼠标走（屏幕位移 +60/+40）',
+      search.follow?.dx === 60 && search.follow?.dy === 40,
+      JSON.stringify(search.follow ?? null));
+    report('左键放下后节点不再跟手',
+      search.dropped?.dx === 0 && search.dropped?.dy === 0,
+      JSON.stringify(search.dropped ?? null));
     report('搜工作流标题能命中该工作流候选',
       typeof search.workflowOption === 'string' && search.workflowOption.startsWith('workflow:'),
       JSON.stringify({ option: search.workflowOption ?? null, items: search.workflowCandidates ?? null }));
@@ -5330,6 +5865,63 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
   }
 
   /**
+   * 宫格裁剪（v1.46，?xedit=grid）：用户「画布宫格裁剪 ui 还没有更新」的真机回归。
+   *
+   * jsdom 只守结构（test-canvas-shadcn-ui 的第 5.6 段），这里量的是**真浏览器**才有的东西：
+   * 舞台铺满画布、图片真的解码出尺寸、拖切线真的改了单格尺寸、3×3 与导出序号真的改了张数、
+   * 保存真的走了 POST /assets/images（画布多出 2 个媒体节点）。
+   */
+  if (label === 'image-grid') {
+    const scene = probe.imageEditor ?? {};
+    const grid = scene.grid ?? {};
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    report('选中有结果图的节点后能打开 nova 版宫格裁剪',
+      scene.selected === true && !scene.error, String(scene.error ?? ''));
+    report('宫格舞台全屏铺在画布容器上（宽高与画布一致）',
+      grid.coversCanvas === true, `${grid.width}x${grid.height}`);
+    report('头部 / 底栏高度在正常范围（不是被压扁）',
+      Number(grid.headerHeight) >= 40 && Number(grid.footerHeight) >= 40,
+      `header=${grid.headerHeight} footer=${grid.footerHeight}`);
+    report('宫格画布量到了真实尺寸（图片解码成功）',
+      Number(grid.canvasWidth) > 100 && Number(grid.canvasHeight) > 100,
+      `${grid.canvasWidth}x${grid.canvasHeight}`);
+    report('vendor 那套旧裁剪器不再出现（没有 role=dialog[aria-label=裁切图片]）',
+      grid.vendorDialog === false);
+    report('默认 2×2 → 4 格，保存文案是「保存 4 张」',
+      /4 格/.test(String(grid.countText)) && /保存 4 张/.test(String(grid.saveText)),
+      `${grid.countText} / ${grid.saveText}`);
+    report('6 个宫格预设都在画布范围内、尺寸正常',
+      grid.presets === 6 && grid.presetsInside === true,
+      `presets=${grid.presets} inside=${grid.presetsInside}`);
+    report('工具条有 2 个间隙滑杆 / 7 个比例 / 4 个导出顺序',
+      grid.sliders === 2 && grid.ratios === 7 && grid.orders === 4,
+      `sliders=${grid.sliders} ratios=${grid.ratios} orders=${grid.orders}`);
+    report('真拖第一条竖向切线后单格尺寸跟着变（切线真的可拖）',
+      Boolean(grid.cellAfterDrag) && grid.cellAfterDrag !== grid.cellBefore,
+      `${grid.cellBefore} → ${grid.cellAfterDrag}`);
+    report('点 3×3 预设 → 9 格、保存文案变「保存 9 张」',
+      /9 格/.test(String(grid.countAfterPreset)) && /保存 9 张/.test(String(grid.saveTextAfterPreset)),
+      `${grid.countAfterPreset} / ${grid.saveTextAfterPreset}`);
+    report('导出序号填 1,3 → 只导 2 张',
+      /导出 2/.test(String(grid.countAfterSelection)) &&
+        /保存 2 张/.test(String(grid.saveTextAfterSelection)),
+      `${grid.countAfterSelection} / ${grid.saveTextAfterSelection}`);
+    report('保存按钮可点', grid.saveEnabled === true);
+    report('点保存后画布上真的多出 2 个节点（每格一张）',
+      Number(grid.saved?.nodeCountAfter) === Number(grid.saved?.nodeCountBefore) + 2,
+      `${grid.saved?.nodeCountBefore} → ${grid.saved?.nodeCountAfter}`);
+    report('两张新图都是落盘的媒体地址（POST /assets/images 成功了）',
+      Array.isArray(grid.saved?.imageSrcs) && grid.saved.imageSrcs.length === 2 &&
+        grid.saved.imageSrcs.every((src) => String(src).includes('/api/aifisher/canvas/media/')),
+      JSON.stringify((grid.saved?.imageSrcs ?? []).map((src) => String(src).slice(-24))));
+    report('保存完成后宫格舞台自动关闭', grid.saved?.stageClosed === true);
+    report('保存后再打开宫格舞台仍然正常（截图停在这）', grid.reopened === true);
+  }
+
+  /**
    * 项目数据目录取证场景（?ddir=1，v1.43）：设置 → 存储 里的「项目数据目录（缓存）」面板。
    *
    * 真机只验「面板真的挂在这一页上、读数是这台机器的真路径、按钮状态合理、有实际尺寸」
@@ -5361,6 +5953,38 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
       String(shot.input || '').toLowerCase() === String(shot.current || '').toLowerCase() &&
         /应用/.test(String(shot.applyLabel || '')),
       `${String(shot.input || '').slice(0, 60)} / ${shot.applyLabel}`);
+  }
+
+  /**
+   * 切刀（?xknife=1，v1.49）：用户「像blender一样按住ctrl加鼠标右键切换到切刀工具，
+   * 划过的线会断开连接」。这一场是真浏览器里**真派发 Ctrl + 右键拖拽**，验：
+   * 起刀预览（浮层 + 红线高亮）、松手只断开被划过的那条、交付图停在「切到一半」。
+   */
+  if (label === 'knife') {
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const knife = probe.knife ?? {};
+    report('切刀场景跑完了（真拖了 Ctrl+右键，没有半途报错）',
+      knife.done === true && !knife.error, String(knife.error ?? '').slice(0, 240));
+    report('切刀桥装上了（window.__FISHERAI_CANVAS_KNIFE__.cut）', knife.bridge === true);
+    report('起刀时有刀口线 + 被划过的连线变红（只有那一条）',
+      knife.preview?.overlay === true && Number(knife.preview?.strokeChars) > 0 &&
+        Number(knife.preview?.hintCount) === 1,
+      JSON.stringify(knife.preview ?? null));
+    report('松手后只断开被划过的那条（A→C 没了，B→C 还在）',
+      new Set(knife.before ?? []).size === 2 && (knife.before ?? []).includes('knife-a') &&
+        (knife.before ?? []).includes('knife-b') &&
+        JSON.stringify(knife.after) === JSON.stringify(['knife-b']),
+      JSON.stringify({ before: knife.before, after: knife.after }));
+    report('切刀读数：这一场开过 1 次、切中 1 条、断开 1 条、无错误',
+      Number(knife.report?.sessions) >= 1 && knife.report?.targets === 1 && knife.report?.cuts === 1 &&
+        (knife.report?.lastError ?? '') === '',
+      JSON.stringify(knife.report));
+    report('交付图停在「切到一半」（刀口与红线还在画面上）',
+      knife.delivery?.overlay === true && knife.delivery?.hint === true,
+      JSON.stringify(knife.delivery ?? null));
   }
 
   /**

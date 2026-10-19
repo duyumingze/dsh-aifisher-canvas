@@ -25,6 +25,7 @@
  *    用错那份 React 19 既不报错也不渲染（整块面板会消失）。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import { createPortal } from 'react-dom';
 import {
   ArchiveIcon,
@@ -103,7 +104,7 @@ function errorMessage(cause: unknown, fallback: string): string {
 }
 
 export function CanvasProjectArchive(react: Runtime, props: Props) {
-  const h = react.createElement;
+  const h = createElement(react);
   const store = react.useSyncExternalStore(subscribeProjectArchive, projectArchiveSnapshot);
   const open = store.open;
   const openVersion = store.version;

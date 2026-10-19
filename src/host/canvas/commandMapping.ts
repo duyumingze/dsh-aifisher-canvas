@@ -49,13 +49,14 @@ export function buildCanvasCommand(args: CanvasToolArgs): Record<string, unknown
 
     case 'edit': {
       const revision = typeof args.revision === 'string' ? args.revision : '';
-      if (!revision) {
-        return 'edit 需要 revision：先 action:"read" 取回当前 revision，再带上它提交编辑（乐观并发令牌）。';
-      }
       if (!Array.isArray(args.operations) || args.operations.length === 0) {
         return 'edit 需要非空 operations 数组，例如 [{kind:"create",ref:"n1",type:"Image",x:0,y:0}]。';
       }
-      return { action: 'edit', revision, operations: args.operations };
+      // revision 可以省略：host 会在下发前自己读一次补上（见 index.ts）。
+      // 这样模型「读+改」只要一次工具调用，省掉一个模型往返 —— 对话控制画布慢的主因之一。
+      return revision
+        ? { action: 'edit', revision, operations: args.operations }
+        : { action: 'edit', operations: args.operations };
     }
 
     case 'undo': {

@@ -62,6 +62,14 @@
  *     即官方客户端那套身份账号），而用户手上是 api.work-fisher.com（FisherAI 接口站）
  *     的账号 —— 两套体系，登不上只添乱；插件里也没有任何功能依赖它。
  *
+ *   —— v1.44 ~ v1.48：点阵三层嵌套、宫格裁剪 nova、节点搜索「新建并移动」、拉线跟手 ——
+ *     （都不在这里：前者在 canvasGrid.ts + CanvasEffectsStore，其余在 src/canvas-ui 与 vendor 补丁）
+ *
+ *   —— v1.49：切刀（Ctrl + 右键拖拽切开连线）——
+ *     installCanvasKnife   手势 / 预览 / 命中在 src/client/canvas/knife.ts；
+ *                          真正断开由 vendor 补丁 3.8t（canvasEdges 加身份属性 +
+ *                          canvasApplication 里的 `__FISHERAI_CANVAS_KNIFE__.cut` 桥）落地。
+ *
  * 另外注意：节点尺寸规则里有一处上游缺陷（`?.getNodeSize(node).width`），
  * 已在 vendor 阶段补上 `?.`（见 scripts/vendor-aifisher.mjs 的「修上游缺陷」段），
  * 所以这里不需要再塞 __FISHERAI_WORKFLOW_NODES__ 假适配器。
@@ -139,6 +147,7 @@ import {
   projectArchiveReport,
   type ProjectArchiveRestoreReceipt,
 } from '../../canvas-ui/canvas/CanvasProjectArchive';
+import { installCanvasKnife } from './knife';
 
 interface Installer {
   name: string;
@@ -703,6 +712,9 @@ function installProjectArchiveSupport(): { dispose: () => void } {
   { name: 'installProjectArchiveSupport', install: installProjectArchiveSupport },
   // ---- v1.43：设置 → 存储 → 项目数据目录（缓存目录可自定义，重启 DSH 生效）----
   { name: 'installCanvasDataDirSupport', install: installCanvasDataDirSupport },
+  // ---- v1.49：切刀（Ctrl + 右键拖拽，划过的连线断开）----
+  //     手势/预览在 src/client/canvas/knife.ts；断开由 vendor 补丁 3.8t 的桥落地
+  { name: 'installCanvasKnife', install: installCanvasKnife },
 ];
 
 /** 已装成功的模块名（诊断用）。 */

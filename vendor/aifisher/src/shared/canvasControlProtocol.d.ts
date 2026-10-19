@@ -1,6 +1,6 @@
 export type CanvasEdit =
-  | { kind: 'create'; ref: string; type: 'Image' | 'Video' | 'Audio' | 'Text'; x: number; y: number; title?: string; prompt?: string }
-  | { kind: 'update'; nodeId: string; patch: { title?: string; prompt?: string; x?: number; y?: number } }
+  | { kind: 'create'; ref: string; type: 'Image' | 'Video' | 'Audio' | 'Text'; x: number; y: number; title?: string; prompt?: string; text?: string }
+  | { kind: 'update'; nodeId: string; patch: { title?: string; prompt?: string; text?: string; x?: number; y?: number } }
   | { kind: 'configure'; nodeId: string; model: string; parameters: Record<string, string | number | boolean> }
   | { kind: 'delete'; nodeId: string }
   | { kind: 'connect'; sourceId: string; targetId: string; sourcePort?: number }

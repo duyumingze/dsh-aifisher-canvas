@@ -15,6 +15,7 @@
  *    产物里 React 有两份副本，用错那分量 React 19 不报错也不渲染（整条控制条会消失）。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import { CircleHelpIcon, KeyboardIcon, MaximizeIcon, MapIcon, ZoomInIcon } from 'lucide-react';
 
 import { Button } from '@/ui/button';
@@ -99,7 +100,11 @@ function CanvasNodeSearchBound(props: NodeSearchBoundProps) {
 }
 CanvasNodeSearchBound.displayName = 'CanvasNodeSearchBound';
 
-type NodeSearchBoundProps = ReactTypes.ComponentProps<typeof CanvasNodeSearch>;
+/**
+ * 组件签名是 `(react, props)` 两参形式，`ComponentProps<>` 只认单参数组件，
+ * 会推成 `{}`（于是 props.view 变成多余属性）；这里直接取第二个参数的类型。
+ */
+type NodeSearchBoundProps = Parameters<typeof CanvasNodeSearch>[1];
 const reactRuntime = ReactTypes as unknown as Parameters<typeof CanvasNodeSearch>[0];
 
 /**
@@ -163,7 +168,7 @@ export function CanvasViewportControls(
     Minimap: ReactTypes.ComponentType<MinimapComponentProps>;
   },
 ) {
-  const h = react.createElement;
+  const h = createElement(react);
   const { Minimap } = components;
   const {
     view,

@@ -1288,6 +1288,51 @@ export function CanvasApplication(React: Runtime, dependencies: Dependencies) {
       return (st.observe(zoomControlsRef.current), () => st.disconnect());
     }
   }, [isMinimapOpen, view]);
+  // ---------------------------------------------------------------- dsh-aifisher-canvas v1.49
+  // 切刀（Ctrl + 右键拖拽）：把「被划过的连线」真的断开。
+  // 手势/几何在 src/client/canvas/knife.ts（从渲染出来的 <path> 采样，命中后再来这里）；
+  // 只有这里够得着 setNodes 与连接适配器，所以桥只做一件事：拿一串连线身份去断开。
+  // 双击断线走的就是同一个 adapter.disconnect，撤销/脏标记由既有的 nodes 变更 effect 照旧处理。
+  React.useEffect(() => {
+    const holder = window as unknown as {
+      __FISHERAI_CANVAS_KNIFE__?: {
+        cut(
+          edges: ReadonlyArray<{ parentId: string; childId: string; portIndex?: number }>,
+        ): number;
+      };
+    };
+    const bridge = {
+      cut(edges: ReadonlyArray<{ parentId: string; childId: string; portIndex?: number }>) {
+        const adapter = window.__FISHERAI_CANVAS_CONNECTIONS__;
+        if (!adapter || !Array.isArray(edges) || edges.length === 0) return 0;
+        let next = getNodes();
+        let cut = 0;
+        for (const identity of edges) {
+          if (!identity || typeof identity.parentId !== 'string' || typeof identity.childId !== 'string')
+            continue;
+          const updated = adapter.disconnect(next, {
+            parentId: identity.parentId,
+            childId: identity.childId,
+            portIndex: typeof identity.portIndex === 'number' ? identity.portIndex : undefined,
+          });
+          if (updated !== next) {
+            next = updated;
+            cut += 1;
+          }
+        }
+        if (!cut) return 0;
+        flushSync(() => {
+          setNodes(next);
+          setSelectedConnection(null);
+        });
+        return cut;
+      },
+    };
+    holder.__FISHERAI_CANVAS_KNIFE__ = bridge;
+    return () => {
+      if (holder.__FISHERAI_CANVAS_KNIFE__ === bridge) holder.__FISHERAI_CANVAS_KNIFE__ = undefined;
+    };
+  }, [getNodes, setNodes, setSelectedConnection]);
   React.useEffect(() => {
     window.__FISHERAI_FOCUS_NODES__ = focusNodes;
     return () => {

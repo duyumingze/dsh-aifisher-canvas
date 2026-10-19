@@ -393,7 +393,7 @@ function messageOf(error: unknown): string {
 }
 
 /** ComfyUI API 格式里的连线：[来源节点 id, 输出序号]。 */
-function isLink(value: unknown): boolean {
+function isLink(value: unknown): value is [string, number] {
   return (
     Array.isArray(value) &&
     value.length === 2 &&

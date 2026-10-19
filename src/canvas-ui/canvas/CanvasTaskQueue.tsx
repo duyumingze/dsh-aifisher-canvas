@@ -40,6 +40,7 @@
  *    用错那分 React 19 不报错也不渲染（面板会整块消失）。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import { createPortal } from 'react-dom';
 import {
   BanIcon,
@@ -276,7 +277,7 @@ function onPanelWheel(event: ReactTypes.WheelEvent<HTMLDivElement>) {
 }
 
 export function CanvasTaskQueue(react: Runtime, props: Props) {
-  const h = react.createElement;
+  const h = createElement(react);
   const store = react.useSyncExternalStore(subscribeTaskQueue, taskQueueSnapshot);
   const open = store.open;
 

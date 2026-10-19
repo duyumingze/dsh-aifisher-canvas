@@ -18,6 +18,7 @@
  *    `ComfyWorkflowGraphBound`（见 ComfyWorkflowConfig.tsx）绑定，不要直接 createElement。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import { MaximizeIcon, ZoomInIcon, ZoomOutIcon } from 'lucide-react';
 
 import { cn } from '@/lib/utils';
@@ -159,7 +160,7 @@ export function edgePath(
 }
 
 export function ComfyWorkflowGraph(react: Runtime, props: ComfyWorkflowGraphProps) {
-  const h = react.createElement;
+  const h = createElement(react);
   const { graph, counts, pickedIds, selectedNodeId, onSelectNode } = props;
   const metrics = graph.metrics;
   const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));

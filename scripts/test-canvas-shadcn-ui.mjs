@@ -460,7 +460,7 @@ check(
     Boolean(toolbar?.querySelector('button[aria-label="图片编辑"]')));
   check('工具条里有「标注」入口（v1.26 起打开 nova 版标注器）',
     Boolean(toolbar?.querySelector('button[aria-label="标注"]')));
-  // 宫格裁剪 / 全景 / 角度这几种模式仍走 vendor（本轮不改），入口必须还在
+  // 宫格裁剪（v1.46 起 nova 版）/ 全景 / 角度仍各自走自己的实现，入口必须还在
   for (const label of ['宫格裁剪', '全景图', '角度', '尺寸']) {
     check(`工具条里「${label}」入口仍在`, Boolean(toolbar?.querySelector(`button[aria-label="${label}"]`)));
   }
@@ -573,7 +573,7 @@ check(
   check('关掉图片编辑后工作台消失',
     !container.querySelector('[data-fisherai-image-studio="editor"]'));
 
-  // ---- 宫格裁剪：mode!=='editor' 必须原样交回 vendor（能力一个不丢）----
+  // ---- 宫格裁剪：v1.46 起是 nova 版宫格舞台（几何/切线/导出仍复用 vendor 纯函数）----
   //
   // ⚠️ 这里必须**重新选中 + 重新查一次**工具条：上面开关过两块 dialog，节点可能已经失焦、
   //    节点卡那棵子树也被重渲染过，早先拿到的 `toolbar` 引用会脱离文档（点它没反应）。
@@ -585,23 +585,81 @@ check(
   const gridButton = gridBar?.querySelector('button[aria-label="宫格裁剪"]');
   check('重新选中后「宫格裁剪」按钮还在工具条里', Boolean(gridButton));
   gridButton?.click();
-  // vendor 的图片编辑整棵树是 portal 到 **document.body** 的（我们的 nova 版才 portal 进画布容器），
-  // 所以这里查 body，不是 container。
-  const vendorCrop = await waitFor(
-    async () => (/横向分割/.test(window.document.body.textContent ?? '') ? container : null),
+  const gridStage = await waitFor(
+    async () => container.querySelector('[data-fisherai-image-workbench="grid"]'),
     8000,
   );
-  check('「宫格裁剪」仍走 vendor 那套裁剪器（role=dialog 裁切图片 + 「横向分割」文案）',
-    Boolean(vendorCrop) &&
-      Boolean(window.document.querySelector('[role="dialog"][aria-label="裁切图片"]')),
-    String(window.document.body.textContent ?? '').replace(/\s+/g, ' ').slice(0, 120));
-  check('宫格裁剪时没有再渲染 nova 工作台',
-    !container.querySelector('[data-fisherai-image-studio="editor"]'));
-  // vendor 裁剪器没有语义 class，用它的可访问关闭按钮/文案收尾：直接派发 Esc
+  check('「宫格裁剪」打开 nova 版宫格舞台（data-fisherai-image-workbench=grid）',
+    Boolean(gridStage));
+  check('宫格舞台是 role=dialog + aria-label=宫格裁剪',
+    gridStage?.getAttribute('role') === 'dialog' &&
+      gridStage?.getAttribute('aria-label') === '宫格裁剪',
+    `${gridStage?.getAttribute('role')} / ${gridStage?.getAttribute('aria-label')}`);
+  check('宫格舞台 portal 在画布容器里（不是 document.body）',
+    Boolean(gridStage && container.contains(gridStage)));
+  check('vendor 那套旧裁剪器没有一起渲染出来（没有 role=dialog[aria-label=裁切图片]）',
+    !window.document.querySelector('[role="dialog"][aria-label="裁切图片"]'));
+  check('宫格舞台有选区画布（data-fisherai-crop-canvas）',
+    Boolean(gridStage?.querySelector('[data-fisherai-crop-canvas]')));
+  const gridPresets = [...(gridStage?.querySelectorAll('[data-fisherai-grid-crop-preset]') ?? [])];
+  check('宫格舞台有 6 个宫格预设（2x2/3x3/3x4/4x3/1x4/4x1）',
+    gridPresets.length === 6 &&
+      ['2x2', '3x3', '3x4', '4x3', '1x4', '4x1'].every((id) =>
+        gridPresets.some((node) => node.getAttribute('data-fisherai-grid-crop-preset') === id)),
+    String(gridPresets.map((node) => node.getAttribute('data-fisherai-grid-crop-preset')).join(',')));
+  check('默认选中 2×2 预设（aria-pressed）',
+    gridStage?.querySelector('[data-fisherai-grid-crop-preset="2x2"]')?.getAttribute('aria-pressed') ===
+      'true');
+  check('宫格舞台有横向 / 竖向分割读数（默认 2 × 2）',
+    gridStage?.querySelector('[data-fisherai-grid-crop-columns]')?.textContent === '2' &&
+      gridStage?.querySelector('[data-fisherai-grid-crop-rows]')?.textContent === '2',
+    `${gridStage?.querySelector('[data-fisherai-grid-crop-columns]')?.textContent} / ${gridStage?.querySelector('[data-fisherai-grid-crop-rows]')?.textContent}`);
+  for (const label of ['减少横向分割', '增加横向分割', '减少竖向分割', '增加竖向分割', '恢复等分']) {
+    check(`宫格舞台有「${label}」按钮`, Boolean(gridStage?.querySelector(`[aria-label="${label}"]`)));
+  }
+  check('宫格舞台有两个间隙滑杆（shadcn Slider：上下 / 左右）',
+    gridStage?.querySelectorAll('[data-slot="slider"]').length === 2 &&
+      Boolean(gridStage?.querySelector('[data-fisherai-grid-crop-row-gap]')) &&
+      Boolean(gridStage?.querySelector('[data-fisherai-grid-crop-column-gap]')),
+    String(gridStage?.querySelectorAll('[data-slot="slider"]').length));
+  check('宫格舞台有 7 个裁切比例按钮',
+    gridStage?.querySelectorAll('[data-fisherai-grid-crop-ratio]').length === 7,
+    String(gridStage?.querySelectorAll('[data-fisherai-grid-crop-ratio]').length));
+  check('宫格舞台有 4 个导出顺序（逐行 / 逐列 / 蛇形 / 倒序）',
+    gridStage?.querySelectorAll('[data-fisherai-grid-crop-order]').length === 4 &&
+      ['row', 'column', 'snake', 'reverse'].every((value) =>
+        Boolean(gridStage?.querySelector(`[data-fisherai-grid-crop-order="${value}"]`))),
+    String(gridStage?.querySelectorAll('[data-fisherai-grid-crop-order]').length));
+  check('默认导出顺序是逐行（aria-pressed）',
+    gridStage?.querySelector('[data-fisherai-grid-crop-order="row"]')?.getAttribute('aria-pressed') ===
+      'true');
+  const exportInput = gridStage?.querySelector('[data-fisherai-grid-crop-selection]');
+  check('宫格舞台有导出序号输入框（aria-label=导出格子序号）',
+    exportInput?.getAttribute('aria-label') === '导出格子序号' &&
+      exportInput?.getAttribute('placeholder') === '全部 / 1,3,5-8');
+  check('宫格舞台有张数读数（默认 2×2 = 4 格）',
+    String(gridStage?.querySelector('[data-fisherai-grid-crop-count]')?.textContent ?? '').includes(
+      '4 格',
+    ),
+    String(gridStage?.querySelector('[data-fisherai-grid-crop-count]')?.textContent ?? ''));
+  check('宫格舞台有单格尺寸读数',
+    Boolean(gridStage?.querySelector('[data-fisherai-grid-crop-cell]')));
+  const gridSave = gridStage?.querySelector('[data-fisherai-image-save="grid"]');
+  check('宫格保存按钮在（aria-label=保存宫格裁剪，文案带张数）',
+    gridSave?.getAttribute('aria-label') === '保存宫格裁剪' &&
+      String(gridSave?.textContent ?? '').includes('保存 4 张'),
+    String(gridSave?.textContent ?? '(none)'));
+  check('图片没加载完时宫格保存是禁用态（与裁剪舞台同一口径）', gridSave?.disabled === true);
+  check('宫格舞台没有出现 vendor 的旧工具条（原生 select / 恢复等分文案以外的旧控件）',
+    gridStage?.querySelectorAll('select').length === 0,
+    String(gridStage?.querySelectorAll('select').length));
+  // activateModal 的 Esc 契约：整块舞台关掉（回到画布）
   window.document.dispatchEvent(
     new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
   );
-  await settle(200);
+  await settle(250);
+  check('Esc 关闭宫格舞台',
+    !container.querySelector('[data-fisherai-image-workbench="grid"]'));
 }
 
 // ---------------------------------------------------------------- 5.7 尺寸对话框（v1.38，nova 版）

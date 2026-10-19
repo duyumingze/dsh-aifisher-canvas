@@ -378,6 +378,15 @@ check('未打开时页面上没有搜索面板', !panel());
     itemIds()[0] === 'type:Video' && itemIds().length < before.length,
     JSON.stringify(itemIds()),
   );
+  // ↑/↓ 只跳一格（输入框与面板根挂的是同一个处理器，漏了 stopPropagation 会一次跳两格）
+  const secondId = itemIds()[1];
+  pressKey('ArrowDown');
+  await settle(150);
+  check(
+    '按一次 ↓ 只往下走一格',
+    panel()?.getAttribute('data-fisherai-node-search-active') === secondId,
+    `active=[${panel()?.getAttribute('data-fisherai-node-search-active')}] second=[${secondId}]`,
+  );
   typeInInput('本地文生图');
   await settle(200);
   check(
@@ -400,19 +409,26 @@ check('未打开时页面上没有搜索面板', !panel());
     panel()?.getAttribute('data-fisherai-node-search-active') === 'type:Image',
     `active=[${panel()?.getAttribute('data-fisherai-node-search-active')}] count=${panel()?.getAttribute('data-fisherai-node-search-count')} query=[${panel()?.getAttribute('data-fisherai-node-search-query')}] items=${JSON.stringify(itemIds())} inputs=${window.document.querySelectorAll('[data-fisherai-node-search-input]').length} panels=${window.document.querySelectorAll('[data-fisherai-node-search-panel]').length}`,
   );
+  const dispatchesBeforeEnter = dispatched.length;
   pressKey('Enter');
   await settle(600);
   check('Enter 之后面板关闭', !panel());
+  check(
+    '一次 Enter 只派发一次建节点事件（输入框与面板根不能各处理一遍）',
+    dispatched.length - dispatchesBeforeEnter === 1,
+    `${dispatched.length - dispatchesBeforeEnter} 次`,
+  );
   const nodes = await waitFor(async () => {
     const list = await readCanvas();
     return list.length ? list : null;
   });
-  const image = (nodes ?? []).find((node) => node.type === 'Image');
+  const images = (nodes ?? []).filter((node) => node.type === 'Image');
   check(
-    '搜「图像」+ Enter 建出了图像节点',
-    Boolean(image),
-    JSON.stringify({ nodes: (nodes ?? []).map((node) => node.type), dispatched: dispatched.slice(-1) }),
+    '搜「图像」+ Enter 只建出一个图像节点（不是两个叠在一起）',
+    images.length === 1,
+    JSON.stringify({ nodes: (nodes ?? []).map((node) => node.type), dispatched: dispatched.slice(-2) }),
   );
+  const image = images[0];
   const saved = await waitFor(async () => {
     const node = (await savedNodes()).find((item) => item.id === image?.id);
     return node ?? null;
@@ -423,6 +439,46 @@ check('未打开时页面上没有搜索面板', !panel());
     JSON.stringify({ x: saved?.x, y: saved?.y }),
   );
   check('新节点带着画布的默认模型（与右键菜单建出来的完全一样）', Boolean(saved?.imageModel), String(saved?.imageModel));
+
+  // 「新建并移动」：节点先跟着鼠标走，下一次左键才放下
+  const move = (x, y) =>
+    window.dispatchEvent(new window.MouseEvent('pointermove', { bubbles: true, clientX: x, clientY: y }));
+  move(400, 300); // 第一次只定基线
+  await settle(80);
+  move(440, 324);
+  await settle(200);
+  const following = (await readCanvas()).find((node) => node.id === image?.id);
+  check(
+    '确认后节点跟着鼠标走（方向与位移都对：+40/+24，缩放 1）',
+    following && Math.abs(Number(following.x) - 240) <= 2 && Math.abs(Number(following.y) - 174) <= 2,
+    JSON.stringify({ x: following?.x, y: following?.y }),
+  );
+
+  const drop = new window.MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 });
+  // 真机上左键落在画布底盘上（target 必须是画布内元素，桥才判定「吞掉」）
+  canvasBackground().dispatchEvent(drop);
+  check(
+    '放下时这一次左键被吞掉（不会顺带开始拖节点/清掉选中）',
+    drop.defaultPrevented === true,
+    String(drop.defaultPrevented),
+  );
+  move(600, 500);
+  await settle(200);
+  const placed = (await readCanvas()).find((node) => node.id === image?.id);
+  check(
+    '左键放下后节点不再跟手',
+    placed && Math.abs(Number(placed.x) - 240) <= 2 && Math.abs(Number(placed.y) - 174) <= 2,
+    JSON.stringify({ x: placed?.x, y: placed?.y }),
+  );
+  const savedAfterDrop = await waitFor(async () => {
+    const node = (await savedNodes()).find((item) => item.id === image?.id);
+    return node && Math.abs(Number(node.x) - 240) <= 2 ? node : null;
+  });
+  check(
+    '放下的位置会存盘（移动过程中不丢更新）',
+    Boolean(savedAfterDrop),
+    JSON.stringify({ x: savedAfterDrop?.x, y: savedAfterDrop?.y }),
+  );
 }
 
 // ---- B4. 用搜索建节点（ComfyUI 工作流 → comfyMode）
@@ -483,6 +539,28 @@ check('未打开时页面上没有搜索面板', !panel());
     Math.abs(parseInt(panel()?.style.left ?? '0', 10) - Math.round(window.innerWidth / 2)) <= 2,
     `left=${panel()?.style.left} top=${panel()?.style.top} window=${window.innerWidth}`,
   );
+  // 工具栏入口也要能真的建出节点（以前没有鼠标位置 → 事件里没有合法 point → 静默什么都不发生）
+  const beforeToolbarNodes = await readCanvas();
+  pressKey('Enter');
+  await settle(600);
+  const afterToolbarNodes = await readCanvas();
+  const toolbarNode = afterToolbarNodes.find(
+    (node) => !beforeToolbarNodes.some((before) => before.id === node.id),
+  );
+  check(
+    '工具栏入口也能建节点（落点回落到画布正中）',
+    afterToolbarNodes.length === beforeToolbarNodes.length + 1 &&
+      Boolean(toolbarNode) &&
+      Math.abs(Number(toolbarNode.x) - window.innerWidth / 2) <= 2 &&
+      Math.abs(Number(toolbarNode.y) - window.innerHeight / 2) <= 2,
+    JSON.stringify({
+      delta: afterToolbarNodes.length - beforeToolbarNodes.length,
+      x: toolbarNode?.x,
+      y: toolbarNode?.y,
+    }),
+  );
+  window.dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));
+  await settle(120);
   await dismissPanel();
   await settle(150);
 }

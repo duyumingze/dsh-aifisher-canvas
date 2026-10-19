@@ -24,6 +24,7 @@ import { installCanvasBootstrap, bootstrapInstallerNames } from './bootstrap';
 import { CanvasStage, canvasBindingReport, canvasViewInjectionReport } from './stage';
 import { installCanvasDiagnostics, reportCanvasError, reportCanvasInfo } from './diagnostics';
 import { canvasGridReport, mountCanvasGrid } from './canvasGrid';
+import { knifeReport } from './knife';
 
 export interface CanvasHandle {
   /** 卸载画布：root.unmount + 撤销装配 + 移除样式。 */
@@ -102,6 +103,8 @@ export function canvasAppBuildInfo(): Record<string, unknown> {
     // 新节点默认模型（v1.40）：按 kind 记着的模型 + 存档状态 + 命中/未命中次数
     // （「新建节点还是旧模型」时先看这里：是没记上，还是记着的模型已经不在目录里）
     lastModel: canvasLastModelReport(),
+    // 切刀（v1.49）：装没装 / 认得出几条连线 / 切过几刀（「Ctrl+右键没反应」时先看这里）
+    knife: knifeReport(),
   };
 }
 
@@ -172,6 +175,35 @@ export type {
   CanvasModelKind,
 } from '../../canvas-ui/canvas/CanvasLastModel';
 
+/**
+ * 排查用 / 回归用：「切刀」（v1.49）的纯逻辑。
+ *
+ * 与叠图切换、扩图、上次模型同一条理由 —— 回归在**构建产物**上直接验「解析 `d` → 屏幕坐标 →
+ * 划到没划到 → 切哪几条」，不必先开浏览器；真实指针手势那半条路由 browser-check 的 knife 场景
+ * 与 jsdom 里真派发 Ctrl+右键拖拽的用例守着。
+ */
+export {
+  collectKnifeEdges,
+  KNIFE_CURVE_STEPS,
+  KNIFE_HIT_TOLERANCE,
+  KNIFE_MIN_STROKE,
+  knifeCutTargets,
+  knifeDistancePointSegment,
+  knifePointsToScreen,
+  knifeReport,
+  knifeSegmentsCross,
+  knifeSegmentsIntersect,
+  knifeStrokeHitsEdge,
+  knifeViewportTransform,
+  parseKnifePath,
+} from './knife';
+export type {
+  KnifeEdgeIdentity,
+  KnifeEdgePath,
+  KnifePoint,
+  KnifeReport,
+} from './knife';
+
 /** 主题镜像：画布容器跟着 `html[data-af-theme]` 走，浮层才拿得到同一套 shadcn token。 */
 function mirrorCanvasTheme(container: HTMLElement): () => void {
   const root = document.documentElement;
@@ -191,6 +223,89 @@ function mirrorCanvasTheme(container: HTMLElement): () => void {
   return () => observer?.disconnect();
 }
 
+/** 文件拖拽会走到的四种事件：壳的计数靠 enter/leave，归零靠 drop。 */
+const FILE_DRAG_EVENT_TYPES = ['dragenter', 'dragover', 'dragleave', 'drop'] as const;
+
+/**
+ * 遮罩已经亮着时的兜底：把壳的 document 计数打回 0。
+ *
+ * 容器边界拦不住所有到达顺序（例如指针先掠过右侧会话栏、遮罩已经亮起，再进画布松手；
+ * 或者从画布内部点到外面再回来）。这里补一次 `dragleave`：壳的减法是
+ * `Math.max(0, depth - 1)`，多补一次不会变负；计数归零遮罩就消失。
+ *
+ * 合成事件必须带 `Files` 的 dataTransfer —— 壳的事件处理会先用它判断「是不是文件拖拽」，
+ * 空 dataTransfer 会被直接忽略。
+ */
+function releaseStuckDropOverlay(): void {
+  try {
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([], 'release.png', { type: 'image/png' }));
+    document.dispatchEvent(
+      new DragEvent('dragleave', { bubbles: true, cancelable: true, dataTransfer: transfer }),
+    );
+  } catch {
+    /* 没有 DataTransfer 构造器就放弃兜底：宁可留着遮罩，也不能让 drop 抛异常 */
+  }
+}
+
+/**
+ * 把「从系统拖进来的文件」事件收在画布边界内，不让它们冒到 document。
+ *
+ * ## 为什么必须这么做（真机 2026-10-19：拖图进画布 = 全屏遮罩卡死）
+ *
+ * DSH 壳在 `document` 上装了一个「文件或图片拖动到此处即可添加」的提示层
+ * （i18n key `attachment.dropTitle`，给会话输入框加附件用）。它的可见性是
+ * **document 级计数**：`dragenter` 加一、`dragleave` 减一、`drop` 直接归零。
+ *
+ * 而 AIFISHER 画布自己也吃文件：`canvasApplication.tsx` 的 `onDrop` 收下图片后
+ * `event.stopPropagation()`（上游就是这么写的，为了别让宿主的 drop 再处理一遍）。
+ * 于是那一次 `drop` 永远到不了 document → 计数停在 1 → 提示层再也不消失。
+ * 它是整屏遮罩（`pointer-events: none`，所以点击还能穿透到下面的 DSH），视觉上
+ * 就是「整个界面蒙住、退不了」，只能刷新页面。
+ *
+ * ## 为什么在容器上拦，而不是补一个假事件
+ *
+ * 不去猜壳内部计数器的状态（那是脆的）——直接从源头不让它点亮：文件拖拽事件冒到
+ * 画布容器就止步，壳的 document 计数永远看不到「落在画布上的文件拖拽」，遮罩不会亮，
+ * 也就没有「归不了零」这件事。画布内部（vendor）照旧收事件：我们在**祖先**上监听，
+ * vendor 的 React 处理早已跑完。
+ *
+ * 只拦带 `Files` 的拖拽：画布内部的节点拖动、文字拖拽不带 Files，仍然按原样冒上去
+ * （宿主可能需要它们）。
+ */
+function containFileDrags(container: HTMLElement): () => void {
+  const handler = (event: DragEvent) => {
+    const transfer = event.dataTransfer;
+    if (!transfer) return;
+    // drop 时部分平台会把 types 清成空、只留 files，所以两个都看。
+    const isFileDrag = transfer.types.includes('Files') || transfer.files.length > 0;
+    if (!isFileDrag) return;
+    event.stopPropagation();
+    // 兜底：遮罩「已经亮着」时也要保证它归零（见 releaseStuckDropOverlay）。
+    if (event.type === 'drop') window.setTimeout(releaseStuckDropOverlay, 0);
+  };
+  for (const type of FILE_DRAG_EVENT_TYPES) container.addEventListener(type, handler, false);
+  return () => {
+    for (const type of FILE_DRAG_EVENT_TYPES) container.removeEventListener(type, handler, false);
+  };
+}
+
+/**
+ * 兜底：遮罩已经卡住时，点一下鼠标就把它解开。
+ *
+ * 还剩一条路会让壳的计数停在 1：拖拽在**窗口外**结束（按 Esc 取消、或松手落在应用外面）。
+ * 那时应用里既没有 `drop` 也没有 `dragleave`，只能等下次拖拽或刷新页面。这里补一刀：
+ * 原生拖拽进行中不可能产生 `pointerdown`，所以任何一次可信点击都说明「没有拖拽在进行」
+ * —— 此时补一次 `dragleave`，计数归零，遮罩消失。用户不用刷新、不用丢当前画布状态。
+ */
+function installDropOverlayHealer(): () => void {
+  const heal = (event: Event) => {
+    if (event.isTrusted) releaseStuckDropOverlay();
+  };
+  document.addEventListener('pointerdown', heal, true);
+  return () => document.removeEventListener('pointerdown', heal, true);
+}
+
 /**
  * 在 container 里挂载 AIFISHER 画布。
  * 返回的 handle 必须在组件卸载时 dispose，否则会留下全局定时器/监听器。
@@ -205,6 +320,9 @@ export function mountCanvas(container: HTMLElement): CanvasHandle {
   // 画布内 shadcn 组件必须用「渲染器认的那份 React」造元素（产物里 React 有两份）。
   useCanvasReact(React);
   const releaseThemeMirror = mirrorCanvasTheme(container);
+  // 见 containFileDrags：把文件拖拽挡在画布边界内，避免 DSH 会话输入框的「拖入即添加」提示层卡住。
+  const releaseFileDragContainment = containFileDrags(container);
+  const releaseDropOverlayHealer = installDropOverlayHealer();
 
   const root: Root = createRoot(container);
   root.render(
@@ -254,6 +372,8 @@ export function mountCanvas(container: HTMLElement): CanvasHandle {
       } finally {
         releaseGrid();
         setCanvasPortalTarget(null);
+        releaseFileDragContainment();
+        releaseDropOverlayHealer();
         releaseThemeMirror();
         releaseBootstrap();
         releaseStyles();

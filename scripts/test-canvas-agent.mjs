@@ -136,6 +136,60 @@ let createdIds = [];
   check('undo 后节点被撤销', (after.result?.nodes ?? []).length === 0, `nodes=${(after.result?.nodes ?? []).length}`);
 }
 
+// ---------------------------------------------------------------- Text 节点：正文进 textContent，别落进提示词
+
+let bodyNodeId = '';
+{
+  const read = await run({ action: 'read' });
+  const rev = String(read.result?.revision ?? '');
+  const script = '《测试剧本》\n第一场：正文应该出现在文本区里。';
+  const edit = await run({
+    action: 'edit',
+    revision: rev,
+    operations: [
+      { kind: 'create', ref: 't', type: 'Text', x: 120, y: 320, title: '剧本', prompt: script },
+    ],
+  });
+  check('文本节点：只给 prompt 也能建出来', edit.ok === true && edit.result?.ok === true, JSON.stringify(edit).slice(0, 240));
+  bodyNodeId = String((edit.result?.created ?? []).find((item) => item.ref === 't')?.id ?? '');
+  const after = await run({ action: 'read' });
+  const node = (after.result?.nodes ?? []).find((item) => item.id === bodyNodeId);
+  check('文本节点：内容写进 textContent（正文）', node?.textContent === script, JSON.stringify({ textContent: node?.textContent, prompt: node?.prompt }).slice(0, 220));
+  check('文本节点：提示词框保持为空', node?.prompt === '', JSON.stringify(node?.prompt));
+}
+
+{
+  const read = await run({ action: 'read' });
+  const rev = String(read.result?.revision ?? '');
+  const next = '改写后的正文';
+  const edit = await run({
+    action: 'edit',
+    revision: rev,
+    operations: [{ kind: 'update', nodeId: bodyNodeId, patch: { prompt: next } }],
+  });
+  check('文本节点：update 只给 prompt 也改正文', edit.ok === true && edit.result?.ok === true, JSON.stringify(edit).slice(0, 240));
+  const after = await run({ action: 'read' });
+  const node = (after.result?.nodes ?? []).find((item) => item.id === bodyNodeId);
+  check('文本节点：update 后正文更新、提示词仍为空', node?.textContent === next && node?.prompt === '', JSON.stringify({ textContent: node?.textContent, prompt: node?.prompt }).slice(0, 220));
+}
+
+{
+  const read = await run({ action: 'read' });
+  const rev = String(read.result?.revision ?? '');
+  const edit = await run({
+    action: 'edit',
+    revision: rev,
+    operations: [
+      { kind: 'create', ref: 't2', type: 'Text', x: 120, y: 560, text: '正文甲', prompt: '模板乙' },
+    ],
+  });
+  check('文本节点：text + prompt 可以分别落正文与模板', edit.ok === true && edit.result?.ok === true, JSON.stringify(edit).slice(0, 240));
+  const id = String((edit.result?.created ?? []).find((item) => item.ref === 't2')?.id ?? '');
+  const after = await run({ action: 'read' });
+  const node = (after.result?.nodes ?? []).find((item) => item.id === id);
+  check('文本节点：显式 text 落 textContent、prompt 落模板', node?.textContent === '正文甲' && node?.prompt === '模板乙', JSON.stringify({ textContent: node?.textContent, prompt: node?.prompt }).slice(0, 220));
+}
+
 // ---------------------------------------------------------------- revision 冲突要真的报出来
 
 {

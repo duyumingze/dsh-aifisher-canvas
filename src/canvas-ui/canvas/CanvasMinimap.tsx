@@ -14,6 +14,7 @@
  *    产物里 React 有两份副本，用错那分量 React 19 不报错也不渲染（小地图会消失）。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 
 import type { CanvasViewport } from '../../../vendor/aifisher/src/stable/canvas/canvasNavigation';
 import {
@@ -45,7 +46,7 @@ interface Props {
 }
 
 export function CanvasMinimap(react: Runtime, props: Props, measure: NodeMeasurement) {
-  const h = react.createElement;
+  const h = createElement(react);
   const { nodes, viewport, width = 250, height = 150, canvasRef, documentEpoch } = props;
   const rootRef = react.useRef<HTMLDivElement>(null);
   const dragRef = react.useRef<number | null>(null);

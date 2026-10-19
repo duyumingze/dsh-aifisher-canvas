@@ -2,7 +2,11 @@
  * 画布「节点搜索」面板（仿 Blender 的 Shift+A 搜索）。
  *
  * 交互：画布视图里按 **Shift+A** → 面板出现在鼠标旁边（贴着鼠标、自动避开画布边缘），
- * 输入即模糊过滤，↑/↓ 选，Enter 建节点，Esc 关闭；点选也行。
+ * 输入即模糊过滤，↑/↓ 选，Enter / 点选建节点，Esc 关闭。
+ *
+ * 建节点是 Blender 的「新建并移动」：确认后节点先落在光标处，随鼠标移动（不松开任何键），
+ * 下一次左键按下才算放下。跟随逻辑在 vendor 的建节点桥里（detail.place === true），
+ * 这里只负责把「放置」这个意图带过去。
  * 候选 = **画布节点类型**（文本/图像/视频/音频/ComfyUI 工作流/图片对比/图片拼合）
  *      + **ComfyUI 工作流**（本地 workflows 目录里每一个都能直接搜到）。
  *
@@ -24,6 +28,7 @@
  *    产物里 React 有两份副本，用错那分量 React 19 不报错也不渲染（整条控制条会消失）。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import { createPortal } from 'react-dom';
 import {
   ImagePlusIcon,
@@ -184,7 +189,7 @@ function isTextEditor(element: unknown): boolean {
 let lastCanvasPointer: { x: number; y: number } | undefined;
 
 export function CanvasNodeSearch(react: Runtime, props: Props) {
-  const h = react.createElement;
+  const h = createElement(react);
   // 每次点「搜索节点」按钮都换一个 key，强制重建（状态归零、输入框自动聚焦）。
   const [session, setSession] = react.useState(0);
   const [open, setOpen] = react.useState(false);
@@ -195,6 +200,17 @@ export function CanvasNodeSearch(react: Runtime, props: Props) {
   );
   /** 开面板那一刻鼠标位置换算出来的世界坐标（节点落点）。 */
   const pointRef = react.useRef<{ x: number; y: number } | undefined>(undefined);
+  /**
+   * 一次打开只提交一次。
+   *
+   * 为什么需要它（真 bug，用户 2026-10-19 报「按回车出现两个节点」）：
+   * `onPanelKeyDown` 同时挂在输入框与面板根上（面板根要接住从候选按钮来的键），
+   * 同一个 Enter 会先被输入框处理一次、再冒泡到面板根处理一次 —— 两次 commit，
+   * 两个 `fisherai:add-canvas-node`，画布上就叠出两个节点。
+   * 两层保险：处理过的键 `stopPropagation()`（同时修掉 ↑/↓ 一次跳两格），
+   * 以及这里的一次性闸门（防止别的路径也重复触发）。
+   */
+  const committedRef = react.useRef(false);
 
   const [definitionsEpoch, setDefinitionsEpoch] = react.useState(0);
   // 工作流清单是异步拉回来的（装配层 ensureLocalWorkflows）；到位后重排候选列表。
@@ -280,12 +296,24 @@ export function CanvasNodeSearch(react: Runtime, props: Props) {
   const openAt = react.useCallback(
     (center = false) => {
       const target = center ? undefined : lastCanvasPointer;
+      const origin = canvasOrigin();
+      /**
+       * 工具栏入口没有「鼠标位置」，但不能因此没有落点：
+       * 以前 pointRef 留空，node 桥那边因为点不合法直接 return —— 表现成
+       * 「工具栏打开搜索、选了候选，画布上什么都没发生」（静默失败）。
+       * 现在回落到画布正中，与面板落点同一套 rect/视口换算。
+       */
+      const containerRect = props.containerRef?.current?.getBoundingClientRect();
+      const width = containerRect && containerRect.width > 0 ? containerRect.width : window.innerWidth;
+      const height =
+        containerRect && containerRect.height > 0 ? containerRect.height : window.innerHeight;
       pointRef.current = target
-        ? toWorldPoint(target.x, target.y, props.viewport, canvasOrigin())
-        : undefined;
+        ? toWorldPoint(target.x, target.y, props.viewport, origin)
+        : toWorldPoint(origin.left + width / 2, origin.top + height / 2, props.viewport, origin);
       setPlacement(panelPlacement(target, props.containerRef?.current ?? null));
       setQuery('');
       setActiveIndex(0);
+      committedRef.current = false;
       setSession((value) => value + 1);
       setOpen(true);
       // 画布的右键菜单若正开着，先关掉（否则两层浮层叠在一起）
@@ -325,8 +353,17 @@ export function CanvasNodeSearch(react: Runtime, props: Props) {
 
   const commit = react.useCallback(
     (entry: CanvasNodeSearchEntry) => {
+      // 同一个面板会话只建一个节点（Enter 曾因冒泡被处理两次 → 建两个，见 committedRef）
+      if (committedRef.current) return;
+      committedRef.current = true;
       const point = pointRef.current;
-      const detail = { type: entry.type, ...(entry.mode ? { comfyMode: entry.mode } : {}), point };
+      const detail = {
+        type: entry.type,
+        ...(entry.mode ? { comfyMode: entry.mode } : {}),
+        point,
+        // 「新建并移动」：画布侧的桥会把节点挂到鼠标上，左键才放下（Blender 手感）
+        place: true,
+      };
       close();
       window.dispatchEvent(new CustomEvent('fisherai:add-canvas-node', { detail }));
     },
@@ -334,6 +371,8 @@ export function CanvasNodeSearch(react: Runtime, props: Props) {
   );
 
   const onPanelKeyDown = (event: ReactTypes.KeyboardEvent) => {
+    // 输入框的按键会冒泡到面板根（两边挂的是同一个处理器）：
+    // 处理完必须掐断冒泡，否则 Enter 提交两次（建两个节点）、↑/↓ 一次跳两格。
     if (event.key === 'Escape') {
       event.preventDefault();
       event.stopPropagation();
@@ -342,6 +381,7 @@ export function CanvasNodeSearch(react: Runtime, props: Props) {
     }
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault();
+      event.stopPropagation();
       if (!results.length) return;
       const step = event.key === 'ArrowDown' ? 1 : -1;
       setActiveIndex((index) => (index + step + results.length) % results.length);
@@ -349,6 +389,7 @@ export function CanvasNodeSearch(react: Runtime, props: Props) {
     }
     if (event.key === 'Enter') {
       event.preventDefault();
+      event.stopPropagation();
       if (active) commit(active);
     }
   };
@@ -478,7 +519,7 @@ export function CanvasNodeSearch(react: Runtime, props: Props) {
           'flex items-center gap-3 border-t border-border px-3 py-1.5 text-[10px] text-muted-foreground',
       },
       h('span', null, '↑↓ 选择'),
-      h('span', null, 'Enter 添加'),
+      h('span', null, 'Enter 添加 · 移动鼠标 · 左键放下'),
       h('span', null, 'Shift + A 再次打开'),
     ),
   );

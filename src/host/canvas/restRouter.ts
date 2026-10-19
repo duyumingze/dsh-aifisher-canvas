@@ -31,6 +31,8 @@ import { handleDataDirApi } from './dataDirRouter';
 import { handleSourceSettingsApi, sourceSettingsStatus } from './sourceSettingsRouter';
 import { handleCloudChannelsApi } from './cloudChannelsRouter';
 import { handleTaskQueueApi, trackCloudTask } from './taskQueueRouter';
+import type { GenerationEvents } from './generationEvents';
+import type { GenerationPlans } from './generationPlans';
 import { handleWorkflowCoversApi } from './workflowCoversRouter';
 import { workflowCoversStatus } from '../comfyui/workflowCovers';
 import type { GenerationJournal } from '../comfyui/generationJournal';
@@ -81,6 +83,15 @@ export interface CanvasApiExtras {
    * `/tasks` 接口把它列成画布右侧「任务队列」面板。缺省时该面板显示「不可用」。
    */
   tasks?: GenerationJournal;
+  /**
+   * 生成事件总线（v1.57）：journal 的事件 → 批次 → 画布对话面板。
+   * `/events` 是它的只读回看接口（诊断 / 将来的界面增量拉取用）。
+   */
+  events?: GenerationEvents;
+  /**
+   * 生成批次记录（v1.57）：画布 prepareGeneration 落库要它，`/status` 里也报一份计数。
+   */
+  plans?: GenerationPlans;
 }
 
 function segment(pathname: string): string[] {
@@ -150,6 +161,10 @@ export async function handleCanvasApi(
         : null,
       // 生成任务队列（v1.24）：「面板上是空的 / 刷新后任务没了」先看这里
       tasks: extras.tasks ? extras.tasks.stats() : null,
+      // 生成事件（v1.57）：seq 一直在涨但没人收到推送时，先看这里（openBatches / bindings）
+      events: extras.events ? extras.events.stats() : null,
+      // 生成批次记录（v1.57）：prepareGeneration 的落库与状态（pending 一直不动 = 用户还没确认）
+      plans: extras.plans ? extras.plans.stats() : null,
       // 工作流配图（v1.28）：左侧「工作流节点」面板里每张卡片的封面图
       workflowCovers: workflowCoversStatus(),
     });
@@ -205,6 +220,45 @@ export async function handleCanvasApi(
       return;
     }
     if (await handleTaskQueueApi({ req, res, url, parts, deps: { journal: extras.tasks } })) return;
+  }
+
+  // ---- 生成事件（v1.57）：journal → 批次 → 画布对话面板 ----
+  // 推送本身走 DSH 会话（sessionController.prompt），这里只给只读回看：
+  //   GET /events?since=<seq>&limit=50  增量拉取（旧的在前）
+  //   GET /events?recent=20&hint=1      最近 N 条（新的在前）
+  // 没有消费者也能用：真机排查时先看它，再对 /status 里的 events 计数。
+  if (parts[0] === 'events' && parts.length === 1) {
+    if (method !== 'GET') {
+      sendJson(res, 405, { error: 'method not allowed' });
+      return;
+    }
+    if (!extras.events) {
+      sendJson(res, 503, { error: '生成事件总线未就绪。', code: 'EVENTS_UNAVAILABLE' });
+      return;
+    }
+    const rawSince = url.searchParams.get('since');
+    const rawLimit = Number(url.searchParams.get('limit') ?? 50);
+    const limit = Number.isFinite(rawLimit) ? rawLimit : 50;
+    if (url.searchParams.get('recent') !== null) {
+      const rawRecent = Number(url.searchParams.get('recent') ?? 20);
+      const recent = extras.events.recent(Number.isFinite(rawRecent) ? rawRecent : 20);
+      sendJson(res, 200, { ok: true, seq: extras.events.stats().seq, events: recent, stats: extras.events.stats() });
+      return;
+    }
+    const page = extras.events.since(
+      rawSince === null || rawSince === '' ? undefined : Number(rawSince),
+      limit,
+    );
+    sendJson(res, 200, {
+      ok: true,
+      seq: page.seq,
+      events: page.events,
+      stats: extras.events.stats(),
+      hint:
+        '生成事件按批次成组推送到发起 canvas_control 的 DSH 会话（画布对话面板）；' +
+        '这里只是只读回看，approve 仍然只在画布 UI。',
+    });
+    return;
   }
 
   // ---- 工作流配图（v1.28，左侧「工作流节点」面板里每张卡片的封面）----

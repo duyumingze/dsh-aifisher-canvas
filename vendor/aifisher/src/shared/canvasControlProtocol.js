@@ -10,9 +10,9 @@ const exact = (value, keys) => object(value) && Object.keys(value).every(key => 
 const coordinate = value => Number.isFinite(value) && Math.abs(value) <= 1000000;
 const ids = value => Array.isArray(value) && value.length > 0 && value.length <= 100 && new Set(value).size === value.length && value.every(id => text(id));
 const port = value => value === undefined || Number.isInteger(value) && value >= 0 && value < 100;
-const patch = value => exact(value, ['title', 'prompt', 'x', 'y']) && Object.keys(value).length > 0
+const patch = value => exact(value, ['title', 'prompt', 'text', 'x', 'y']) && Object.keys(value).length > 0
   && Object.entries(value).every(([key, entry]) => ['x', 'y'].includes(key) ? coordinate(entry)
-    : typeof entry === 'string' && entry.length <= (key === 'prompt' ? Infinity : 500));
+    : typeof entry === 'string' && entry.length <= (['prompt', 'text'].includes(key) ? Infinity : 500));
 
 export function validCanvasControl(value) {
   if (!object(value)) return false;
@@ -41,11 +41,12 @@ export function validCanvasControl(value) {
     || !Array.isArray(value.operations) || !value.operations.length || value.operations.length > 100) return false;
   return value.operations.every(op => {
     if (!object(op)) return false;
-    if (op.kind === 'create') return exact(op, ['kind', 'ref', 'type', 'x', 'y', 'title', 'prompt'])
+    if (op.kind === 'create') return exact(op, ['kind', 'ref', 'type', 'x', 'y', 'title', 'prompt', 'text'])
       && text(op.ref, 128) && ['Image', 'Video', 'Audio', 'Text'].includes(op.type)
       && coordinate(op.x) && coordinate(op.y)
       && (op.title === undefined || typeof op.title === 'string' && op.title.length <= 500)
-      && (op.prompt === undefined || typeof op.prompt === 'string');
+      && (op.prompt === undefined || typeof op.prompt === 'string')
+      && (op.text === undefined || typeof op.text === 'string');
     if (op.kind === 'configure') return exact(op, ['kind', 'nodeId', 'model', 'parameters']) && text(op.nodeId) && text(op.model) && object(op.parameters) && Object.keys(op.parameters).length <= 50 && Object.entries(op.parameters).every(([key, value]) => text(key, 100) && !['__proto__', 'constructor', 'prototype'].includes(key) && (typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value) || typeof value === 'string'));
     if (op.kind === 'update') return exact(op, ['kind', 'nodeId', 'patch']) && text(op.nodeId) && patch(op.patch);
     if (op.kind === 'delete') return exact(op, ['kind', 'nodeId']) && text(op.nodeId);

@@ -10,12 +10,15 @@
     "jsx": "react-jsx",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "outDir": "lib",
-    "rootDir": "src",
+    "rootDir": ".",
     "declaration": true,
     "types": ["node"],
     "baseUrl": ".",
     "paths": {
-      "@/*": ["./src/canvas-ui/*"]
+      "@/*": ["./src/canvas-ui/*"],
+      "three": ["./src/client/canvas/stubs/three.ts"],
+      "@react-three/fiber": ["./src/client/canvas/stubs/react-three-fiber.tsx"],
+      "@react-three/drei": ["./src/client/canvas/stubs/react-three-drei.tsx"]
     }
   },
   "include": ["src/**/*"],

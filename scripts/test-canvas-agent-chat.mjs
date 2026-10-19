@@ -126,16 +126,20 @@ const host = await startHost({ chat: true });
   check('Codex 历史桩：200 + 空数组', sessions.status === 200 && Array.isArray(sessions.json()), sessions.text.slice(0, 120));
 }
 
-// ---- 未移植的「批次记录 / 连续生成授权」：读接口回空清单（面板不显示红字），写接口明确 501
+// ---- 批次记录（v1.57 起是真实现，空库回空清单）/ 连续生成授权仍未移植（读空清单，写 501）
 {
-  for (const path of ['/agent/plans?projectId=proj-chat', '/agent/budgets?projectId=proj-chat']) {
-    const empty = await host.hostApi('GET', path);
-    check(
-      `${path.split('?')[0]} 读接口回 200 + 空数组（面板不显示「读取失败」）`,
-      empty.status === 200 && Array.isArray(empty.json()) && empty.json().length === 0,
-      empty.text.slice(0, 120),
-    );
-  }
+  const plans = await host.hostApi('GET', '/agent/plans?projectId=proj-chat');
+  check(
+    '/agent/plans 读接口回 200 + 数组（v1.57 起是批次记录真实现）',
+    plans.status === 200 && Array.isArray(plans.json()) && plans.json().length === 0,
+    plans.text.slice(0, 120),
+  );
+  const budgets = await host.hostApi('GET', '/agent/budgets?projectId=proj-chat');
+  check(
+    '/agent/budgets 读接口回 200 + 空数组（面板不显示「读取失败」）',
+    budgets.status === 200 && Array.isArray(budgets.json()) && budgets.json().length === 0,
+    budgets.text.slice(0, 120),
+  );
   const write = await host.hostApi('POST', '/agent/budgets', { projectId: 'proj-chat' });
   check(
     '连续生成授权的写入仍是 501 NOT_PORTED（不假装成功）',

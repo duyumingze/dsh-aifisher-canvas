@@ -65,6 +65,22 @@
  *   相位会随 `画布原点/zoom` 漂移，与节点脱节）。
  *   `--canvas-grid-dpr` 保留下来**只作读数**（排障时要能看出这台机器是 100% 还是 125%）。
  *
+ * v1.48（用户原话「画布背景的星型矩阵，缩小画布就密密麻麻的，能不能参考 blender 的，
+ *   大的矩阵包裹小的矩阵，缩放到一点程度后小的矩阵就消失」）：
+ *   底纹从「一层 24px 星号贴纸」升级成**三层嵌套矩阵**（Blender 视口网格的做法）：
+ *     24px（minor）→ 120px（major）→ 600px（super），后一层正好包住前一层（每 5 格一颗大星）。
+ *   三层共用同一个平移相位（background-position = 画布 translate），所以大星的圆心永远压在
+ *   某颗小星上 —— 看上去是「大矩阵包小矩阵」，而不是两套错位的网格。
+ *   每一层的整体透明度由**屏幕上的格子间距**（spacing × zoom）算出来：
+ *     间距 < 12px  → 完全隐藏（缩得太小就不要了，避免密密麻麻）
+ *     12 ~ 18px    → 淡入
+ *     18 ~ 200px   → 完全显示
+ *     200 ~ 240px  → 淡出（放得很大时不再出现巨大的稀疏星号）
+ *   于是任何缩放档位都只有 1~2 层可见：放大时只剩小矩阵；缩小时小矩阵先消失、大矩阵接棒；
+ *   继续缩就由更大的矩阵接棒 —— 屏幕上的星号密度被夹在一个稳定区间里。
+ *   大矩阵的星号同时**更大更亮**（7/11/15px，alpha 0.19/0.26/0.32），否则同尺寸同墨色叠在
+ *   一起根本分不出「哪颗是大的」。
+ *
  * 这一层全程 `pointer-events: none`：它铺满整个画布，绝不能抢走画布自己的指针事件。
  */
 import { reportCanvasError, reportCanvasInfo } from './diagnostics';
@@ -78,29 +94,80 @@ import {
 const STYLE_CONSTANTS = {
   /** 暗色主题：近黑画布上的浅灰十字（颜色写进 SVG，见 crossDataUrl 的注释）。 */
   darkInk: '#ffffff',
-  darkInkOpacity: 0.19,
   /** 浅色主题：白画布上的深灰十字。 */
   lightInk: '#111827',
-  lightInkOpacity: 0.2,
   /** 提亮层（鼠标周围）用的颜色：暗色主题纯白、浅色主题近黑。 */
   darkHighlight: '#ffffff',
   lightHighlight: '#0b1220',
-  /** 两枚十字之间的间距（逻辑 px）。1:1 画进平铺块里，所以这里也是平铺块的边长。 */
-  spacing: 24,
-  /** 小十字星的臂长（从中心往外，逻辑 px）—— 星号总宽 = arm × 2 + stroke。 */
-  arm: 3,
-  stroke: 1,
   /** 鼠标周围变亮圆的半径（逻辑 px），以及其中「全亮核心」的占比。 */
   radius: 190,
   coreRatio: 0.28,
 };
 
 /**
+ * 三层嵌套矩阵（v1.48，Blender 视口网格的做法）。
+ *
+ * 每层的间距是上一层的 5 倍：24 → 120 → 600。三层共用同一个相位（同一份 pan），
+ * 所以 120px 的大星永远落在某颗 24px 小星上（120 / 24 = 5 格），600px 再压在大星上。
+ * 星号也逐层变大变亮，层次才看得出来。
+ */
+interface GridTierSpec {
+  id: 'minor' | 'major' | 'super';
+  /** 逻辑 px：格子间距 = 平铺块边长。 */
+  spacing: number;
+  /** 臂长（从中心往外，逻辑 px）—— 星号总宽 = arm × 2 + stroke。 */
+  arm: number;
+  stroke: number;
+  darkOpacity: number;
+  lightOpacity: number;
+}
+
+const GRID_TIERS: readonly GridTierSpec[] = [
+  // 参考图量出来的那一层规格原样保留：24px 间距、7px 长、alpha≈0.19。
+  { id: 'minor', spacing: 24, arm: 3, stroke: 1, darkOpacity: 0.19, lightOpacity: 0.2 },
+  { id: 'major', spacing: 120, arm: 5, stroke: 1, darkOpacity: 0.26, lightOpacity: 0.22 },
+  { id: 'super', spacing: 600, arm: 7, stroke: 1, darkOpacity: 0.32, lightOpacity: 0.26 },
+];
+
+/**
+ * 分层显隐的阈值（单位：屏幕上看到的格子间距 = spacing × zoom）。
+ * 「屏幕间距」而不是「zoom」：这样换一层间距（24→120）时行为完全一样，
+ * 不需要为每一层各写一套阈值。
+ */
+const TIER_FADE = {
+  /** 低于这个屏幕间距 → 整层隐藏（星号会挤成噪点）。 */
+  inFrom: 12,
+  /** 达到这个屏幕间距 → 完全显示（24px 默认间距在 zoom 1 时是完全亮的）。 */
+  inTo: 18,
+  /** 高于这个屏幕间距 → 开始淡出（放大到很大时，稀疏的巨大星号很碍眼）。 */
+  outFrom: 200,
+  /** 到这个屏幕间距 → 完全隐藏。 */
+  outTo: 240,
+} as const;
+
+function clamp01(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  return value < 0 ? 0 : value > 1 ? 1 : value;
+}
+
+/**
+ * 某一层在当前缩放下应该有多亮（0~1）。
+ * 屏幕间距落在 [12,18] 淡入、[18,200] 全显、[200,240] 淡出 —— 任何档位都只有 1~2 层可见。
+ */
+function tierOpacityAt(spacing: number, zoom: number): number {
+  const screenSpacing = spacing * zoom;
+  const fadeIn = clamp01((screenSpacing - TIER_FADE.inFrom) / (TIER_FADE.inTo - TIER_FADE.inFrom));
+  const fadeOut = 1 - clamp01((screenSpacing - TIER_FADE.outFrom) / (TIER_FADE.outTo - TIER_FADE.outFrom));
+  return Math.min(fadeIn, fadeOut);
+}
+
+/**
  * 小十字星（+）的 data URL。
  *
- * 平铺块边长 = spacing，viewBox 与原图**同尺寸**（1 SVG 单位 = 1 逻辑 px），
- * 于是星号画出来就是它真实的像素大小（7px），不会被 background-size 拉伸放大成糊块。
+ * 平铺块边长 = 这一层的 spacing，viewBox 与原图**同尺寸**（1 SVG 单位 = 1 逻辑 px），
+ * 于是星号画出来就是它真实的像素大小（minor 7px），不会被 background-size 拉伸放大成糊块。
  * 圆心取半像素（12.5）：1px 线正好压在整数像素行/列上，缩放 100% 时最锐。
+ * 三层的间距都是 24 的整数倍，圆心因此天然对齐（大星压在小星上）。
  *
  * ⚠️ **颜色必须写死在 SVG 里（stroke + stroke-opacity），绝不能用 `currentColor`。**
  * 背景图里的 SVG 是一份**独立的图片文档**，宿主元素的 CSS `color` 不会继承进去 ——
@@ -108,8 +175,8 @@ const STYLE_CONSTANTS = {
  * 深色画布（#050505）上画的是**黑十字**，肉眼几乎看不见（只有极小的色差），
  * 这属于「代码看着对、画面上没有」的典型坑，回归里专门钉了一条断言。
  */
-function crossDataUrl(color: string, opacity: number): string {
-  const { arm, stroke, spacing } = STYLE_CONSTANTS;
+function crossDataUrl(color: string, opacity: number, tier: GridTierSpec): string {
+  const { arm, stroke, spacing } = tier;
   const center = spacing / 2 + 0.5;
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${spacing}" height="${spacing}" ` +
@@ -134,12 +201,36 @@ function maskGradient(): string {
  */
 export function canvasGridStyleText(): string {
   const C = STYLE_CONSTANTS;
-  const darkCross = crossDataUrl(C.darkInk, C.darkInkOpacity);
-  const lightCross = crossDataUrl(C.lightInk, C.lightInkOpacity);
-  const darkHighlight = crossDataUrl(C.darkHighlight, 1);
-  const lightHighlight = crossDataUrl(C.lightHighlight, 1);
+  /**
+   * 每层 4 张写死颜色的星号图（深/浅 × 基础/提亮），共 12 张。
+   * 图是按层生成的：平铺块边长 = 该层 spacing，星号大小 = 该层 arm。
+   */
+  const tierRules = GRID_TIERS.map((tier) => {
+    const selector =
+      `.af-canvas-mount [data-canvas-grid='true'] ` +
+      `[data-canvas-grid-tier='${tier.id}'] .canvas-grid-cross`;
+    return `
+${selector} {
+  /* 边长 = 这一层的间距 × zoom（纯 CSS px；一个 dpr 都不掺，见上面 v1.33）。 */
+  background-size: calc(${tier.spacing}px * var(--canvas-grid-zoom));
+}
+${selector}.is-base {
+  background-image: ${crossDataUrl(C.darkInk, tier.darkOpacity, tier)};
+}
+${selector}.is-highlight {
+  background-image: ${crossDataUrl(C.darkHighlight, 1, tier)};
+}
+html[data-af-theme='light'] ${selector}.is-base {
+  background-image: ${crossDataUrl(C.lightInk, tier.lightOpacity, tier)};
+}
+html[data-af-theme='light'] ${selector}.is-highlight {
+  background-image: ${crossDataUrl(C.lightHighlight, 1, tier)};
+}
+`;
+  }).join('');
+
   return `
-/* ---- 画布点阵底纹（小十字星 + 鼠标圆形提亮） ---- */
+/* ---- 画布点阵底纹（三层嵌套小十字星 + 鼠标圆形提亮） ---- */
 .af-canvas-mount [data-canvas-grid='true'] {
   position: absolute;
   inset: 0;
@@ -156,34 +247,29 @@ export function canvasGridStyleText(): string {
   --canvas-grid-pan-x: 0;
   --canvas-grid-pan-y: 0;
 }
+/* 每一层（minor / major / super）是一个 wrapper：整体透明度由 JS 按屏幕间距写上来。 */
+.af-canvas-mount [data-canvas-grid='true'] .canvas-grid-tier {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+}
 .af-canvas-mount [data-canvas-grid='true'] .canvas-grid-cross {
   position: absolute;
   inset: 0;
   background-repeat: repeat;
   /* ⚠️ 这两个值必须是**纯 CSS px**，一个 dpr 都不能掺进来（v1.33 的 bug 就死在这儿）：
-     平移量 = 画布 transform 里的 translate 原值；边长 = 间距 × zoom。
+     平移量 = 画布 transform 里的 translate 原值；边长 = 这一层的间距 × zoom。
      乘了 dpr 的后果：网格位移 = 节点位移 × dpr（125% 缩放 → 网格快 1.25 倍）。 */
-  background-size: calc(${C.spacing}px * var(--canvas-grid-zoom));
   background-position: calc(var(--canvas-grid-pan-x) * 1px) calc(var(--canvas-grid-pan-y) * 1px);
 }
-/* 颜色写死在各自的 SVG 里（图片文档不继承宿主 color），所以分主题给四张图。 */
-.af-canvas-mount [data-canvas-grid='true'] .canvas-grid-cross.is-base {
-  background-image: ${darkCross};
-}
+/* 提亮层：默认透明，指针进画布时由 JS 置 1（再叠一层圆形遮罩）。 */
 .af-canvas-mount [data-canvas-grid='true'] .canvas-grid-cross.is-highlight {
-  background-image: ${darkHighlight};
   opacity: 0;
   -webkit-mask-image: ${maskGradient()};
   mask-image: ${maskGradient()};
   transition: opacity 180ms ease;
 }
-html[data-af-theme='light'] .af-canvas-mount [data-canvas-grid='true'] .canvas-grid-cross.is-base {
-  background-image: ${lightCross};
-}
-html[data-af-theme='light'] .af-canvas-mount [data-canvas-grid='true'] .canvas-grid-cross.is-highlight {
-  background-image: ${lightHighlight};
-}
-/* 壁纸开着的时候不出网格：用户挑了背景图，底纹只会打架（vendor 自己有壁纸开关）。 */
+${tierRules}/* 壁纸开着的时候不出网格：用户挑了背景图，底纹只会打架（vendor 自己有壁纸开关）。 */
 .af-canvas-mount:has(.af-wallpaper) [data-canvas-grid='true'] {
   display: none;
 }
@@ -224,6 +310,16 @@ interface GridRuntime {
   dispose(): void;
 }
 
+/** 一层矩阵的 DOM 句柄（base = 静态星号，highlight = 鼠标周围的提亮版）。 */
+interface TierView {
+  spec: GridTierSpec;
+  element: HTMLElement;
+  base: HTMLElement;
+  highlight: HTMLElement;
+  /** 上一次写进 style 的透明度（-1 = 还没写过）。避免每帧重复写 DOM。 */
+  opacity: number;
+}
+
 /**
  * 指针跟随的排查读数（挂在哪一层上就记哪一层）。
  * 真机「看着没反应」时这样才能分清是「没绑定 / 没触发 / 画了但量不到」：
@@ -246,25 +342,37 @@ const interactivity = new WeakMap<HTMLElement, PointerInteractivityState>();
 function attachGridLayer(canvas: HTMLElement, root: HTMLElement): GridRuntime {
   const layer = document.createElement('div');
   layer.setAttribute('data-canvas-grid', 'true');
-  layer.setAttribute('data-canvas-grid-spacing', String(STYLE_CONSTANTS.spacing));
+  const minor = GRID_TIERS[0];
+  layer.setAttribute('data-canvas-grid-spacing', String(minor.spacing));
   layer.setAttribute(
     'data-canvas-grid-star',
-    `${STYLE_CONSTANTS.arm * 2 + STYLE_CONSTANTS.stroke}x${STYLE_CONSTANTS.stroke}`,
+    `${minor.arm * 2 + minor.stroke}x${minor.stroke}`,
   );
   // 墨色也自报一份：回归靠它断言「画在深色画布上的是亮色」（v1.7 的黑十字事故）。
-  layer.setAttribute(
-    'data-canvas-grid-ink',
-    `${STYLE_CONSTANTS.darkInk}@${STYLE_CONSTANTS.darkInkOpacity}`,
-  );
+  layer.setAttribute('data-canvas-grid-ink', `${STYLE_CONSTANTS.darkInk}@${minor.darkOpacity}`);
+  // v1.48：三层嵌套矩阵的间距（测试/排障按这个断言，别在测试里抄数字）。
+  layer.setAttribute('data-canvas-grid-tiers', GRID_TIERS.map((tier) => tier.spacing).join(','));
+  layer.setAttribute('data-canvas-grid-tier-count', String(GRID_TIERS.length));
   layer.setAttribute('aria-hidden', 'true');
 
-  const base = document.createElement('div');
-  base.className = 'canvas-grid-cross is-base';
-  base.setAttribute('aria-hidden', 'true');
-  const highlight = document.createElement('div');
-  highlight.className = 'canvas-grid-cross is-highlight';
-  highlight.setAttribute('aria-hidden', 'true');
-  layer.append(base, highlight);
+  const tierViews: TierView[] = GRID_TIERS.map((spec) => {
+    const element = document.createElement('div');
+    element.className = 'canvas-grid-tier';
+    element.setAttribute('data-canvas-grid-tier', spec.id);
+    element.setAttribute('data-canvas-grid-tier-spacing', String(spec.spacing));
+    element.setAttribute('aria-hidden', 'true');
+    element.style.opacity = '0';
+
+    const base = document.createElement('div');
+    base.className = 'canvas-grid-cross is-base';
+    base.setAttribute('aria-hidden', 'true');
+    const highlight = document.createElement('div');
+    highlight.className = 'canvas-grid-cross is-highlight';
+    highlight.setAttribute('aria-hidden', 'true');
+    element.append(base, highlight);
+    layer.append(element);
+    return { spec, element, base, highlight, opacity: -1 };
+  });
   canvas.prepend(layer);
 
   const rAF = typeof window.requestAnimationFrame === 'function'
@@ -298,14 +406,32 @@ function attachGridLayer(canvas: HTMLElement, root: HTMLElement): GridRuntime {
     layer.style.setProperty('--canvas-grid-mx', `${Math.round(localX)}px`);
     layer.style.setProperty('--canvas-grid-my', `${Math.round(localY)}px`);
     layer.style.setProperty('--canvas-grid-mr', `${Math.round(radius)}px`);
-    highlight.style.opacity = '1';
+    for (const view of tierViews) view.highlight.style.opacity = '1';
     pointerState.last = { x: Math.round(localX), y: Math.round(localY) };
     pointerState.paints += 1;
   };
   const clearPoint = () => {
     layer.style.setProperty('--canvas-grid-mx', '-9999px');
     layer.style.setProperty('--canvas-grid-my', '-9999px');
-    highlight.style.opacity = '0';
+    for (const view of tierViews) view.highlight.style.opacity = '0';
+  };
+
+  /**
+   * 把「每层该多亮」落到三层 wrapper 的 opacity 上（v1.48）。
+   *
+   * 判据是**屏幕上的格子间距**（spacing × zoom），不是 zoom 本身 —— 所以 24px 层在
+   * zoom 0.5 时与 120px 层在 zoom 0.1 时行为一致，换层不用换阈值。
+   * 只有数值真的变了才写 DOM：指针悬停期间这里每帧都会跑，别做无谓的样式失效。
+   */
+  const applyTierOpacity = (zoom: number) => {
+    for (const view of tierViews) {
+      const next = tierOpacityAt(view.spec.spacing, zoom);
+      if (Math.abs(next - view.opacity) < 0.002) continue;
+      view.opacity = next;
+      view.element.style.opacity = next.toFixed(3);
+      view.element.setAttribute('data-canvas-grid-tier-visible', next > 0.001 ? 'true' : 'false');
+      view.element.setAttribute('data-canvas-grid-tier-opacity', next.toFixed(3));
+    }
   };
 
   /**
@@ -324,6 +450,7 @@ function attachGridLayer(canvas: HTMLElement, root: HTMLElement): GridRuntime {
     layer.style.setProperty('--canvas-grid-dpr', String(dpr));
     layer.style.setProperty('--canvas-grid-pan-x', transform.panX.toFixed(3));
     layer.style.setProperty('--canvas-grid-pan-y', transform.panY.toFixed(3));
+    applyTierOpacity(transform.zoom);
     return viewport;
   };
 
@@ -505,13 +632,32 @@ export function canvasGridReport(): Record<string, unknown> | null {
     Number.isFinite(gridPanY) &&
     Math.abs(gridPanX - transform.panX) < 0.01 &&
     Math.abs(gridPanY - transform.panY) < 0.01;
+  const minor = GRID_TIERS[0];
+  /**
+   * v1.48：三层嵌套矩阵各自当前的透明度（按屏幕间距算）。
+   * 真机「缩小以后还是密密麻麻」时先看这里：minor 应该已经 0、major/super 接棒。
+   */
+  const tiers = Array.from(
+    layer.querySelectorAll<HTMLElement>('[data-canvas-grid-tier]'),
+  ).map((element) => {
+    const spacing = Number.parseFloat(element.getAttribute('data-canvas-grid-tier-spacing') ?? '0');
+    const opacity = Number.parseFloat(element.getAttribute('data-canvas-grid-tier-opacity') ?? '0');
+    return {
+      id: element.getAttribute('data-canvas-grid-tier'),
+      spacing,
+      screenSpacing: Number.isFinite(spacing) ? Number((spacing * transform.zoom).toFixed(3)) : null,
+      opacity: Number.isFinite(opacity) ? opacity : 0,
+      visible: element.getAttribute('data-canvas-grid-tier-visible') === 'true',
+      styleOpacity: element.style.opacity,
+    };
+  });
   return {
     mounted: true,
     inCanvasBackground: layer.parentElement?.id === 'canvas-background',
     isFirstChild: layer.parentElement?.firstElementChild === layer,
     pointerEvents: getComputedStyle(layer).pointerEvents,
     theme: layer.getAttribute('data-canvas-grid-theme'),
-    spacing: STYLE_CONSTANTS.spacing,
+    spacing: minor.spacing,
     radius: STYLE_CONSTANTS.radius,
     /** 设置 →「画布互动」的开关状态 + 落点（v1.27）。 */
     interactive: layer.getAttribute('data-canvas-grid-interactive'),
@@ -527,12 +673,16 @@ export function canvasGridReport(): Record<string, unknown> | null {
       : null,
     /** 小十字星的几何（测试/排查按这个断言，别在测试里抄数字）。 */
     star: {
-      spacing: STYLE_CONSTANTS.spacing,
-      arm: STYLE_CONSTANTS.arm,
-      stroke: STYLE_CONSTANTS.stroke,
-      size: STYLE_CONSTANTS.arm * 2 + STYLE_CONSTANTS.stroke,
-      ink: `${STYLE_CONSTANTS.darkInk}@${STYLE_CONSTANTS.darkInkOpacity}`,
+      spacing: minor.spacing,
+      arm: minor.arm,
+      stroke: minor.stroke,
+      size: minor.arm * 2 + minor.stroke,
+      ink: `${STYLE_CONSTANTS.darkInk}@${minor.darkOpacity}`,
     },
+    /** v1.48：三层嵌套矩阵（间距 / 屏幕间距 / 当前透明度 / 是否可见）。 */
+    tierCount: GRID_TIERS.length,
+    tierFade: { ...TIER_FADE },
+    tiers,
     viewportTransform: viewport?.style.transform ?? null,
     canvasTransform: transform,
     /** 网格几何口径：CSS px（= 节点同一个坐标系；掺 dpr 就会让网格比节点跑得快）。 */
@@ -582,9 +732,11 @@ export function mountCanvasGrid(options: { container: HTMLElement; observe?: boo
       return false;
     }
     reportCanvasInfo('画布网格底纹已挂载', {
-      spacing: STYLE_CONSTANTS.spacing,
-      star: `${STYLE_CONSTANTS.arm * 2 + STYLE_CONSTANTS.stroke}x${STYLE_CONSTANTS.stroke}`,
-      ink: `${STYLE_CONSTANTS.darkInk}@${STYLE_CONSTANTS.darkInkOpacity}`,
+      spacing: GRID_TIERS[0].spacing,
+      star: `${GRID_TIERS[0].arm * 2 + GRID_TIERS[0].stroke}x${GRID_TIERS[0].stroke}`,
+      ink: `${STYLE_CONSTANTS.darkInk}@${GRID_TIERS[0].darkOpacity}`,
+      /** v1.48：三层嵌套矩阵的间距（minor → major → super）。 */
+      tiers: GRID_TIERS.map((tier) => tier.spacing).join(','),
       radius: STYLE_CONSTANTS.radius,
       theme: resolveTheme(root, canvas),
       // v1.27：互动效果开关的初值 + 落点（关掉时这里是 off，且没有挂任何指针监听）

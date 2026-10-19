@@ -410,6 +410,9 @@ export function CanvasEdges(React: Runtime, props: Props, geometry: Geometry) {
           <g
             key={edge.key}
             data-edge-key={`${edge.parentId}-${edge.childId}-${edge.portIndex}`}
+            data-fisherai-edge-parent-id={edge.parentId}
+            data-fisherai-edge-child-id={edge.childId}
+            data-fisherai-edge-port-index={edge.portIndex}
             onClick={(event) =>
               props.onEdgeClick(event, edge.parentId, edge.childId, edge.portIndex)
             }

@@ -259,10 +259,18 @@ export function canvasChatInstructions(projectId: string | undefined): string {
   ];
   if (projectId) lines.push(`当前画布项目 id：${projectId}。`);
   lines.push(
-    '要看画布或改画布，用 canvas_control 工具：先 action:"read" 拿 revision 与节点清单，',
-    '再用 action:"edit" 带同一个 revision 和 operations 增删改连节点；生成图片/视频优先走画布节点',
-    '（edit 建节点 → prepareGeneration/runGeneration 跑），不要自己直接调云端接口。',
-    '回答简短、用中文，不要贴大段 JSON 或工具原始输出。',
+    '改画布用 canvas_control，原则是**一次调用做完一件事**，别把同一件事拆成多轮：',
+    '1) 直接 action:"edit" 提交增删改连 —— revision 可以不传，host 会自动读一次补上；',
+    '   一次 edit 的 operations 里能合并的全写上（建节点 + connect + configure 一起），不要分开多次调用。',
+    '2) edit 成功后返回里带 snapshot（精简后的节点列表），**不需要再 read 验证**。',
+    '3) 只有需要看全部内容时才 read detail:"full"；默认 read 的节点正文会截断到约 240 字。',
+    '4) configure 的 model 必须与 snapshot/read 里该节点的 model 字段逐字一致；',
+    '   parameters 只能用该模型声明过的 key（换模型时把要保留的参数写进同一次 configure）。',
+    '5) 生成优先走画布节点：prepareGeneration 只**准备批次**并返回 awaiting-approval，',
+    '   最后必须由用户在画布面板点「确认本批生成与费用」；你不能也不要尝试提交或绕过确认。',
+    '6) 你准备的批次跑完后，宿主会往这个面板推一条【画布生成事件】消息（不是用户发言）：',
+    '   按它用 preview 自评、修原因后重新 prepareGeneration；不要复述那条事件，也不要把它当新任务。',
+    '7) 回答简短、用中文，不要贴大段 JSON 或工具原始输出。',
     '（这是插件注入的上下文提示，不是用户消息。）',
   );
   return lines.join('');

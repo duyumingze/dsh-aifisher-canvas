@@ -30,6 +30,7 @@ import { join } from 'node:path';
 import { readJsonBody, sendJson } from '../http/httpUtil';
 import type { AgentChatStore, ChatSessionRecord, ChatStoredMessage } from './agentChatStore';
 import type { CanvasChatHub, CanvasActionNote } from './canvasChatHub';
+import { handleGenerationPlansApi, type GenerationPlans } from './generationPlans';
 import type { MediaStore } from './mediaStore';
 
 /** 一条附件（面板 media 数组的元素）。 */
@@ -61,6 +62,11 @@ export interface AgentChatDeps {
   /** DSH 会话大脑；宿主没给 sessionController 时为 null（路由会回 503 说明原因）。 */
   chat: CanvasChatHub | null;
   mediaStore?: MediaStore | null;
+  /**
+   * 生成批次记录（v1.57）。**没有它 prepareGeneration 必然失败** ——
+   * 画布准备批次的最后一步要 POST /agent/plans 落库拿 revision。
+   */
+  plans?: GenerationPlans | null;
 }
 
 /** 附件落盘目录（base64 图片要变成 agent 能读的文件）。 */
@@ -193,15 +199,23 @@ export async function handleAgentChatApi(input: AgentChatRouterInput): Promise<b
   const method = (req.method ?? 'GET').toUpperCase();
   if (parts[0] === 'agent' && parts[1] === 'workspace') return handleWorkspace(input, method);
   if (parts[0] === 'agent' && parts[1] === 'codex') return handleCodexStub(res, parts, method);
-  // 服务端授权的「连续生成」与「生成批次记录」这两套后端没有移植（它们上游挂在闭源服务上）。
-  // 面板一打开就会读这两份清单：读接口如实回空数组（于是面板那块什么都不显示），
-  // 写成 501 反而会在对话里挂一行红字（用户看到的「读取失败」）。
-  if (parts[0] === 'agent' && (parts[1] === 'plans' || parts[1] === 'budgets')) {
+  // 生成批次记录（v1.57）：上游画布的 prepareGeneration 最后一步要 POST /agent/plans
+  // 落库并拿回 revision —— 缺了它整条「Agent 准备 → 用户确认」链路都会 UNAVAILABLE。
+  if (parts[0] === 'agent' && parts[1] === 'plans') {
+    if (!deps.plans) {
+      sendJson(res, 503, { error: '生成批次记录未就绪。', code: 'PLANS_UNAVAILABLE' });
+      return true;
+    }
+    return handleGenerationPlansApi({ req, res, url, parts, plans: deps.plans });
+  }
+  // 服务端授权的「连续生成」预算没有移植（上游挂在闭源服务上）：如实回空数组，
+  // 面板那块什么都不显示（写成 501 会在对话里挂一行红字）。
+  if (parts[0] === 'agent' && parts[1] === 'budgets') {
     if (method === 'GET') {
       sendJson(res, 200, []);
       return true;
     }
-    notPorted(res, parts[1] === 'plans' ? '画布生成批次记录' : '连续生成授权（预算）');
+    notPorted(res, '连续生成授权（预算）');
     return true;
   }
   if (parts[0] !== 'chat') return false;

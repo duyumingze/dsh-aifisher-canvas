@@ -44,25 +44,34 @@ interface StateRuntime extends NodeRuntime {
  * 这里用**完整的** NodeRuntime 建节点 —— 与右键菜单的 createCanvasNode 是同一条路，
  * 于是默认模型、尺寸、连线端口全都一致。
  *
+ * detail.place === true 时再进入「新建并移动」（Blender 手感）：
+ *   - 节点出现在落点上，随后跟着鼠标走（屏幕位移 ÷ 画布当前缩放）；
+ *   - 下一次左键按下 = 放下，并且**这一次 pointerdown 被吞掉**（不吞会顺带开始拖节点，
+ *     点在空白处还会清掉刚建好的选中态）；Esc / 画布卸载也会结束跟随。
+ *   面板点选（mousedown）之后没有 pointerdown，所以不会把「点候选」误当成放下；
+ *   其它调用方（工作流库、browser-check）不传 place，行为完全不变。
+ *
  * 监听器只在画布挂载时装一次：runtime 与 store 由 getter 每次读最新值。
  * 为什么不在 effect 里依赖它们（踩过）：那些引用每次渲染都会变，effect 会「卸载→重装」上千次，
  * 每次中间都有一小段没有监听器的窗口 —— 落在里面的点击会**静默丢失**
  * （现象：开头两次建节点成功，之后点了什么都不发生，画布与日志都不报错）。
  */
 export function attachCanvasNodeCreateBridge(
-  current: () => { runtime: NodeRuntime; getNodes: () => CanvasNode[]; setNodes: (nodes: CanvasNode[]) => void; setSelected: (ids: string[]) => void },
+  current: () => { runtime: NodeRuntime; getNodes: () => CanvasNode[]; setNodes: Setter<CanvasNode[]>; setSelected: Setter<string[]> },
 ): () => void {
+  let stopPlacement: (() => void) | undefined;
   const listener: EventListener = (event) => {
     try {
       const detail = (event as CustomEvent<{
         type?: string;
         comfyMode?: string;
         point?: { x?: number; y?: number };
+        place?: boolean;
       }>).detail;
       if (!detail || typeof detail.type !== 'string' || detail.type.length === 0) return;
       const point = detail.point;
       if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
-      const { runtime, getNodes, setNodes, setSelected } = current();
+      const { runtime, setNodes, setSelected } = current();
       (window as { __DSH_NODE_CREATE_CALLS__?: number }).__DSH_NODE_CREATE_CALLS__ =
         ((window as { __DSH_NODE_CREATE_CALLS__?: number }).__DSH_NODE_CREATE_CALLS__ ?? 0) + 1;
       let node = createCanvasNode(runtime, detail.type, { x: point.x, y: point.y }, undefined);
@@ -70,8 +79,12 @@ export function attachCanvasNodeCreateBridge(
         const updated = updateCanvasNode([node], node.id, { comfyMode: detail.comfyMode }, runtime);
         if (updated[0]) node = updated[0];
       }
-      setNodes([...getNodes(), node]);
+      setNodes((nodes) => [...nodes, node]);
       setSelected([node.id]);
+      if (detail.place === true) {
+        stopPlacement?.();
+        stopPlacement = attachPointerPlacement(node.id, current);
+      }
     } catch (error) {
       // 静默失败会让用户看到「面板能开、候选能选，但点了不出节点」——
       // 这种「什么都不发生」最难排查，所以这里必须把原因喊出来。
@@ -79,7 +92,130 @@ export function attachCanvasNodeCreateBridge(
     }
   };
   window.addEventListener('fisherai:add-canvas-node', listener);
-  return () => window.removeEventListener('fisherai:add-canvas-node', listener);
+  return () => {
+    window.removeEventListener('fisherai:add-canvas-node', listener);
+    stopPlacement?.();
+    stopPlacement = undefined;
+  };
+}
+
+/** 画布当前缩放：读 #canvas-viewport-content 的内联 transform（量不到就当 1）。 */
+function canvasZoom(): number {
+  const transform = document.getElementById('canvas-viewport-content')?.style.transform ?? '';
+  const scale = /scale\(\s*([-0-9.eE+]+)\s*\)/.exec(transform);
+  const zoom = scale ? Number.parseFloat(scale[1]) : 1;
+  return Number.isFinite(zoom) && zoom > 0 ? zoom : 1;
+}
+
+/**
+ * 「新建并移动」：把刚建出来的节点挂到鼠标上，下一次左键放下。
+ *
+ * 为什么按「屏幕位移 ÷ 缩放」而不是每次重算世界坐标：画布自己拖节点就是这么算的
+ * （vendor 的 updateNodeDrag：movementX / viewport.zoom），不需要知道画布原点，
+ * 中途滚轮缩放也不会跳一下。
+ *
+ * 为什么放下时要吞掉 pointerdown：用户那一下只是想「确定落点」。传下去会让画布立刻
+ * 开始拖这个节点；点在空白处还会把刚建好的选中态清掉。
+ */
+function attachPointerPlacement(
+  id: string,
+  current: () => { getNodes: () => CanvasNode[]; setNodes: Setter<CanvasNode[]> },
+): () => void {
+  const scope = window as unknown as {
+    __DSH_NODE_PLACEMENT__?: {
+      moves: number;
+      flushes: number;
+      stops: number;
+      zoom: number;
+      last: number[];
+      log: string[];
+    };
+  };
+  const diag =
+    scope.__DSH_NODE_PLACEMENT__ ??
+    (scope.__DSH_NODE_PLACEMENT__ = { moves: 0, flushes: 0, stops: 0, zoom: 1, last: [], log: [] });
+  const note = (line: string) => {
+    diag.log.push(line);
+    if (diag.log.length > 40) diag.log.splice(0, diag.log.length - 40);
+  };
+  note('attach ' + id);
+  let lastX: number | null = null;
+  let lastY: number | null = null;
+  let frame = 0;
+  let pendingX = 0;
+  let pendingY = 0;
+
+  const flush = () => {
+    frame = 0;
+    if (pendingX === 0 && pendingY === 0) return;
+    const dx = pendingX;
+    const dy = pendingY;
+    pendingX = 0;
+    pendingY = 0;
+    diag.flushes += 1;
+    note('flush ' + dx + ',' + dy);
+    current().setNodes((nodes) =>
+      nodes.map((node) => (node.id === id ? { ...node, x: node.x + dx, y: node.y + dy } : node)),
+    );
+  };
+
+  const onMove = (event: PointerEvent) => {
+    diag.moves += 1;
+    diag.last = [event.clientX, event.clientY];
+    if (lastX === null || lastY === null) {
+      // 第一次移动只定基线：落点已经由建节点那一步给过了，不需要再挪一下
+      lastX = event.clientX;
+      lastY = event.clientY;
+      note('baseline ' + event.clientX + ',' + event.clientY);
+      return;
+    }
+    const zoom = canvasZoom();
+    diag.zoom = zoom;
+    pendingX += (event.clientX - lastX) / zoom;
+    pendingY += (event.clientY - lastY) / zoom;
+    lastX = event.clientX;
+    lastY = event.clientY;
+    if (frame === 0) frame = window.requestAnimationFrame(flush);
+  };
+
+  const stop = (reason = 'manual') => {
+    diag.stops += 1;
+    note('stop ' + reason);
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerdown', onDown, true);
+    window.removeEventListener('keydown', onKeyDown, true);
+    if (frame !== 0) window.cancelAnimationFrame(frame);
+    frame = 0;
+    pendingX = 0;
+    pendingY = 0;
+  };
+
+  const onDown = (event: PointerEvent) => {
+    if (event.button !== 0) {
+      // 右键/中键：结束跟随但**不吞事件**（右键菜单、中键平移要照常工作）
+      stop('other-button');
+      return;
+    }
+    const target = event.target;
+    const element = target && typeof (target as Element).closest === 'function' ? (target as Element) : null;
+    // 点在画布里 → 吞掉（否则会立刻开始拖节点/清选中）；
+    // 点在画布外（工具栏、会话栏…）→ 只结束跟随，让那次点击照常生效，不做「死点击」。
+    const insideCanvas = !!element?.closest('#canvas-background, .af-canvas-mount');
+    stop('down');
+    if (insideCanvas) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  };
+
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape') stop('escape');
+  };
+
+  window.addEventListener('pointermove', onMove, { passive: true });
+  window.addEventListener('pointerdown', onDown, true);
+  window.addEventListener('keydown', onKeyDown, true);
+  return stop;
 }
 
 function workflowNode(node: CanvasNode | undefined): node is CanvasNode & WorkflowCanvasNodeRecord {

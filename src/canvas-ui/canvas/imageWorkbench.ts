@@ -16,8 +16,10 @@ import {
   cropOutputRects,
   cropRatio as vendorCropRatio,
   createCrop as vendorCreateCrop,
+  equalCuts as vendorEqualCuts,
   hitCrop as vendorHitCrop,
   moveCrop as vendorMoveCrop,
+  moveCropCut as vendorMoveCropCut,
   resizeCrop as vendorResizeCrop,
   type CropHandle,
   type CropOutput,
@@ -45,8 +47,10 @@ export const cropGeometry = {
   cropHandles: vendorCropHandles,
   cropRatio: vendorCropRatio,
   createCrop: vendorCreateCrop,
+  equalCuts: vendorEqualCuts,
   hitCrop: vendorHitCrop,
   moveCrop: vendorMoveCrop,
+  moveCropCut: vendorMoveCropCut,
   resizeCrop: vendorResizeCrop,
 };
 
@@ -139,6 +143,66 @@ export function exportCrop(
   const data = canvas.toDataURL('image/png');
   if (!data.startsWith('data:image/png')) throw new Error('图片超出当前设备的处理范围。');
   return { data, width: canvas.width, height: canvas.height, row: 0, column: 0 };
+}
+
+/**
+ * 宫格裁剪导出（v1.46）：一次把选区按行列切线与间隙切成 N 块。
+ *
+ * 像素语义与上游 `canvasImageCrop.tsx` 的 grid 分支逐条对齐：
+ *   - 切线 / 间隙仍由 `cropOutputRects` 换算成**源图像素**（间隙单位也是源图像素）；
+ *   - 宫格（行或列 > 1）时每块先铺白底再画图 —— 上游就是这么做的，改动会让输出与旧版不一致；
+ *   - 返回顺序是**行优先**，`row`/`column` 记录它在宫格里的位置（画布按这个排布新节点）；
+ *     导出顺序（逐行/逐列/蛇形/倒序）由调用方再用 `gridExportIndices` 重排。
+ */
+export function exportGridPieces(
+  image: HTMLImageElement,
+  rect: WorkbenchRect,
+  display: WorkbenchSize,
+  source: WorkbenchSize,
+  cuts: { rowCuts: number[]; columnCuts: number[]; rowGap: number; columnGap: number },
+  fillWhite: boolean,
+): WorkbenchOutput[] {
+  if (!display.width || !display.height) throw new Error('图片还没准备好，请稍后再试。');
+  const pieces = cropOutputRects(
+    rect,
+    display,
+    source,
+    cuts.rowCuts,
+    cuts.columnCuts,
+    cuts.rowGap,
+    cuts.columnGap,
+  );
+  const canvas = document.createElement('canvas');
+  const outputs: WorkbenchOutput[] = [];
+  for (let row = 0; row < pieces.rows.length; row += 1) {
+    for (let column = 0; column < pieces.columns.length; column += 1) {
+      const vertical = pieces.rows[row];
+      const horizontal = pieces.columns[column];
+      canvas.width = horizontal.size;
+      canvas.height = vertical.size;
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('无法创建裁切图片');
+      if (fillWhite) {
+        context.fillStyle = 'white';
+        context.fillRect(0, 0, canvas.width, canvas.height);
+      }
+      context.drawImage(
+        image,
+        horizontal.start,
+        vertical.start,
+        horizontal.size,
+        vertical.size,
+        0,
+        0,
+        canvas.width,
+        canvas.height,
+      );
+      const data = canvas.toDataURL('image/png');
+      if (!data.startsWith('data:image/png')) throw new Error('图片超出当前设备的处理范围。');
+      outputs.push({ data, width: canvas.width, height: canvas.height, row, column });
+    }
+  }
+  return outputs;
 }
 
 /**

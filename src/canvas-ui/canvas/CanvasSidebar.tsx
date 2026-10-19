@@ -20,6 +20,7 @@
  *    产物里 React 有两份副本，用错那分量 React 19 不报错也不渲染（头部/工具条会整块消失）。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import {
   HistoryIcon,
   ImageIcon,
@@ -69,7 +70,7 @@ export function CanvasSidebar(
     avatarText(name: string): string;
   },
 ) {
-  const h = react.createElement;
+  const h = createElement(react);
   const Tooltip = components.Tooltip as ReactTypes.ComponentType<Record<string, unknown>>;
   const name = props.currentUserName ?? '协作者';
 

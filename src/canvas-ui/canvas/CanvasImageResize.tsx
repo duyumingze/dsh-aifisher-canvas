@@ -27,6 +27,7 @@
  *    这里用 `useCanvasOverlayBox`（量画布容器 rect + ResizeObserver）。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import { createPortal } from 'react-dom';
 import {
   Check as CheckIcon,
@@ -70,7 +71,7 @@ const INPUT_CLASS =
   '[&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none';
 
 export function CanvasImageResize(react: Runtime, props: ResizeSlotProps) {
-  const h = react.createElement;
+  const h = createElement(react);
   const overlay = useCanvasOverlayBox(react);
   const rootRef = react.useRef<HTMLDivElement>(null);
   const stageRef = react.useRef<HTMLDivElement>(null);

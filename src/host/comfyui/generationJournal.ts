@@ -70,6 +70,32 @@ export interface GenerationTask {
 /** 内存里保留的历史条数上限（含正在跑的）。面板一次最多显示 30 条，60 条够翻。 */
 const MAX_TASKS = 60;
 
+/**
+ * 任务事件（v1.57）：**唯一**的订阅出口，供「生成事件推送」用
+ * （canvas/generationEvents.ts → 画布对话面板）。
+ *
+ * 只发下面五种，语义与日记里的写操作一一对应：
+ *   - `begin`      新一轮开始（每轮一条）；
+ *   - `success` / `failed` / `cancelled`  真正的终局；
+ *   - `superseded` 同一节点又发起了新一轮，上一轮被标成 cancelled（**不是**终局，
+ *                  新一轮还会来 begin + 终局 —— 订阅方别把它当成「这个节点结束了」）。
+ *
+ * 快照里 strip 掉取消钩子（函数不能 JSON 化），其余字段原样，省得订阅方再记一遍。
+ */
+export type GenerationJournalEventType = 'begin' | 'success' | 'failed' | 'cancelled' | 'superseded';
+
+export type GenerationTaskSnapshot = Omit<GenerationTask, 'cancel'>;
+
+export interface GenerationJournalEvent {
+  type: GenerationJournalEventType;
+  task: GenerationTaskSnapshot;
+}
+
+function snapshotOf(task: GenerationTask): GenerationTaskSnapshot {
+  const { cancel: _cancel, ...rest } = task;
+  return { ...rest };
+}
+
 export interface BeginTaskInput {
   nodeId: string;
   attemptId: string;
@@ -88,6 +114,30 @@ export function createGenerationJournal() {
   const byNode = new Map<string, string>();
   /** 加入顺序（旧 → 新） */
   const order: string[] = [];
+  /** 事件订阅者（v1.57，生成事件推送）。只有一个发布点：emit()。 */
+  const listeners = new Set<(event: GenerationJournalEvent) => void>();
+
+  /**
+   * 发一条任务事件。
+   *
+   * 订阅方抛错绝不能让生成链路失败（推送只是旁路）：逐个 try/catch，吞掉并打日志。
+   * 没人订阅时提前返回，连快照都不做。
+   */
+  function emit(type: GenerationJournalEventType, task: GenerationTask): void {
+    if (listeners.size === 0) return;
+    const taskSnapshot = snapshotOf(task);
+    for (const listener of [...listeners]) {
+      try {
+        listener({ type, task: taskSnapshot });
+      } catch (error) {
+        console.error(
+          `[aifisher-canvas] 生成事件订阅者抛错（已忽略）：${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+  }
 
   /** 超量时优先扔掉最早那条**已结束**的；还在跑的一条都不扔。 */
   function prune(): void {
@@ -133,6 +183,7 @@ export function createGenerationJournal() {
         finish(previous, 'cancelled', now);
         previous.code = 'GENERATION_SUPERSEDED';
         previous.error = '这个节点又发起了新一轮生成，上一轮已作废。';
+        emit('superseded', previous);
       }
       // 同一个 attemptId 重复 begin（重试/重放）：把旧的那条从顺序表里摘掉，别留重复行。
       const existingIndex = order.indexOf(input.attemptId);
@@ -156,6 +207,7 @@ export function createGenerationJournal() {
       byNode.set(input.nodeId, task.id);
       order.push(task.id);
       prune();
+      emit('begin', task);
       return task;
     },
 
@@ -184,6 +236,7 @@ export function createGenerationJournal() {
         result.resultUrls ??
         (result.resultUrl ? [result.resultUrl] : undefined);
       if (result.text !== undefined) task.text = result.text;
+      emit('success', task);
     },
 
     fail(nodeId: string, attemptId: string, failure: { code?: string; error: string }): void {
@@ -192,6 +245,7 @@ export function createGenerationJournal() {
       finish(task, 'failed', Date.now());
       task.code = failure.code;
       task.error = failure.error;
+      emit('failed', task);
     },
 
     /** 执行器在轮询间隙调用：返回 true 表示这次尝试已被取消，应立刻停止等待。 */
@@ -230,12 +284,25 @@ export function createGenerationJournal() {
       finish(task, 'cancelled', Date.now());
       task.code = 'GENERATION_CANCELLED';
       task.error = '生成任务已取消。';
+      emit('cancelled', task);
       try {
         await task.cancel?.();
       } catch {
         // 远端可能已经跑完：日记里已经标成 cancelled，真正的判定交给结果回收
       }
       return { ok: true, task };
+    },
+
+    /**
+     * 订阅任务事件（v1.57 生成事件推送）。返回取消订阅函数。
+     *
+     * 事件是**旁路**：订阅方拿到的 task 是快照，改它不会影响日记；抛错也不会影响生成。
+     */
+    subscribe(listener: (event: GenerationJournalEvent) => void): () => void {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
     },
 
     /** 诊断用快照（旧→新，含全部历史）。 */

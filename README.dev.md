@@ -53,8 +53,9 @@ vendor/aifisher/            上游源码（构建时由 scripts/vendor-aifisher.
    `set AIFISHER_SRC=E:\开源项目\AIFISHER-main` —— vendor 那步默认找 `../AIFISHER-main`，D: 上并没有上游源码树，
    必须用这个环境变量指过去；否则 vendor 直接报「找不到 AIFISHER 源码」。
    `node scripts/clean.mjs && node scripts/vendor-aifisher.mjs && node scripts/build-canvas-css.mjs && node node_modules/tsdown/dist/run.js`
-3. **回归**：`node scripts/run-all-regressions.mjs`（29 套，逐套跑、判绿只看 SUMMARY 行；2026-10-18 v1.44 实测 1989 项）。
-4. **重启 DSH**（host 半是进程内加载的，光刷新页面只更新画布产物），重启后刷新画布页即可。
+3. **类型门禁**：`node scripts/typecheck.mjs`（只对 `src/` 报错；`vendor/` 是上游源码，不进门禁）。
+4. **回归**：`node scripts/run-all-regressions.mjs`（37 套，逐套跑、判绿只看 SUMMARY 行；2026-10-20 v1.57 实测 2210 项）。
+5. **重启 DSH**（host 半是进程内加载的，光刷新页面只更新画布产物），重启后刷新画布页即可。
 
 > 盘符换过（`G:` → `E:`）的机器上会有一个坑：`node_modules` 里上千个 junction 存的是绝对路径，
 > 盘符一变全部悬空，`node` 解析不到 `tsdown`/`jsdom`，构建与回归一起报「找不到模块」。
@@ -73,18 +74,21 @@ vendor/aifisher/            上游源码（构建时由 scripts/vendor-aifisher.
 | FisherAI（api.work-fisher.com）图像接口（`workfisher` 方言 + 异步任务 + 参考图直链上传） | ➕ 新增（v1.30；**v1.35 上传被掐断会自动重试 + 直链缓存**） | `src/host/generation/cloudChannels.ts`（方言/上传/轮询）, `cloudGenerationRouter.ts`, `CloudChannelPanel.ts` |
 | 画布右侧 DSH 原生会话栏（聊天框控制画布） | ➕ 新增（v1.9 / v1.14） | `src/host/canvas/{agentChatRouter,canvasChatHub,agentChatStore}.ts`, `src/client/CanvasChatDock.tsx` |
 | 任务队列面板（运行中循环发光 / 取消 / 清空） | ➕ 新增（v1.24） | `CanvasTaskQueue.tsx` + `taskQueueRouter.ts` + `generationJournal.ts` |
-| 图片编辑族（工作台 / 裁剪 / 标注·蒙版） | ➕ nova 版重做（v1.26） | `CanvasImageStudio.tsx`, `ImageCropStage.tsx`, `ImageAnnotationStage.tsx` |
+| 图片编辑族（工作台 / 裁剪 / 宫格裁剪 / 标注·蒙版） | ➕ nova 版重做（v1.26；宫格裁剪 v1.46） | `CanvasImageStudio.tsx`, `ImageCropStage.tsx`, `ImageGridCropStage.tsx`, `ImageAnnotationStage.tsx` |
 | **扩图**（工具条点一下 → **先出一张「扩图画面」真图片，再接一个空的图像生成节点**：提示词已填、参考图已连、模型跟你自己的通道；生成由你点） | ➕ 新增（v1.38 起；**v1.39 改成两步两节点**；**替换掉「AI 高清放大 · SeedVR2」**） | `src/canvas-ui/canvas/CanvasOutpaint.ts`, `src/client/canvas/bootstrap.ts`（画像素）, `scripts/patches/aifisher/.../canvasMediaToolbar.tsx`, `scripts/vendor-aifisher.mjs`（3.8p） |
 | 尺寸对话框 nova 版（等比倍数 / 指定宽高 / 快捷倍率，保存仍走同一套落盘） | ➕ 新增（v1.38） | `src/canvas-ui/canvas/CanvasImageResize.tsx` + `stage.tsx` 的 `Resize` 槽位 |
 | **新建节点默认用上一次的模型**（在节点上换过模型、或真发过一次生成，下一个新节点就不必再调下拉；按 图片/视频/音频/文本 分桶，模型已不在目录里就回落目录第一个） | ➕ 新增（v1.40） | `src/canvas-ui/canvas/CanvasLastModel.ts`, `src/client/canvas/bootstrap.ts`（桥）, `scripts/vendor-aifisher.mjs`（3.8q） |
-| 点阵底纹 + 鼠标互动（可在设置里关掉） | ➕ 新增（v1.8；**v1.27 修互动、加开关**；**v1.33 修「网格比节点快」**） | `src/client/canvas/canvasGrid.ts`, `CanvasEffectsStore/Panel.ts` |
+| 点阵底纹 + 鼠标互动（可在设置里关掉） | ➕ 新增（v1.8；**v1.27 修互动、加开关**；**v1.33 修「网格比节点快」**；**v1.48 Blender 式三层嵌套**） | `src/client/canvas/canvasGrid.ts`, `CanvasEffectsStore/Panel.ts` |
 | 画布 UI shadcn 化（头部/工具条/缩放控件/小地图/搜索/对话框） | ➕ 新增（v1.6 起；**v1.36 修好头部被画布盖住 + 重排顶部**） | `src/canvas-ui/**` |
 | 多选折叠成一叠（叠图） | ➕ 新增（v1.21） | `scripts/vendor-aifisher.mjs`（3.8j） |
 | **叠图「切换」**（不展开也能翻看这一叠里的每一张，`切换 2/3`） | ➕ 新增（v1.37） | `src/canvas-ui/canvas/CanvasStack.ts`, `scripts/vendor-aifisher.mjs`（3.8o） |
 | **项目归档**（导出/导入 `.fisherai`：面板里看规模、导出到本机目录并回执绝对路径、导入即新建项目并自动切过去；项目库头部另有「导入项目」） | ➕ 新增（v1.42） | `src/canvas-ui/canvas/CanvasProjectArchive*.ts(x)`, `src/host/canvas/projectArchiveRouter.ts`, `scripts/vendor-aifisher.mjs`（3.8r） |
 | **项目数据目录**（设置 → 存储 → 项目数据目录：把插件的整个数据目录换到别的盘；写指针 + **重启 DSH 生效**，可选把现有数据复制过去，纯复制不删旧目录） | ➕ 新增（v1.43） | `src/host/canvas/dataDir.ts` + `dataDirRouter.ts`, `src/canvas-ui/canvas/CanvasDataDir*.ts`, `scripts/vendor-aifisher.mjs`（3.8s） |
+| **切刀**（Ctrl + 右键拖拽：划过的连线当场变红，松手断开；Esc 取消；只断被划过的那条） | ➕ 新增（v1.49） | `src/client/canvas/knife.ts`, `scripts/vendor-aifisher.mjs`（3.8t） |
 | 画布顶部三维：左上返回项目库 / ComfyUI 胶囊在左 / 任务队列贴右上角 | ➕ 新增（v1.36） | `CanvasHeader.tsx`, `CanvasTaskQueue.tsx`, `scripts/vendor-aifisher.mjs`（3.8n） |
 | agent 操控画布（`canvas_control`） | ✅ 用 DSH 替代 Codex | `src/host/index.ts`, `src/host/canvas/agentBridge.ts` |
+| **文本节点正文**（`create`/`update` 给 `prompt` 时按正文写进 `textContent`；`text` = 正文、`prompt` = 转换模板，agent 写的字不再落进提示词框） | ➕ 修复（v1.50） | `scripts/vendor-aifisher.mjs`（3.8u）, `src/host/index.ts`, `docs/canvas-agent-contract.md` |
+| **@ 画布节点**（输入框敲 `@` 多一组「画布节点」候选：当前项目的文本/图像/视频/音频节点；发送时自动带只读快照，点 chip 聚焦回节点） | ➕ 新增（v1.51） | `src/client/canvasReferences.ts`, `src/host/canvas/nodeReferences.ts`, `src/client/apply.ts`, `src/host/index.ts` |
 | **画布侧技能目录**（`canvas_control` 的 `skills`/`skillLoad` + `GET /api/aifisher/skills[/:name]`：能看到并读到**用户/项目自己的技能**，不再只剩 4 条 bundled） | ➕ 修复（v1.44） | `src/host/skills/skillsRouter.ts` |
 | 账号登录 / 导演台 / 分镜 / 技能社区 / 反馈中心 / 内置浏览器 | ❌ 不搬 | — |
 
@@ -185,7 +189,7 @@ vendor/aifisher/            上游源码（构建时由 scripts/vendor-aifisher.
 到新机器在项目库头部点「导入项目」选那份 `.fisherai` 就行（v1.42）。
 不在这个目录里的四样：插件本体、DSH 自己的会话记录（右侧会话栏的历史）、浏览器 localStorage 偏好、DSH 配置。
 
-## 版本线（v0.6 → v1.44）
+## 版本线（v0.6 → v1.51）
 
 | 版本 | 要点 |
 |---|---|
@@ -221,6 +225,13 @@ vendor/aifisher/            上游源码（构建时由 scripts/vendor-aifisher.
 | v1.42 | **项目归档（导出 / 导入）**：画布头部多了「项目归档」入口 —— 面板里看得到「N 个节点 · 素材 M 个 · 归档约 X MB」，一键**导出到本机目录**（host 落盘、回执给绝对路径、可打开目录）或下载；导入支持 `.fisherai`（带素材）与旧版 `.json` 文档，**导入即新建项目并自动切过去**；项目库头部另有「导入项目」按钮（见下） |
 | v1.43 | **项目数据目录可自定义**：设置 → 存储 → 「项目数据目录（缓存）」，填一个绝对路径 + 可选「把现有数据复制过去」，**重启一次 DSH** 之后项目/素材/通道/密钥/工作流/下载全落到新目录；「恢复默认」回 DSH 数据目录下（旧目录不删）（见下） |
 | v1.44 | **画布侧技能目录修好**：`canvas_control` 的 `skills`/`skillLoad` 与 `GET /api/aifisher/skills[/:name]` 以前只能看到 4 条 bundled 技能、用户自己的技能（`$DSH_HOME/skills` 下那 10 条）一条都列不出来、`skillLoad` 直接 404 —— 现在按官方四个根自己扫盘并与 `ctx.skills` 合并（见下） |
+| v1.45 | **节点搜索一次回车只建一个节点**（输入框与面板根各处理了一次同一个 Enter），并按用户要求做成 Blender 式「新建并移动」：确认后节点跟着鼠标走，下一次左键才放下（见下） |
+| v1.46 | **宫格裁剪换成 nova 版工作台**（用户「画布宫格裁剪ui还没有更新」）：宫格预设 / 行列分割 / 间隙 / 比例 / 导出顺序 / 导出序号收进同一套四段式舞台；切图仍走上游纯函数（切线间距、间隙、宫格白底、`1,3,5-8` 语法一字没动），默认 2×2 且选区铺满原图；全景 / 角度继续交给 vendor（见下） |
+| v1.47 | **拖出来的连线不再偏出去**（用户「从图像拉出的线与鼠标指针有很大偏差」）：上游把 `clientX/clientY` 直接当画布内坐标用，本插件的画布底盘左边是 DSH 侧边栏、上边是顶栏，于是虚线整体偏 (底盘左, 底盘上)/zoom（真机侧边栏 240px，就是偏 240px）。修法：手势开始时量一次 `#canvas-background` 的 rect，进画布坐标系前减掉它；真机回归钉住「自由端与指针偏差 ≤ 2px」（改前实测偏 240px）（见下） |
+| v1.48 | **缩小时点阵不再密密麻麻（Blender 式三层嵌套矩阵）**（用户「画布背景的星型矩阵，缩小画布就密密麻麻的，能不能参考 blender 的，大的矩阵包裹小的矩阵，缩放到一点程度后小的矩阵就消失」）：24 / 120 / 600px 三层共用同一平移相位（大星压在小星上），每层按**屏幕间距**淡入淡出 —— 小矩阵缩到 12px 以下先消失，大矩阵接棒，继续缩由更大一层接棒；24px 那层的规格与 zoom 1 的观感不变（见下） |
+| v1.51 | **对话里 @ 画布节点**（用户「能不能加一个我能在对话去@画布内的素材，文本、图像等」）：输入框敲 `@` 就多一组「画布节点」候选（当前项目里的文本 / 图像 / 视频 / 音频节点，按标题与正文模糊过滤）；选中插入原子引用，发送时序列化为 `@[标题](aifisher-node:节点id)`，宿主在 `agent/pre-step` 里把它展开成紧随其后的**只读节点快照**（标题 / 类型 / 正文 / 结果地址，最多 8 个、单节截断）；已发送消息里渲染成 chip，点一下把节点聚焦回画布（见下） |
+| v1.50 | **agent 写的字不再落进「提示词」框**（用户「它生成的内容不在文本里，反而在提示词里」）：Text 节点的正文是 `textContent`、`prompt` 是转换模板，而 agent 的 `create/update` 无条件写 `prompt`；现在只给 `prompt` 时按正文写入，显式 `text` 才写正文、`prompt` 留给模板（见下） |
+| v1.49 | **切刀：按住 Ctrl + 右键拖拽，划过的连线断开**（用户「像blender一样按住ctrl加鼠标右键切换到切刀工具，划过的线会断开连接」）：拖拽时画出刀口线、被划过的连线**当场变红**（预览），松手只断开这些线（与双击断线同一条写路径，可撤销、会被自动保存）；Esc 取消；只按身份 `(parentId, childId, portIndex)` 断开，同一子节点上没被划到的连线原样保留（见下） |
 
 ### v1.27：鼠标互动修好 + 设置里的开关
 
@@ -874,18 +885,206 @@ curl https://api.work-fisher.com/v1/image/generations \
 - ⚠️ 这一版**改了 host 半**：**要重启一次 DSH**（和 v1.42/v1.43 那次并成同一次重启即可），
   重启前画布侧技能目录仍是旧的 4 条。
 
+### v1.45：节点搜索——一次回车只建一个节点 + Blender 式「新建并移动」
+
+用户原话（2026-10-19）：「发现一个bug，是搜索工具的，点击回车后会出现两个节点。我希望点击确定
+之后出现在画布里，但会继续跟着鼠标，再次点击左键才能算完成。对应blender新建并移动」。
+
+**两个节点是同一个 Enter 被处理了两次**：`onPanelKeyDown` 同时挂在输入框和面板根上（面板根还要
+接住从候选按钮冒上来的键），同一个 keydown 先被输入框处理一次、再冒泡到面板根处理一次 ——
+两次 `commit()`、两次 `fisherai:add-canvas-node`，两个节点叠在同一点。处理过的键现在
+`stopPropagation()`（顺手修掉 ↑/↓ 一次跳两格），commit 另有一道「一次打开只提交一次」的闸门。
+
+**「新建并移动」落在 vendor 建节点桥里**（`scripts/vendor-aifisher.mjs` 3.8f 段，面板侧只传
+`detail.place: true`）：节点按原落点建出来后，`pointermove` 按「屏幕位移 ÷ 画布当前缩放」更新节点
+坐标（与 vendor 拖节点同一套算法，中途滚轮缩放不跳），并节流到 rAF；**下一次左键 `pointerdown`
+= 放下**，这一次事件被 `preventDefault + stopPropagation` 吞掉（不吞会立刻开始拖这个节点，
+点在空白处还会清掉刚建好的选中态）；Esc 或画布卸载也会结束跟随。不传 `place` 的调用方
+（工作流库、browser-check 的合成事件）行为完全不变。
+
+- 回归：`test:node-search` 新增 6 项（一次 Enter 只派发一次 / 只建一个节点 / 跟随位移 +40/+24 /
+  放下时左键被拦下 / 放下后不再跟手且移动后的位置真的存盘 / 工具栏入口也能建节点），并把
+  「按一次 ↓ 只走一格」钉住；`browser-check` node-search 场景真机量了「+60/+40 跟手、放下后 0 位移」
+  （量之前临时关掉网格探针的合成 pointermove，否则会被它冲成 0）；
+- 顺带修好工具栏入口的静默失败：没有鼠标位置时落点回落到画布正中（以前事件里没有合法 `point`，
+  vendor 桥直接 return，「选了候选画布上什么都没发生」）；
+- 排障读数：`window.__DSH_NODE_PLACEMENT__` → `{moves, flushes, stops, zoom, last, log}`；
+- 面板底栏提示改成「Enter 添加 · 移动鼠标 · 左键放下」。
+
+### v1.46：宫格裁剪——只换壳，切图语义一字没动
+
+用户原话（2026-10-19）：「画布宫格裁剪ui还没有更新」。v1.26 换图片编辑族时，`mode !== 'editor'`
+整棵树交回 vendor，所以宫格裁剪（工具条里最常点的那个）一直是上游那圈「胶囊里塞 fieldset +
+原生 select + 手写 range」的外观。
+
+- **新舞台** `src/canvas-ui/canvas/ImageGridCropStage.tsx`：与 `ImageCropStage` 同一套
+  header / toolbar / stage / footer 与变量；工具条两行 —— 宫格预设（2×2…4×1）+ 横向/竖向分割
+  步进器 + 恢复等分 + 7 个比例；上下/左右间隙滑杆 + 导出顺序（逐行/逐列/蛇形/倒序）+ 导出序号。
+  顺序与比例都是**按钮组**，不用 Radix Select/Popover（它的 content portal 到画布容器 z-50，
+  会成为工作台 z-12000 的兄弟节点，永远被盖住 —— 与 v1.26 同一个坑）。
+- **像素仍走上游**：切线/间隙 → 源图像素用 `cropOutputRects`；拖切线的最小间距用 `moveCropCut`；
+  行列等分用 `equalCuts`；顺序与 `1,3,5-8` 语法用 `gridExportIndices`。真正落像素的是
+  `imageWorkbench.ts` 新增的 `exportGridPieces`（**行优先 + 宫格时每块先铺白底**，与上游
+  grid 分支逐条对齐；`row`/`column` 保留原位，画布按它排节点）。
+- **默认态**：上游打开是 1×1 + 居中 80% 选区（要先挑预设才看得到格子），nova 版默认 **2×2 +
+  选区铺满整张图**；改行列数仍「重新等分 + 铺满原图」（与上游 `restoreGrid` 同一语义）。
+- **能力一个不丢**：拖切线微调单行/单列、间隙、顺序、导出序号、恢复等分、比例锁定、
+  保存后每格变成画布上的一张图（`useCanvasCropSave` 原样，host 半没动 —— 只要刷新页面）。
+- **回归**：`test:canvas-ui` 里原来「宫格裁剪必须原样交回 vendor」那两条改成 nova 契约
+  （22 条结构断言）；`browser-check` 新增 `image-grid` 场景 18 项 —— 舞台铺满画布（1176×808）、
+  图片真的解码（775×581）、真拖第一条竖向切线后单格从 160×120 变 171×120、3×3 → 9 格、
+  导出序号 `1,3` → 只导 2 张、保存后画布上多出 2 个 `/api/aifisher/canvas/media/` 节点；
+  交付图 `.dsh-tmp/shots/canvas-image-grid.png`。
+
+### v1.47：拖出来的连线不跟手——画布坐标系少了一个原点
+
+用户原话（2026-10-19，附截图）：「从图像拉出的线与鼠标指针有很大偏差」。
+
+- **根因**：上游连线手势把**视口坐标**（`clientX/clientY`）直接当**画布内坐标**塞进
+  `tempConnectionEnd`，`canvasEdges` 再按 `(end - viewport) / zoom` 换成世界坐标 ——
+  这只有在画布底盘贴着窗口左上角 (0,0) 时才对（AIFISHER 是独占窗口的应用）。
+  嵌进 DSH 面板后底盘左边是侧边栏、上边是顶栏，虚线整体偏 `(rect.left, rect.top) / zoom`；
+  真机侧边栏 240px、缩放 100% 时就是**偏 240px**。缩放越小偏得越多。
+  同一个根因也是 v1.25「按节点矩形判落点也会偏」的来源 —— 那次只是把落点改成 DOM 命中绕开了它，
+  画线这一路没绕开，所以线一直偏。
+- **修法**（`scripts/patches/aifisher/src/stable/canvas/canvasConnectionHooks.ts`，整文件覆盖补丁）：
+  - 手势开始时量一次 `#canvas-background` 的 rect，记进 `originRef`；
+  - `hover()` 统一收**视口坐标**，只在最外层减一次原点得到画布内坐标：`tempConnectionEnd`
+    存画布内坐标（`canvasEdges` 的约定），节点矩形判定用世界坐标，`elementFromPoint` /
+    `rect` 命中仍用视口坐标（DOM 本来就是这个坐标系）；
+  - 菜单是 `position: fixed` + `left/top` 吃 `clientX/clientY`，所以 `openMenu` 那条路继续用视口坐标；
+  - jsdom 里 rect 全 0 → 原点 (0,0)，老行为与老回归**逐字不变**。
+- **回归**：`browser-check` 的 `workflow-node` 场景加一条「拖出来的虚线跟着指针（自由端与指针偏差 ≤ 2px）」——
+  指针停在空白处时把虚线端点按 `rect + viewport + zoom` 换算回屏幕坐标，和指针比。
+  该宿主页复刻了 DSH 的 240px 侧边栏，所以改前实测 `delta=[240,0]`（这条断言真的会红），改后 `[0,0]`。
+
+### v1.48：缩小时点阵密密麻麻 —— 换成 Blender 式三层嵌套矩阵
+
+用户原话（2026-10-19，附截图）：「画布背景的星型矩阵，缩小画布就密密麻麻的，能不能参考 blender 的，
+大的矩阵包裹小的矩阵，缩放到一点程度后小的矩阵就消失」。
+
+- **根因**：底纹只有一层 24px 星号，`background-size = 24 × zoom`。缩小画布时整层贴纸跟着按比例缩，
+  屏幕间距一路掉到几像素，星号就挤成一片噪点（用户截图就是这种状态）。
+- **修法**（`src/client/canvas/canvasGrid.ts`，vendor 树仍然一个字不改）：一层 → **三层嵌套矩阵**
+  `24 / 120 / 600px`（每层是上一层的 5 倍），三层共用同一个平移相位（`background-position` 都是画布
+  translate），所以 120px 的大星圆心永远压在 24px 的某颗小星上，600px 再压在大星上 —— 是「大矩阵包小矩阵」
+  而不是三套错位的网格。
+- **显隐**：每层 wrapper 的整体透明度由**屏幕上的格子间距**（`spacing × zoom`）算：
+  `<12px` 隐藏、`12→18px` 淡入、`18→200px` 全显、`200→240px` 淡出（放大到很大时不再出现巨大的稀疏星号）。
+  于是放大时只剩小矩阵；缩小时小矩阵先消失、大矩阵接棒；继续缩由更大一层接棒 ——
+  任何档位都只有 1~2 层可见，屏幕星号密度被夹在 12~200px 之间。
+- **观感**：大矩阵的星号同时更大更亮（7 / 11 / 15px，alpha 0.19 / 0.26 / 0.32），否则同尺寸同墨色叠在
+  一起根本分不出层次。24px 那一层的规格（间距 / 星号 / 墨色）一字没动：zoom 1 时仍按 v1.8 的参考图
+  规格画，只是每 5 格多一颗大星。
+- **回归**：jsdom `test-canvas-grid` 加了 22 项（三层结构 / 三套 SVG 平铺块各自 = 自己的间距 /
+  zoom 1·0.2·0.05 三档的层 opacity 与屏幕间距）；`browser-check` 的 `grid-pan` / `grid-pan-hidpi`
+  两场加了 4 条真机断言（真浏览器里量每层 inline opacity：zoom 1 小+大、0.2 大+更大、0.05 只剩最大）。
+- **排查读数**：`canvasGridReport()` 多了 `tierCount` / `tiers`（id / spacing / screenSpacing / opacity /
+  visible）/ `tierFade`；真机再报「缩小时密密麻麻」时先看 `tiers`。
+
+### v1.49：切刀 —— 按住 Ctrl + 右键，划过的连线断开
+
+用户原话（2026-10-19）：「现在做一个新功能，像blender一样按住ctrl加鼠标右键切换到切刀工具，
+划过的线会断开连接」。
+
+- **手势**：在画布上按住 Ctrl（mac 上 Meta 也行）+ 鼠标右键按下 → 进入切刀；拖拽画一条自由曲线，
+  被这条曲线**划过**的连线当场变红（预览），松手就断开；拖到一半按 **Esc** 取消（一刀不落）。
+  只点一下右键（没有位移，<10px）不算一刀 —— 避免和「右键菜单」的肌肉记忆打架。
+  按住 Ctrl 时画布空白区的光标变成十字（`body.fisherai-knife-ready`），一眼看得出工具切过去了。
+- **为什么能切准**（这是这一版最花心思的地方）：连线几何归 vendor 那套 `edgePath` / 端口函数管
+  （端口行高、节点测高、ComfyUI 模板槽位、折叠、缩放都会让端点动）。自己按节点重算迟早和画面不一致，
+  所以切刀**读渲染出来的 `<path d>`**：解析 `M … C …` 并把三次贝塞尔采样成折线 → 按
+  `#canvas-viewport-content` 的 translate+scale 和 `#canvas-background` 的 rect 换算到屏幕坐标
+  （Chrome 有 `getScreenCTM()` 时直接用，jsdom 里退回 inline transform）→ 与刀口折线做线段相交
+  （容差 6px，包围盒先排除远处的线）。**用户看到的那条线就是判定用的那条线。**
+- **断开只能落在 vendor 那半**：只有 `canvasApplication` 握着 `setNodes` 与连接适配器。
+  所以 vendor 补丁 3.8t 做两件小事：① 给连线 `<g>` 补上
+  `data-fisherai-edge-parent-id / -child-id / -port-index`（断线要的是**真身份**，
+  而不是拆 `data-edge-key` 那个用 `-` 拼起来的字符串 —— 节点 id 里也可能有 `-`，拆错就断错线）；
+  ② 挂 `window.__FISHERAI_CANVAS_KNIFE__.cut(edges)`，内部就是双击断线用的同一个
+  `adapter.disconnect`。撤销 / 脏标记 / 自动保存都走既有的 nodes 变更 effect，没有第二条写路径。
+- **只断被划到的**：C 同时接 A、B 时划掉 A→C，B→C 必须还在（jsdom 与真机都钉了这条）。
+- **右键菜单**：起刀、拖拽、收刀后 600ms 内主动压住 `contextmenu`（Windows 上它可能排在
+  pointerup 之后）；平时在画布上右键的菜单与双击断线**一字没改**。
+- **回归**：jsdom 新增 `test-canvas-knife` 40 项（`d` 解析 / 贝塞尔中点 / 屏幕换算 / 点到线段距离 /
+  线段相交与容差 / 去重 / 真挂画布后真派发 Ctrl+右键拖拽：浮层与红线预览、只切 A→C、B→C 保留、
+  Esc 不落刀、不按 Ctrl 不触发、右键菜单不被吞、存盘后 `parentIds` 只剩 B）；
+  `browser-check` 新增 `knife` 场景 7 条（真 Chrome 里用 `getTotalLength / getPointAtLength /
+  getScreenCTM` 取点，验预览、只断一条、读数与「交付图停在切到一半」）。
+- **排查读数**：`canvasApp.knifeReport()` —— `installed / canvas / edges / bridge / sessions / cuts /
+  targets / lastError / lastGesture`。真机「Ctrl+右键没反应」时先看 `bridge`（vendor 补丁生效没）
+  与 `edges`（认得出几条线），再看 `lastError`。
+
+### v1.50：文本节点的正文不再落进「提示词」框
+
+用户原话（2026-10-19）：「发现一个问题，它生成的内容不在文本里，反而在提示词里」。
+
+- **现象**：让 agent 在画布上写一段剧本，节点上出现的是「提示词」框里一大段字，正文区空白；
+  把节点接给图像节点当提示词时，下游也读不到这段字。
+- **根因**：Text 节点有两个文本字段 —— `textContent`（正文，节点大画布区）与 `prompt`
+  （转换模板，生成面板里的提示词框）；发起请求时按「上游文本 + 正文 + 模板」拼接
+  （`generationScheduler.buildPrompt`），下游取上游正文时只认 `textContent`。
+  agent 通道的 `create` 只认一个 `prompt` 字段，executor 又无条件写 `node.prompt`，
+  于是所有 agent 建的文本节点都把正文写进了模板位，正文一片空白。
+- **修法**（vendor 补丁 3.8u，`canvasControlExecutor.ts`）：
+  ① `create`：只给 `prompt` → 当正文写 `textContent`（`prompt` 留空）；显式给 `text` +
+  `prompt` → 正文与模板各归各位；② `update`：只给 `prompt` → 改正文，显式 `text` → 改正文、
+  模板不动。`validCanvasControl` 的 create / update `patch` 白名单放行 `text`
+  （`.js` 校验与 `.d.ts` 类型同步），否则指令会被判 `INVALID`；工具描述与
+  `docs/canvas-agent-contract.md` 同步写清两个字段的分工。
+- **旧数据**：本次受影响的那个测试节点已把 `prompt` 里的 516 字挪回 `textContent`
+  （画布关闭时直接改落盘的 `canvas.json`，DSH 重启后从盘上读）。**没有做全局自动迁移**：
+  「模板」是合法用法，自动搬会破坏「模板持久、正文被生成结果覆盖」的语义。
+- **回归**：`test-canvas-agent` 新增 7 项（只给 prompt 建文本 → 正文落 `textContent`、
+  提示词为空 / `update` 只给 prompt 也改正文 / `text` + `prompt` 分别落正文与模板）。
+
+### v1.51：对话里 @ 画布节点
+
+用户原话（2026-10-19）：「能不能加一个我能在对话去@画布内的素材，文本、图像等」。
+
+- **为什么是「注册一个 @ source」而不是自己画菜单**：DSH 的 composer 本身就有触发流水线
+  （`@deepseek-ai/dsh-client-ui-input-trigger`）：键入 @ 打开分组候选、pick 后插入原子行内
+  引用、发送时调 `inputTriggers.serializeReference(source, ref)` 换成模型可见文本。文件 /
+  会话引用就是这么接的；我们按同一份契约注册第三个 source（trigger `@`、name `aifisher-node`），
+  不碰内核组件。
+- **候选从哪来**：画布当前项目 id 从画布自己的 resume 状态读
+  （`window.__FISHERAI_CANVAS_SESSION__.load().workflowId`），再用 `#canvas-background`
+  确认「画布视图真开着」（项目库视图里 resume 状态还是上一个项目，照它列会列错）；
+  节点列表走本地后端 `GET /api/aifisher/canvas/workflows/:id`。文本节点排前面，其余按 y/x；
+  按标题 / 类型 / 正文模糊过滤，最多 50 行。
+- **插进去的是什么**：原子引用 `@[标题](aifisher-node:<节点 id>)`。`appearance` 刻意不给 ——
+  DSH 只认 session / file / folder 三种图标，画布节点不属于任何一种，硬塞会给错图标；
+  不给就是中性的「@ 标题」chip。已发送消息里由注册到 `conversation.user.text.node`
+  （key `aifisher-node`）的组件渲染成同款 chip，点一下调 `__FISHERAI_FOCUS_NODES__`
+  把节点聚焦回画布。
+- **模型看到什么**：宿主半在 `agent/pre-step` 里扫描本次提交的用户消息，解析 mention →
+  用 `store.findNode(id)` 反查节点（节点 id 是全库唯一 UUID，不需要带项目 id）→ 在
+  **用户消息后面**插一条只读快照（`## Referenced canvas nodes` + `<canvas-nodes>` JSON）。
+  文本节点带 `text`（≤4000 字）与 `template`，媒体节点带 `resultUrl`；最多 8 个；
+  正文里的 `<` 转义成 `\u003c`，拼不出定界标签。
+- **两级 fail-open**：client 拿不到 `inputTriggers` / `uiConversation`、画布没开、接口失败
+  → 只少一组候选；host 解析失败 / 节点被删 → 原样放行，绝不改坏用户消息。
+- **两个坑（记下来）**：① `@[标题](aifisher-node:…)` 里也含 `@…`，file 规则（order 30）
+  会把它当 `@path` 抢先匹配，所以 userText 规则的 order 必须更小（这里 5）；② jsdom harness
+  原来把 pre-step 的多个监听器**并行**调用、取第一个结果，不是瀑布 —— v1.51 起改成真正的
+  `next()` 串联（第二个入参是函数才走瀑布；`session/event` 那种「第二入参是数据」的事件保持原样）。
+- **回归**：新增 `test-canvas-references` 15 项（mention → 快照、紧随用户消息、正文 / 结果地址、
+  去重、四种不触发、`</canvas-nodes>` 转义）。
+
 ## 验证
 
-两套：jsdom 回归（29 套，`pnpm test`）+ 真浏览器检查（24 场景，`scripts/browser-check.mjs`，不在 `pnpm test` 里）。
+三套：类型门禁（`pnpm typecheck`，`src/` 零错误）+ jsdom 回归（37 套，`pnpm test`）+ 真浏览器检查（26 场景，`scripts/browser-check.mjs`，不在 `pnpm test` 里）。
 
-**1）jsdom 回归：29 套 1989 项全绿（2026-10-18 v1.44 后全量复跑，工作区与已装插件各一遍）**
+**0）类型门禁：`pnpm typecheck` 的 `src` 零错误**（2026-10-20 v1.57；`scripts/typecheck.mjs` 用 TS 编译器 API 只统计 `src/`，`vendor/` 上游自带的类型错误不进门禁）
+
+**1）jsdom 回归：37 套 2210 项全绿（2026-10-20 v1.57；下面分项是 v1.44–v1.57 的累加记录，最新总数以 `run-all-regressions` 的 TOTAL 行为准）**
 
 smoke 59 / **backend 81**（v1.44 加 15 项：画布侧技能目录 —— 用户层扫到 / bundled 层保留 / 同名以用户为准 /
 `user-invocable:false`·旧式 invocation 键·`SKILL.disabled.md` 三种过滤 / 正文 UTF-8 原样 / bundled 仍能取正文 /
 非法名与不列的都 404 / `?cwd=` 项目层与同名覆盖 / 相对路径忽略） / **render 31**（v1.34 加 7 项：直连正文仍进请求/隔一层不再继承/第三跳也不继承/
 直连两个文本节点按 y-x 序拼接/文本节点「自己正文 + 直连文本父节点」/「接进来的正文 + 自己的提示词」拼接顺序） /
 panel-exit 26 / **chat-dock 40**（v1.41 加 1 项：新对话输入区贴底那条规则的**精确选择器**
-`[data-conversation-scroll] > [data-composer-seat]` + `margin-top:auto`） / agent 20 / agent-chat 66 / generation 65 /
+`[data-conversation-scroll] > [data-composer-seat]` + `margin-top:auto`） / agent 27 / agent-chat 66 / references 16 / generation 65 /
 media 88 / library 85 / custom-workflows 121 / workflow-config 100 / local-workflows 64 / cloud 38 / ark 84 /
 **cloud-channels 130**（v1.29 加 10 项：方言判定/`image_url`/按次提交；v1.30 再加 21 项：`workfisher` 方言判
 定/单数路径/`size`+`resolution`+`nsfw_check`/任务轮询/`FAILURE`→`fail_reason`/参考图先上传换直链/按次提交/
@@ -895,7 +1094,9 @@ media 88 / library 85 / custom-workflows 121 / workflow-config 100 / local-workf
 v1.35 再加 6 项：真 RST 造 `ECONNRESET` → 自动重试后生成 200 / 一直断 → 502 `CHANNEL_UPLOAD_UNREACHABLE`
 且回执含次数与大小 / 一直断时不发 `/image/generations` / hint 含免费可重试 / 直链缓存命中只有 1 次上传） /
 **cloud-canvas 26**（v1.32 加 7 项端到端：真画布里点「拿刚生成的图当参考图」的第二个节点 → 假方舟收到的
-`image` 是 data URL、字节等于上一张结果图、那次也跑成功） / ui 75 / grid 67 / node-search 52 /
+`image` 是 data URL、字节等于上一张结果图、那次也跑成功） / ui 75 /
+**grid 87**（v1.48 加 22 项：三层嵌套结构（24/120/600）、12 张 SVG 平铺块各自 = 自己的间距、
+zoom 1 / 0.2 / 0.05 三档的层 opacity 与屏幕间距） / node-search 52 /
 **task-queue 107**（v1.36 加 3 项：面板 `top:8` / 窄轨也 `top:8` / 头部让位变量 306→44；
 v1.41 再加 7 项：`[inert] → display:none` 守卫规则 / 平时不带 inert / 真开一次设置后面板**真的**拿到 inert、
 关掉**真的**被摘掉、位置与内容没被卸载） /
@@ -915,7 +1116,11 @@ v1.39 把扩图面板契约改成九宫格位置 + 延展内容 + 预览 + 新�
 导出目录三条边界（相对路径 / 指进素材目录 / 一次性自定义目录不落成默认）/ 下载形态的 `Content-Disposition` /
 原始字节·本机路径·旧版 `.json` 三种导入 / 五种错误码 / 素材 URL 与文件都换到新项目；
 jsdom 段 —— 头部入口与命中、面板契约、真点导出落盘、真上传导入（file input）、从路径导入、
-项目看板头部「导入项目」走 window 桥、产物与文档守卫）。
+项目看板头部「导入项目」走 window 桥、产物与文档守卫） /
+**knife 40**（v1.49 新增：`d` 解析（三次贝塞尔采样，中点 (50, 37.5)）/ 世界→屏幕换算 / 点到线段距离 /
+线段相交与 6px 容差 / 按 key 去重 / 真挂画布后真派发 Ctrl+右键拖拽：刀口浮层、红色预览、
+松手只断开 A→C（B→C 保留）、Esc 取消不落刀、不按 Ctrl 不触发、右键菜单事件不被吞、
+存盘后 `parentIds` 只剩 B）。
 
 ```powershell
 # node 用 DSH 自带的运行时（PATH 里通常没有 node）
@@ -923,12 +1128,16 @@ $node = "$env:DSH_HOME\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\no
 & $node scripts/clean.mjs; & $node scripts/vendor-aifisher.mjs; & $node scripts/build-canvas-css.mjs
 & $node node_modules/tsdown/dist/run.js          # 构建顺序固定：clean → vendor → build:css → tsdown
 
+& $node scripts/typecheck.mjs                    # 类型门禁（只对 src/ 报错，vendor 不进门禁）
 & $node scripts/test-canvas-grid.mjs             # 单套；**判绿只认 SUMMARY 行**（pwsh 退出码不可信）
 & $node scripts/verify-live-canvas-bundle.mjs    # 真机：服务端下发的 canvas-app.js == 刚构建的那份？（需 DSH 在跑）
 & $node scripts/verify-live-channel-upload.mjs   # 真机且不花额度：参考素材 → /files/upload 换公网直链（假模型 ID 提交）
 ```
 
-**2）真浏览器检查：24 场景 300 项 fail=0**（其中 `grid-pan-hidpi` 用 `--force-device-scale-factor=1.25` 启动，守「网格不比节点快」；
+**2）真浏览器检查：26 场景 fail=0**（2026-10-19 v1.49 后全量复跑；其中 `grid-pan-hidpi` 用 `--force-device-scale-factor=1.25` 启动，守「网格不比节点快」；
+v1.49 新增 `knife` 场景（Ctrl+右键真拖一刀：预览、只断被划过的那条、第二刀停在拖拽中当交付图）；
+v1.48 给 `grid-pan` / `grid-pan-hidpi` 两场加了**三层显隐**真机断言（真浏览器里量每层 wrapper 的 inline opacity：zoom 1 = 小+大、0.2 = 大+更大、0.05 = 只剩最大一层），
+并把 `canvas` 场景的截图像素上限按「大星交点叠墨」重新校准（p99 仍 ≤90，最亮交点 ≤170）；
 v1.39 把 `outpaint` / `outpaint-panel` 两场按新流程重做：真画一次 427×240 的扩图画面、量落盘 PNG 的透明留白、量按钮中心没被 composer 盖住；
 v1.40 新增 `last-model` 场景：真建三个图片节点验「没记过 → 通道别名 / 记一次 → 那一款 / reset 后回到第一个」；
 v1.41 新增 `queue-layers` 场景：开设置时任务队列必须 `display:none` + 带 `inert` + 原位置 `elementFromPoint` 不再命中它；
@@ -944,14 +1153,15 @@ v1.43 新增 `data-dir` 场景：设置 → 存储 → 「项目数据目录」�
 | `settings` | 四个分区都能打开不报错；通道面板行内布局；**v1.27 画布互动开关点一下关掉 → 网格层同步 off**；**v1.29 请求方言下拉 + 「自动」按地址判成魔搭**；**v1.30 方言四项 + 两个一键预设** |
 | `effects` | 只开设置→画布外观，停在「画布互动」面板截图（交付图） |
 | `channels` | 只开设置→闭源服务，停在「OpenAI 通道」面板截图（交付图；量四项方言、两个预设、说明里的 `/image/generations`） |
-| `node-search` | Shift+A 面板贴光标、过滤、Enter 建节点（含工作流候选） |
+| `node-search` | Shift+A 面板贴光标、过滤、建节点（含工作流候选）；**v1.45 真建出节点后左键放下，并量到节点不再跟手** |
 | `workflow-config` | 面板尺寸、目录输入框、扫描、保存、添加到画布、节点图缩放/检查器 |
 | `chat` | 启动球 → 面板 → 发消息 → DSH 会话 → SSE 回填 |
 | `task-queue` | 面板贴右缘、运行中行的发光动画（computedStyle）、用时在跳；**v1.36 面板顶边距画布顶 = 8px** |
 | `image-editor` | 真拖裁剪框 → 应用 → 保存为新图片 → 画布多一个落盘节点 |
 | `image-annotate` | 蒙版舞台真画一笔 → 应用编辑 → 保存 |
 | `image-saved` | 回看：源图 + 保存出来的新图都在，src 都是媒体地址 |
-| `grid-pan` | **v1.33 网格跟随速度**：dpr=1 下画布平移 160px → 网格背景也移 160px（ratio 1.0000）、格子 24×zoom |
+| `image-grid` | **v1.46 宫格裁剪 nova 版**：舞台铺满画布（1176×808）、图片真解码（775×581）、默认 2×2 = 4 格；真拖第一条竖向切线单格 160×120 → 171×120；3×3 → 9 格；导出序号 `1,3` → 保存 2 张；保存后画布多 2 个媒体节点；再打开舞台截图（交付图） |
+| `grid-pan` | **v1.33 网格跟随速度**：dpr=1 下画布平移 160px → 网格背景也移 160px（ratio 1.0000）、格子 24×zoom；**v1.48 三层嵌套显隐**：zoom 1 = minor+major、0.2 = major+super、0.05 = 只剩 super（真机量 inline opacity） |
 | `grid-pan-hidpi` | 同上，但用 `--force-device-scale-factor=1.25` 启动（本机 125% 缩放）：修复前量到 200px / 30px（= 1.25 倍），现在必须仍是 160px / 24px |
 | `stack` | **v1.37 叠图切换**：一叠 3 张（红/绿/蓝 PNG）。控制条在卡里且可见、`elementFromPoint` 命中「切换」按钮自己、真点一下换成第 2 张且计数 2/3、连点三下绕回第 1 张、画布节点数始终 1（截图停在「第二张 / 切换 2/3」） |
 | `outpaint` | **v1.38 扩图**：工具条 HD 没了 → 开面板 → 选四周 + 16:9 → 创建 → 画布多一个**空**节点（无结果图）、标题「扩图 · 四周 · 16:9」、composer 里提示词已填；**host 一整场收到 0 条 `/generate-*`** |
@@ -961,6 +1171,7 @@ v1.43 新增 `data-dir` 场景：设置 → 存储 → 「项目数据目录」�
 | `queue-layers` | **v1.41 任务队列只在画布这一层**：基线面板在场（286px、无 inert）→ 开设置 → 面板 `display:none` + `inert=true` + 原位置 `elementFromPoint` 不再命中队列 → 切「画布外观」仍不可见（截图 = 设置页打开、右上角没有任务队列） |
 | `archive` | **v1.42 项目归档**：头部「项目归档」按钮可访问且 `elementFromPoint` 命中它自己 → 面板 620×380 在视口内 → 读数「2 个节点 · 素材 2 个」→ 真点「导出到目录」→ 提示带落盘路径；node 侧再核对 `downloads/` 里真有 `.fisherai`、归档格式/项目 id 对、2 张素材都在（截图 = 面板 + 导出成功） |
 | `data-dir` | **v1.43 项目数据目录**：设置 → 存储 里的「项目数据目录（缓存）」面板 830×460 挂上了 → 当前/默认目录读数就是这台机器的真路径 → 状态写「正在使用默认目录」→ `overridden=false` / `restart=false` / 「恢复默认」不可点 → 输入框预填当前目录（截图 = 设置页停在这一栏） |
+| `knife` | **v1.49 切刀**：Ctrl+右键真拖一刀划过 A→C —— 起刀浮层 + 被划过的连线变红（只有 1 条）→ 松手后 DOM 里只剩 B→C（A→C 真的断开）→ `knifeReport()` 记 1 次切中/1 次断开；第二刀停在拖拽中当交付图（截图 = 刀口白虚线 + 红色高亮） |
 
 ```powershell
 $env:BROWSER_ONLY = "canvas,settings,effects"    # 只跑指定场景
@@ -988,6 +1199,7 @@ $env:BROWSER_CHECK_PORT = "4311"                 # 连跑要换端口（TIME_WAI
 | ![任务队列只在画布层](docs/shots/canvas-task-queue-layer.png) | **v1.41**：设置打开时的画面 —— 右上角本来浮着的任务队列**整块不出现**（同一位置对比 `canvas-task-queue.png`） |
 | ![项目归档](docs/shots/canvas-project-archive.png) | **v1.42**：画布头部「项目归档」面板 —— 上面是导出（`2 个节点 · 素材 2 个 · 归档约 3.1 KB`、导出目录、导出到目录/下载/打开目录），下面是导入（选文件 / 填绝对路径），底部那条就是「已导出 … .fisherai 到 …\downloads」的回执 |
 | ![项目数据目录](docs/shots/canvas-data-dir.png) | **v1.43**：设置 → 存储 里的「项目数据目录（缓存）」—— 当前目录 / 默认目录读数、绝对路径输入框、「应用 / 恢复默认 / 刷新」、以及「把现有数据复制到新目录（只复制，不删旧目录）」 |
+| ![切刀](docs/shots/canvas-knife.png) | **v1.49**：按住 Ctrl + 右键拖拽的切刀 —— 白色虚线是刀口、红色高亮是**会被切开**的那条连线（B→C）；松手就断开、Esc 取消（图里 A→C 已经切掉，只剩 B→C） |
 | ![工作流配置](docs/shots/canvas-comfy-workflow-config.png) | ComfyUI 工作流配置（节点图 + 检查器） |
 | ![工作流节点](docs/shots/workflow-nodes.png) | 工作流节点面板：配置好的工作流按图卡片陈列（v1.28，可自定义配图） |
 | ![图片编辑](docs/shots/canvas-image-editor.png) | nova 版图片编辑工作台 |
@@ -1001,7 +1213,7 @@ scripts/
   vendor-aifisher.mjs     上游源码 vendor + 所有正则补丁（每条断言命中次数）
   build-canvas-css.mjs    Tailwind（theme+utilities，不含 preflight）→ vendor/aifisher/tailwind.generated.ts
   patches/aifisher/**     7 个整文件覆盖补丁（清单 / 节点 UI / 运行路径 / 接入口判定 / 图片工具条 / 角度草稿 / 图像工具主按钮）
-  browser-check.mjs       真 Chrome 24 场景（含 PNG 解码器做像素断言；`grid-pan-hidpi` 跑在 dpr=1.25）
+  browser-check.mjs       真 Chrome 26 场景（含 PNG 解码器做像素断言；`grid-pan-hidpi` 跑在 dpr=1.25）
   verify-live-modelscope.mjs 真机：走魔搭真出图，配对（红/绿参考图）证明参考图被用上（含 openai 方言对照）
   verify-live-workfisher.mjs 真机：走 FisherAI 真出图（异步任务 + 参考图先上传换直链），纯红参考图验颜色
   verify-live-canvas-bundle.mjs 真机：问正在跑的 DSH 要 canvas-app.js，跟磁盘构建产物比 sha256（证明「刷新即生效」）
@@ -1010,12 +1222,12 @@ scripts/
                           点选把 `/技能名` 插进输入框；手打 `/` 也弹同一批候选）+ 技能目录两路取证
                           （运行中的 host / 磁盘构建 + 真技能目录）
   lib/                    canvas-harness（jsdom 真挂载）、png.mjs（灰度测点阵 + RGB 测颜色）
-  test-*.mjs              29 套回归 + smoke-contract + verify-canvas-ui（v1.37 加 test-canvas-stack，v1.38 加 test-canvas-outpaint，
-                          v1.40 加 test-canvas-last-model）
+  test-*.mjs              30 套回归 + smoke-contract + verify-canvas-ui（v1.37 加 test-canvas-stack，v1.38 加 test-canvas-outpaint，
+                          v1.40 加 test-canvas-last-model，v1.49 加 test-canvas-knife）
   src/
   host/                   index.ts（装配）、comfyui/**、generation/**、canvas/**、media/**、http/**
   client/                 apply / CanvasPanel / CanvasShell / CanvasChatDock / PanelExitButton
-  client/canvas/          mount / stage / bootstrap / styles / canvasGrid / diagnostics
+  client/canvas/          mount / stage / bootstrap / styles / canvasGrid / knife / diagnostics
   canvas-ui/              shadcn 化层：ui 组件 + canvas 里的各个面板与 store
 vendor/aifisher/          上游树（构建时生成，不要手改）
 docs/                     详细文档 + 交付截图
@@ -1027,7 +1239,7 @@ docs/                     详细文档 + 交付截图
 - `/workflow-library`（上游 workflowManager 那套执行工作流）仍 501；导演台/分镜/技能社区/反馈中心/内置浏览器未移植。
 - 方舟账号 2133080946 **尚未在控制台开通任何图片模型**（404 时先去
   `console.volcengine.com/ark/region:ark+cn-beijing/openManagement` 开通，与 API Key 无关）。
-- 组合（多图层）、宫格/全景的外观仍是 vendor 原样（尺寸对话框已在 v1.38 换成 nova 版）。
+- 组合（多图层）、全景 / 角度的外观仍是 vendor 原样（尺寸对话框已在 v1.38、宫格裁剪已在 v1.46 换成 nova 版）。
 - 魔搭（ModelScope）这条通道只接了**同步语义**的那部分：`loras` 没接（画布上没有对应控件）；
   `size` 由画布的档位/宽高比换算（1K+16:9 → `1024x576`，实测接受）；不认 OpenAI 的 `n`，
   所以「生成数量 > 1」由 host 按次数提交（会真的消耗多次额度）。

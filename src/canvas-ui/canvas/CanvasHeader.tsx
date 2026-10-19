@@ -26,6 +26,7 @@
  *    从 `react` 的 import 只留类型（React.RefObject / React.MouseEvent 这类）。
  */
 import * as ReactTypes from 'react';
+import { createElement } from '@/lib/react';
 import { ArchiveIcon, ArrowLeftIcon, FolderOpenIcon, LogOutIcon, SaveIcon } from 'lucide-react';
 
 import { Badge } from '@/ui/badge';
@@ -100,7 +101,7 @@ const HEADER_CLASS =
 const HEADER_RIGHT_INSET = 'calc(12px + var(--fisherai-task-queue-inset, 0px))';
 
 export function CanvasHeader(react: Runtime, props: Props, icons: HeaderIcons) {
-  const h = react.createElement;
+  const h = createElement(react);
   const {
     canvasTitle,
     isEditingTitle,
