@@ -438,6 +438,9 @@ export function apply(ctx: Context) {
         'switching model resets any advanced parameter you omit (e.g. generateCount falls back to 1), so always pass model+parameters in the same call. ' +
         'Generation is human-authorized by design: prepareGeneration only yields an awaiting-approval plan and the approve step is intentionally UI-only. ' +
         'Your job is to prepare nodes/params/prompt and hand it over — never try to submit or bypass it. ' +
+        'Persistence (v1.58): every mutating edit is followed by a forced save, and the result carries "saved": "saved" | "failed" | "unknown". ' +
+        'saved:"failed" means the canvas applied your change but could NOT write it to disk — tell the user to press Save and verify; never resubmit the same edit (it would duplicate nodes). ' +
+        'saved:"unknown" means the canvas was busy or switched away, so persistence could not be confirmed. ' +
         'Full contract and error codes: docs/canvas-agent-contract.md.',
       parameters: {
         action: {
@@ -513,6 +516,42 @@ export function apply(ctx: Context) {
         const sessionCwd = (exec as { agent?: { session?: { cwd?: unknown } } } | undefined)?.agent
           ?.session?.cwd;
         const skillsCwd = typeof sessionCwd === 'string' ? sessionCwd : undefined;
+
+        /**
+         * 让画布**立刻**把当前内容落盘，并把结果如实带回去（2026-10-20，修「保存不上」）。
+         *
+         * 为什么要多这一步：画布上游是「编辑 → 1.2s 防抖 → 自动保存」，而 canvas_control
+         * 的 edit 在「画布内部已执行、回执已拿到」时就返回成功了 —— 落盘还在后面排队。
+         * 于是出现用户报障的那种体验：助手改完画布看着都对，一旦自动保存失败（冲突/网络/
+         * 超时）就整个丢失，而工具这边一路 ok:true，谁也不知道没存上。
+         *
+         * 现在每次改完文档的动作（edit / undo / recipe / 插图类）都由 host 追加一条
+         * `project.save`：画布侧走它自己的保存链路（含冲突合并重试），host 等回执。
+         * 返回值三态：
+         *   saved   —— 画布确认已落盘；
+         *   failed  —— 画布明确说这次没存成（UNCONFIRMED），工具会把它报到顶层；
+         *   unknown —— 画布当时忙/被切走/超时，无法确认（不是失败，不回退成错误）。
+         */
+        const flushCanvasSave = async (
+          targetSessionId: string | undefined,
+          revision: unknown,
+        ): Promise<'saved' | 'failed' | 'unknown'> => {
+          if (typeof revision !== 'string' || !revision) return 'unknown';
+          try {
+            const receipt = (await bridge.request(
+              { action: 'project', operation: 'save', revision },
+              { sessionId: targetSessionId, timeoutMs: 20_000 },
+            )) as { ok?: unknown; code?: unknown } | null;
+            if (!receipt || typeof receipt !== 'object') return 'unknown';
+            if (receipt.ok !== false) return 'saved';
+            // 只有「画布明确说没存成」才算失败；CONFLICT/UNAVAILABLE 属于当时状态不对。
+            return receipt.code === 'UNCONFIRMED' ? 'failed' : 'unknown';
+          } catch {
+            return 'unknown';
+          }
+        };
+        /** 改完画布内容后要追加落盘的动作（这些动作会改 nodes/groups）。 */
+        const SAVE_AFTER_ACTIONS = new Set(['edit', 'undo', 'recipe', 'media', 'workflow', 'importAsset']);
 
         // skills: 列出 DSH 当前已装技能（与画布 UI 调 /api/aifisher/skills 同源）
         if (args.action === 'skills') {
@@ -615,6 +654,8 @@ export function apply(ctx: Context) {
                 anchorFound: planned.anchorFound,
               },
             };
+            // 与 edit 分支同一条纪律：展开完立刻落盘，别等画布那 1.2s 防抖。
+            const savePromise = flushCanvasSave(sessionId, editResult?.revision);
             try {
               const snapshot = (await bridge.request({ action: 'read' }, { sessionId })) as unknown;
               if (snapshot && typeof snapshot === 'object') {
@@ -623,6 +664,8 @@ export function apply(ctx: Context) {
             } catch {
               /* 快照失败不影响 recipe 结果 */
             }
+            const saved = await savePromise;
+            if (saved) response.saved = saved;
             if (sessionId) {
               chatHub.noteCanvasAction(sessionId, {
                 action: 'recipe',
@@ -785,6 +828,19 @@ export function apply(ctx: Context) {
             | null;
 
           /**
+           * 落盘（v1.58）：改动文档的动作执行成功之后，立刻让画布保存一次。
+           * 与下面的快照读取**并行**发下去 —— 快照是纯读、保存只认 revision 令牌，
+           * 两者互不影响，所以不会多花一次往返的时间。
+           */
+          const savePromise =
+            result &&
+            typeof result === 'object' &&
+            result.ok !== false &&
+            SAVE_AFTER_ACTIONS.has(String(args.action))
+              ? flushCanvasSave(sessionId, (result as { revision?: unknown }).revision)
+              : null;
+
+          /**
            * v1.52：edit 成功回带精简快照 —— 模型不用再 read 验证（再省一次往返）。
            *
            * 快照只是「省一次工具调用」的便利：读失败（画布恰好在忙/超时）不能让已经
@@ -834,9 +890,21 @@ export function apply(ctx: Context) {
           // view:"digest" 走项目摘要（不含正文，带统计与 hints）。
           const detail = (args as { detail?: unknown }).detail;
           const view = (args as { view?: unknown }).view;
+          const saved = savePromise ? await savePromise : null;
           return {
             ok: true,
             action: args.action,
+            // 落盘结果：saved / failed / unknown（见 flushCanvasSave 的注释）。
+            // 画布已经改好了才走到这里，所以 ok 仍是 true；`saved:false` 是在告诉模型
+            // 「看着改成功了，但盘上没有」——这句话以前没人说得出来。
+            ...(saved ? { saved } : {}),
+            ...(saved === 'failed'
+              ? {
+                  message:
+                    '画布已经按这次操作改好了，但**保存到磁盘失败**（画布报告 UNCONFIRMED）。' +
+                    '请提醒用户在画布里点一次「保存」并核对；不要重复提交同样的编辑。',
+                }
+              : {}),
             result: summarizeCanvasRead(result, {
               full: detail === 'full',
               digest: view === 'digest',

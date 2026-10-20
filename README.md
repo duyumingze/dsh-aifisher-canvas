@@ -2,7 +2,7 @@
 
 > 把专业级 AI 创作无限画布带进 DeepSeek Harness：**不是插件内置一个聊天框，而是让 DSH 原生 AI Agent 直接接管整个画布**——本地 ComfyUI、多云端生成、节点编排、素材整理，全靠你在右侧说一句话完成。
 
-**Version**: v1.57 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
+**Version**: v1.58 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
 
 ---
 
@@ -167,6 +167,7 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
 - 双 bundle 架构：host 半进程内加载，client 半浏览器独立运行，跨 bundle 通过全局桥通信
 - 与 DSH 宿主的边界：画布会把「从系统拖进来的文件」事件止步在自己的容器上（`src/client/canvas/mount.tsx` 的 `containFileDrags`）。原因是宿主把「拖入即可添加附件」的全屏提示层挂在 `document` 的 dragenter/dragleave 计数上，而画布的 `onDrop` 会 `stopPropagation` —— 放进去的话宿主永远收不到那次 drop，计数停在 1，整屏遮罩再也退不掉（真机踩过）。同理，任何一次鼠标点击都会补一次 dragleave，把已经卡住的遮罩解开。
 - 测试覆盖：类型门禁（`pnpm typecheck`，`src/` 零错误）+ jsdom 契约测试 + 真机浏览器视觉校验，累计 2200+ 回归用例守住画布几何、交互、响应逻辑
+- 保存链路（v1.58，见 `scripts/patches/aifisher/src/stable/persistence/canvasWorkflow.ts`）：上游的乐观并发是「撞 409 → 重读服务端 → 三向合并 → 重发」，但三向合并遇到**同一字段两边都改**会抛冲突，并把这份文档的保存**永久封锁**（只有重新打开项目才解），画布照常能编辑、实际一个字都存不进去。本插件改成「救援合并」：节点/分组按 id 取并集、同 id 以当前窗口为准、**一定落盘**，并提示用户核对；保存/读取请求另加 20s 超时，避免一次挂住的请求把保存队列永久占死。agent 的每次改动还会由 host 立刻追加一次保存，回执里用 `saved` 说明有没有真的写进 `canvas.json`。
 - Agent 契约：[docs/canvas-agent-contract.md](docs/canvas-agent-contract.md) —— `canvas_control` 每类 operation 的字段、`configure` 的四条硬约束（模型名逐字匹配 / 换模型会重置高级参数）、生成授权边界与错误码速查。**要让 AI 正确操作画布，先喂它这份文档。**
 
 ---

@@ -1,3 +1,28 @@
+/**
+ * ⚠️ 本文件是 **dsh-aifisher-canvas 的整文件覆盖补丁**，对应
+ * `vendor/aifisher/src/stable/persistence/canvasWorkflow.ts`（每次构建由
+ * scripts/vendor-aifisher.mjs 覆盖上去）。改这里，不要改 vendor 里的副本。
+ *
+ * 为什么必须覆盖（2026-10-20）：
+ *   用户报障「画布助手操作了之后很容易保存不上」。复现后确认是上游这套乐观并发的
+ *   一个**死局**，不是偶发网络问题：
+ *     1. 保存撞上 409 → 上游会重读服务端版本做三向合并再重试（这一步是对的）；
+ *     2. 但如果两边改了**同一个字段**，mergeWorkflow 抛 WorkflowConflictError，
+ *        上游就把 `blocked` 置 true —— 之后**每一次**保存都在第一行直接抛错，
+ *        POST 都不发，直到重新打开项目；
+ *     3. 于是画布还能继续编辑、节点照常出现，但一个字都存不进去；页面上只有右下角
+ *        一个「保存冲突」小提示，刷新一次才恢复（而且丢失期间的全部编辑）。
+ *   助手在画布上批量改标题/提示词/坐标，正好是最容易和用户本地编辑撞同一字段的操作。
+ *
+ * 本补丁改三处（都在「怎么保存」上，不动上游的排版/渲染）：
+ *   A. 保存/读取请求带 20s 超时。没有超时时，一次挂住的 POST 会让保存队列永远占着
+ *      （canvasAutoSave 的 inFlight 一直 true），之后自动保存全被判成 busy，
+ *      控制台一声不响，页面看着正常 —— 同一个「保存不上」的另一种形态。
+ *   B. 三向合并失败时改走 rescueMerge（两边都保留：按 id 并集，同 id 以本窗口为准），
+ *      让保存**一定落盘**，同时提示用户「已自动合并，请核对」。
+ *   C. 删掉「冲突后永久封锁保存」：冲突只提示一次，下一次保存照常重读服务端再合并。
+ *      宁可让某个字段以后到的为准，也不能让整份文档从此写不进去。
+ */
 import {useCanvasSaveFeedback} from './canvasSaveFeedback';
 import type * as React from 'react';
 import { freshProjectDocument, type ProjectDocument } from './canvasProjectDocument';
@@ -74,8 +99,22 @@ function validateDocument(value: unknown, id?: string): WorkflowRecord {
   }
   return doc;
 }
+
+/** 保存/读取的超时（补丁 A）：挂住的请求不能把保存队列永久占住。 */
+const REQUEST_TIMEOUT_MS = 20_000;
+function abortAfter(init?: RequestInit): RequestInit | undefined {
+  if (init?.signal) return init;
+  try {
+    if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function')
+      return { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) };
+  } catch {
+    /* 老内核没有 AbortSignal.timeout：退回不带超时，至少行为和上游一致 */
+  }
+  return init;
+}
+
 async function request(url: string, init?: RequestInit): Promise<WorkflowRecord> {
-  const response = await fetch(url, init);
+  const response = await fetch(url, abortAfter(init));
   const body = await response.json();
   if (!response.ok)
     throw Object.assign(
@@ -85,6 +124,44 @@ async function request(url: string, init?: RequestInit): Promise<WorkflowRecord>
       },
     );
   return body;
+}
+
+/**
+ * 冲突救援合并（补丁 B）。
+ *
+ * 三向合并只能处理「两边改的不是同一个字段」；同一字段两边都改了就只能二选一。
+ * 上游的选择是「哪个都不写、停手」，代价是**整份文档从此保存不上**。这里改成
+ * 「两边都保留、一定落盘」：
+ *   - 节点/分组按 id 取并集，同一个 id 以**本窗口**（用户眼前这份）为准；
+ *   - 服务端独有的条目接在后面（另一个窗口/上一页刚写进去的内容不丢）；
+ *   - revision 用服务端的，保证这次 POST 能过乐观并发校验。
+ * 被牺牲的只有「同一个 id 的同一个字段两边都改」的那一个字段，且会提示用户核对。
+ */
+function rescueMerge(remote: WorkflowRecord, local: WorkflowRecord): WorkflowRecord {
+  const union = (remoteItems: unknown, localItems: unknown): unknown[] => {
+    const localList = Array.isArray(localItems) ? localItems : [];
+    const remoteList = Array.isArray(remoteItems) ? remoteItems : [];
+    const seen = new Set<string>();
+    const merged: unknown[] = localList.slice();
+    for (const item of localList) {
+      const id = item && typeof item === 'object' ? (item as { id?: unknown }).id : undefined;
+      if (typeof id === 'string' && id) seen.add(id);
+    }
+    for (const item of remoteList) {
+      const id = item && typeof item === 'object' ? (item as { id?: unknown }).id : undefined;
+      if (typeof id === 'string' && id && seen.has(id)) continue;
+      merged.push(item);
+    }
+    return merged;
+  };
+  return {
+    ...remote,
+    ...local,
+    id: remote.id,
+    revision: remote.revision,
+    nodes: union(remote.nodes, local.nodes),
+    groups: union(remote.groups, local.groups),
+  };
 }
 
 /** Own workflow identity, network ordering, loaded baseline, and original panel behavior. */
@@ -100,7 +177,6 @@ export function useCanvasWorkflow(hooks: Hooks, props: CanvasWorkflowProps) {
   const loading = hooks.useRef(false);
   const queue = hooks.useRef<Promise<unknown>>(Promise.resolve());
   const notice = hooks.useRef<HTMLElement | null>(null);
-  const blocked = hooks.useRef(false);
   // React publishes state asynchronously. Retain the accepted merge until its
   // input catches up, including between queued saves.
   const pendingView = hooks.useRef<{
@@ -220,13 +296,38 @@ export function useCanvasWorkflow(hooks: Hooks, props: CanvasWorkflowProps) {
     document.body.append(element);
     notice.current = element;
   }, [displayedView]);
+  /**
+   * 「已自动合并」提示（补丁 B）：不是失败，只是告诉用户某处被合并过、值得核对。
+   * 8 秒后自己消失，不挡操作。
+   */
+  const showMergedNotice = hooks.useCallback((message: string) => {
+    if (notice.current) return;
+    const element = createToast({ message, tone: 'neutral' });
+    Object.assign(element.style, {
+      position: 'fixed',
+      right: '24px',
+      bottom: '24px',
+      maxWidth: '420px',
+      zIndex: '10000',
+    });
+    document.body.append(element);
+    notice.current = element;
+    window.setTimeout(() => {
+      if (notice.current === element) {
+        element.remove();
+        notice.current = null;
+      }
+    }, 8000);
+  }, []);
 
   const handleSaveWorkflow = hooks.useCallback(
     (coverUrl?: string, folderId?: string | null, options: SaveOptions = {}) => {
       const owner = epoch.current;
       const run = async () => {
         if (owner !== epoch.current || loading.current) throw stale();
-        if (blocked.current) throw new WorkflowConflictError('document');
+        // 补丁 C：这里原来有一道 `if (blocked.current) throw WorkflowConflictError('document')`
+        // —— 一次字段级冲突就会让它之后每次都直接抛错，整份文档再也存不进去。
+        // 现在不再拦截：每次保存都照常走「POST → 409 → 重读服务端 → 合并 → 重发」。
         try {
           targetId.current ??= crypto.randomUUID();
           const original = copy(
@@ -257,6 +358,7 @@ export function useCanvasWorkflow(hooks: Hooks, props: CanvasWorkflowProps) {
               body: JSON.stringify(document),
             });
           let result: WorkflowRecord;
+          let rescued = false;
           try {
             result = await post(draft);
           } catch (error) {
@@ -267,7 +369,14 @@ export function useCanvasWorkflow(hooks: Hooks, props: CanvasWorkflowProps) {
               String(draft.id),
             );
             if (owner !== epoch.current) throw stale();
-            draft = mergeWorkflow(original, draft, remote) as typeof draft;
+            try {
+              draft = mergeWorkflow(original, draft, remote) as typeof draft;
+            } catch (mergeError) {
+              // 同一个字段两边都改了：三向合并救不了 → 两边都保留，保证写得进去。
+              if (!(mergeError instanceof WorkflowConflictError)) throw mergeError;
+              draft = rescueMerge(remote, draft) as typeof draft;
+              rescued = true;
+            }
             result = await post(draft);
           }
           if (owner !== epoch.current) throw stale();
@@ -302,19 +411,21 @@ export function useCanvasWorkflow(hooks: Hooks, props: CanvasWorkflowProps) {
               };
               apply(rebased);
             } catch {
-              blocked.current = true;
+              // 这里的合并失败只影响「界面上要不要回填」，保存本身已经成功了。
               showConflict();
               return { id: result.id, revision: result.revision, unchanged: false };
             }
           }
-          dismiss();
+          if (rescued) {
+            dismiss();
+            showMergedNotice('保存冲突已自动合并：两边的内容都保留了，请核对最近这一处改动。');
+          } else dismiss();
           return { id: result.id, revision: result.revision, unchanged };
         } catch (error) {
           if (
             owner === epoch.current &&
             (error as { code?: string }).code === 'REVISION_CONFLICT'
           ) {
-            blocked.current = true;
             showConflict();
           }
           throw error;
@@ -324,7 +435,7 @@ export function useCanvasWorkflow(hooks: Hooks, props: CanvasWorkflowProps) {
       queue.current = operation.catch(() => undefined);
       return operation;
     },
-    [view, displayedView, apply, dismiss, showConflict],
+    [view, displayedView, apply, dismiss, showConflict, showMergedNotice],
   );
 
   const handleLoadWorkflow = hooks.useCallback(
@@ -359,7 +470,6 @@ export function useCanvasWorkflow(hooks: Hooks, props: CanvasWorkflowProps) {
           displayed: copy(displayedView()),
           after: copy(content({ ...displayedView(), ...document })),
         };
-        blocked.current = false;
         dismiss();
         setId(targetId.current);
         setRevision(Number(document.revision ?? 0));
@@ -390,7 +500,6 @@ export function useCanvasWorkflow(hooks: Hooks, props: CanvasWorkflowProps) {
       after: copy(content({ ...displayedView(), ...document })),
       replacement: true,
     };
-    blocked.current = false;
     dismiss();
     setId(targetId.current);
     setRevision(0);
@@ -406,7 +515,6 @@ export function useCanvasWorkflow(hooks: Hooks, props: CanvasWorkflowProps) {
     pendingView.current = null;
     targetId.current = null;
     queue.current = Promise.resolve();
-    blocked.current = false;
     dismiss();
     setId(null);
     setRevision(0);

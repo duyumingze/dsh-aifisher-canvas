@@ -46,6 +46,17 @@ export function reportCanvasError(message: string, detail?: ReportDetail): void 
   post('error', message, detail);
 }
 
+/**
+ * 警告级上报（v1.58）：用于「不一定是故障、但值得留痕」的情况。
+ *
+ * 第一个用它是保存链路的 409：乐观并发撞车是**正常**流程（画布会自己重读服务端
+ * 合并再重发），报成 error 会让 /diagnostics 里全是红色的假故障。
+ */
+export function reportCanvasWarning(message: string, detail?: ReportDetail): void {
+  console.warn('[aifisher-canvas]', message, detail);
+  post('warn', message, detail);
+}
+
 export function reportCanvasInfo(message: string, detail?: ReportDetail): void {
   post('info', message, detail);
 }

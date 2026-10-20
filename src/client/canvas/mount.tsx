@@ -23,6 +23,7 @@ import { installCanvasStyles } from './styles';
 import { installCanvasBootstrap, bootstrapInstallerNames } from './bootstrap';
 import { CanvasStage, canvasBindingReport, canvasViewInjectionReport } from './stage';
 import { installCanvasDiagnostics, reportCanvasError, reportCanvasInfo } from './diagnostics';
+import { installSaveTelemetry } from './saveTelemetry';
 import { canvasGridReport, mountCanvasGrid } from './canvasGrid';
 import { knifeReport } from './knife';
 
@@ -312,6 +313,9 @@ function installDropOverlayHealer(): () => void {
  */
 export function mountCanvas(container: HTMLElement): CanvasHandle {
   const releaseDiagnostics = installCanvasDiagnostics();
+  // 保存链路取证（2026-10-20）：把「保存 POST 非 2xx / 抛错」和 vendor 的
+  // `[Auto-Save] Failed …` 日志一起送进 host 的 /diagnostics。见 saveTelemetry.ts。
+  const releaseSaveTelemetry = installSaveTelemetry();
   const releaseStyles = installCanvasStyles();
   const releaseBootstrap = installCanvasBootstrap();
   // shadcn/Radix 的浮层要 portal 进画布容器内部（否则读到 DSH 那份主题变量，
@@ -377,6 +381,7 @@ export function mountCanvas(container: HTMLElement): CanvasHandle {
         releaseThemeMirror();
         releaseBootstrap();
         releaseStyles();
+        releaseSaveTelemetry();
         releaseDiagnostics();
       }
     },

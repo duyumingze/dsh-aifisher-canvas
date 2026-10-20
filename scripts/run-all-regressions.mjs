@@ -23,6 +23,7 @@ const order = [
   'test-canvas-placement.mjs',
   'test-canvas-digest.mjs',
   'test-canvas-recipe.mjs',
+  'test-canvas-save.mjs',
   'test-canvas-preview.mjs',
   'test-canvas-events.mjs',
   'test-canvas-references.mjs',

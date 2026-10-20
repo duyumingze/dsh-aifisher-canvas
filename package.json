@@ -1,6 +1,6 @@
 {
   "name": "dsh-aifisher-canvas",
-  "version": "1.57.0",
+  "version": "1.58.0",
   "private": true,
   "type": "module",
   "main": "lib/index.js",
