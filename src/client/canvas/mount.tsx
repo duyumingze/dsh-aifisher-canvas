@@ -22,10 +22,18 @@ import { buildNodeSearchCatalog } from '../../canvas-ui/canvas/CanvasNodeSearchR
 import { installCanvasStyles } from './styles';
 import { installCanvasBootstrap, bootstrapInstallerNames } from './bootstrap';
 import { CanvasStage, canvasBindingReport, canvasViewInjectionReport } from './stage';
-import { installCanvasDiagnostics, reportCanvasError, reportCanvasInfo } from './diagnostics';
+import { installCanvasDiagnostics, installImageLoadTelemetry, reportCanvasError, reportCanvasInfo } from './diagnostics';
 import { installSaveTelemetry } from './saveTelemetry';
 import { canvasGridReport, mountCanvasGrid } from './canvasGrid';
 import { knifeReport } from './knife';
+import {
+  CanvasGenerationBatches,
+  batchesControl as generationBatchesControl,
+  generationBatchesReport as generationBatchesReportOf,
+  visibleGenerationBatches,
+} from '../../canvas-ui/canvas/CanvasGenerationBatches';
+import { storyboardReport } from '../../canvas-ui/canvas/CanvasStoryboard';
+import { copilotReport } from '../../canvas-ui/canvas/CanvasCopilot';
 
 export interface CanvasHandle {
   /** 卸载画布：root.unmount + 撤销装配 + 移除样式。 */
@@ -106,8 +114,46 @@ export function canvasAppBuildInfo(): Record<string, unknown> {
     lastModel: canvasLastModelReport(),
     // 切刀（v1.49）：装没装 / 认得出几条连线 / 切过几刀（「Ctrl+右键没反应」时先看这里）
     knife: knifeReport(),
+    // 生成批次确认卡（v1.58）：桥挂上没有 / 当前有几批待确认（「看不到确认按钮」时先看这里）
+    generationBatches: generationBatchesReportOf(),
+    // 分镜板（v1.59）：开没开 / 认出几镜 / 在不在播放
+    storyboard: storyboardReport(),
+    // 主动副驾（v1.59）：开没开 / 胶囊在不在 / 几条建议（「副驾不出现」时先看这里）
+    copilot: copilotReport(),
   };
 }
+
+/**
+ * 生成批次确认卡（v1.58）。
+ *
+ * 挂成画布容器的兄弟图层，而不是塞进 vendor 的 React 树：上游那张卡在被压掉的
+ * `canvasAgentPanel` 里，我们这版没有那个面板（见 CanvasShell 的 SUPPRESS_VENDOR_AGENT_CSS），
+ * 所以确认入口必须自带。数据仍来自画布自己的 `canvasCreationControl`（vendor 补丁 3.8v 挂到
+ * `window.__FISHERAI_CANVAS_GENERATION_BATCHES__`），`approve/cancel` 只在页面里调得动。
+ */
+const GenerationBatchesOverlay = () => CanvasGenerationBatches(React, {});
+GenerationBatchesOverlay.displayName = 'GenerationBatchesOverlay';
+
+/** 排查用：批次确认卡是否真的挂上了（回归脚本也会读它）。 */
+export {
+  CanvasGenerationBatches,
+  generationBatchesControl,
+  visibleGenerationBatches,
+};
+export const generationBatchesReport = generationBatchesReportOf;
+
+/**
+ * 排查用 / 回归用：分镜板与副驾的纯逻辑（v1.59）。
+ *
+ * 与叠图、扩图同一条理由 —— 回归在**构建产物**上直接验「镜头号解析 / 排序 / 播放状态出口」，
+ * 不必先摆一屏节点点按钮（jsdom 里真挂载那半条由 test-canvas-storyboard 的 DOM 段守着）。
+ */
+export {
+  buildStoryboardShots,
+  storyboardNumber,
+  STORYBOARD_PLAY_INTERVAL_MS,
+} from '../../canvas-ui/canvas/CanvasStoryboard';
+export type { StoryboardShot } from '../../canvas-ui/canvas/CanvasStoryboard';
 
 /** 排查用：画布点阵底纹的实时状态（原样转出 canvasGrid 的探针）。 */
 export { canvasGridReport } from './canvasGrid';
@@ -313,6 +359,9 @@ function installDropOverlayHealer(): () => void {
  */
 export function mountCanvas(container: HTMLElement): CanvasHandle {
   const releaseDiagnostics = installCanvasDiagnostics();
+  // 图片加载失败留痕（2026-10-20）：云端结果回落到服务商临时链接后，链接过期就是「节点成功但一块黑」。
+  // 见 diagnostics.ts 的 installImageLoadTelemetry。
+  const releaseImageTelemetry = installImageLoadTelemetry();
   // 保存链路取证（2026-10-20）：把「保存 POST 非 2xx / 抛错」和 vendor 的
   // `[Auto-Save] Failed …` 日志一起送进 host 的 /diagnostics。见 saveTelemetry.ts。
   const releaseSaveTelemetry = installSaveTelemetry();
@@ -330,7 +379,16 @@ export function mountCanvas(container: HTMLElement): CanvasHandle {
 
   const root: Root = createRoot(container);
   root.render(
-    React.createElement(CanvasErrorBoundary, null, React.createElement(CanvasStage)),
+    React.createElement(
+      CanvasErrorBoundary,
+      null,
+      React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(CanvasStage),
+        React.createElement(GenerationBatchesOverlay),
+      ),
+    ),
   );
 
   // 画布点阵底纹（小十字 + 鼠标周围圆形变亮）。它是纯 DOM 层，插在 vendor 的
@@ -382,6 +440,7 @@ export function mountCanvas(container: HTMLElement): CanvasHandle {
         releaseBootstrap();
         releaseStyles();
         releaseSaveTelemetry();
+        releaseImageTelemetry();
         releaseDiagnostics();
       }
     },

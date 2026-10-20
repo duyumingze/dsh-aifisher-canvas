@@ -1071,13 +1071,98 @@ curl https://api.work-fisher.com/v1/image/generations \
 - **回归**：新增 `test-canvas-references` 15 项（mention → 快照、紧随用户消息、正文 / 结果地址、
   去重、四种不触发、`</canvas-nodes>` 转义）。
 
+### v1.60：火山方舟视频（Seedance 2.0）接通
+
+（v1.52–v1.59 的条目没在这里补齐，以代码注释与 `docs/` 为准；本节从 v1.60 续写。）
+
+用户给的是一条方舟 curl（`doubao-seedance-2-0-260128` + 两张参考图 + 参考视频 + 参考音频，
+`generate_audio:true` / `ratio` / `duration:11`），要求「接一下这个模型」。
+
+- **它原来在哪**：画布目录里本来就有 `豆包视频2.0` / `豆包视频2.0 fast`（provider
+  `DoubaoVideoProvider`，端点就是 `…/contents/generations/tasks`），但本插件只移植了方舟的**图片**
+  那条 —— 视频请求会掉到「没有通道」的 501。所以这次不是新增模型表，是补**第二条方言**。
+- **协议**（2026-11 核对，与官方文档、`seedance2` 的实践一致）：异步任务两跳。
+  ① `POST {base}/contents/generations/tasks`，`content` 是数组：
+  `{type:'text',text}` / `{type:'image_url',image_url:{url},role:'first_frame'|'last_frame'|'reference_image'}`
+  / `{type:'video_url',…,role:'reference_video'}` / `{type:'audio_url',…,role:'reference_audio'}`，
+  加 `model` / `resolution` / `ratio` / `duration` / `generate_audio` / `watermark`；回 `{id}`。
+  ② `GET …/tasks/{id}`，`status` 走 queued→running→succeeded|failed，成功时结果在
+  `content.video_url`，失败原因在 `error.{code,message}`。
+- **沙箱现实决定了素材形态**：画布素材是本站相对 URL，方舟访问不到。图片按官方支持的
+  `data:image/<格式>;base64,…` **内联**（单张 ≤10MB、总量 ≤40MB）；**参考视频 / 参考音频官方只收公网
+  https 直链、不吃 data URL**，所以本站素材在这里**明确拒绝**并说清「把素材放到公网直链再连」——
+  让它发出去换一个看不懂的 400 是最差的体验。
+- **模式映射**：`text-to-video` 无 role；`first-frame` / `i2v-first-last-frame` 把前两张图当
+  first_frame / last_frame 且 `ratio` 强制 `adaptive`（比例由画面决定，节点上的比例设置会在 `notes` 里说明
+  不参与提交）；其余（`multimodal` / `reference-video` / `reference_image`）按连的素材分别成
+  reference_image / reference_video / reference_audio。契约里的硬约束都当场拦：
+  尾帧不能与任何参考素材混用、参考音频必须配视觉参考、张数上限（图 ≤9 / 视频 ≤3 / 音频 ≤3）。
+- **轮询**：2s 起、×1.4、封顶 8s；`queued/running/未知状态`都不当收尾；`5xx/429` 与「这次没回来」
+  按可重试，连续 8 次才认输；总预算 `ARK_VIDEO_TIMEOUT_MS`（默认 15 分钟，只压 30 分钟上限）。
+  超时回 `504 ARK_VIDEO_TIMEOUT` **带任务号**并提示别重发（重发＝重复计费）。出片后走
+  `localizeCloudResult('video')` 下载进素材库（临时链接几小时就失效）。
+- **可发现性（不改 vendor）**：`/generation/sources` 的方舟卡片多了 `media:[{kind:'video'}]`
+  （agent 的 `prepareGeneration` 靠它判断 configured）；`/generation/model-availability` 多了一组
+  `canonicalModel='Seedance 2.0' › sourceLabel='火山方舟'` 的变体，价格是**元/秒**（画布 composer 自己乘时长），
+  所以二级下拉显示 `≈¥1.35/秒`。模型名逐字取目录，`MODEL_ID_CUSTOM_<码点>` 仍可换成 `ep-…`。
+- **回归**：新增 `scripts/test-ark-video.mjs` 47 项（真 HTTP 假方舟：提交/轮询/落盘、四种 role 映射、
+  内联与拒绝、五类输入拦截、queued 不算收尾、失败/超时/401/404/400/无任务号、分发边界、自定义模型 ID）。
+  `test-ark-generation` 85 项、`ui` 75 项随之更新（方舟卡片现在两种媒体）。
+- **实测状态**：用用户给的 Key 探过方舟 —— 鉴权通过，但 `doubao-seedance-2-0-260128` 在该账号下
+  是 `404 ModelNotOpen`（**账号未开通该模型**，不是代码问题）。到方舟控制台「开通管理」开通，
+  或在设置页填账号下的 `ep-…` 即可。
+- ⚠️ 这轮改了 host 半：**要重启 DSH**；画布侧无需刷新（没动 vendor）。
+
+### v1.61：画布助手 P1（记忆 / 长任务 / 一致性 / 副驾 / 分镜板）
+
+本轮把路线图 P1 五项一次落地。原则没变：**确定性工作放 host、创意判断给模型、花钱的决定归用户**。
+
+- **项目记忆**（`src/host/canvas/projectMemory.ts`）：`<数据目录>/canvas-memory.json`，条目带
+  `kind`/`key`/`importance`，同 `kind+key` **原地更新**（否则模型每轮都会追加一条重复的「画风」）；
+  每项目 40 条、每条 400 字。注入走 `agent/pre-step`，只对画布对话会话、每份内容只注入一次
+  （按文本比对）——「新会话不用重新交代画风」就是这一条。
+- **视觉一致性**（`consistency.ts`）：不发明协议。画布准备生成时本来就把**上游节点结果**当参考图，
+  所以「锁脸/锁服装/锁画风」= 把锚点节点 `connect` 成镜头节点的上游。host 只算「该连哪几条」
+  （已连的跳过、锚点自己不算镜头、幽灵锚点如实回报），覆盖率口径是「每个镜头都接上**全部**锚点」。
+- **主动副驾**（`copilot.ts` + `CanvasCopilot.tsx`）：建议在 host 算（失败 > 缺提示词 > 一致性缺口 >
+  记忆空白 > 孤立节点 > 长任务），界面默认**连胶囊都不出现**（没有建议就什么都不渲染 = 低打扰），
+  有建议才冒小胶囊，点开是面板；「不再提示」写 localStorage，彻底关掉（不新增设置项）。
+- **长任务编排**（`canvasJob.ts`）：固定流水线 `read → shots(recipe) → lock → prepare → await → retry → report`，
+  `action:"job"` **立即返回**快照。关键取舍：**重试 = 自动再准备一批（仍 awaiting-approval）**，
+  绝不自动提交 —— 审批红线不动，用户只是多点一次确认。状态区分 `awaiting-approval`（等人点）
+  与 `waiting`（真在生成），排查时一眼能看出卡在哪一步。
+- **轻量分镜板**（`CanvasStoryboard.tsx`）：画布底部缩略图带，镜头号（镜头 3/分镜03/shot 3）优先、
+  坐标兜底；点一张用 vendor 的 `__FISHERAI_FOCUS_NODES__` 聚焦，播放每 1.5s 翻一张、到结尾自动停。
+  只做「看顺序」，不做时间轴/轨道/转场。
+- **接线**：`canvas_control` 新增 `memory` / `consistency` / `copilot` / `job` 四个动作；
+  HTTP 面 `/memory`（GET/POST/DELETE）、`/memory/anchors`（PUT）、`/copilot`、`/jobs`（只读 + cancel）；
+  `read view:"digest"` 的 `digest` 里多了 `memory` / `consistency` / `copilot` 三段（形状不变）；
+  `canvasAppBuildInfo()` 多了 `storyboard` / `copilot` 两段诊断。
+- **踩坑记录**：
+  1. digest 的补充段必须放进 `digest` **里面**，放到顶层会破坏所有读 `result.digest.*` 的调用方
+     （本轮真踩到：test-canvas-digest 一次红 10 条）；
+  2. 画布对话的 DSH 会话 id 是 `hub.ensureSession` 生成的 `session-…`，**不是面板的 chatId** ——
+     记忆注入按 DSH 会话 id 命中，拿 chatId 去找永远找不到（回归里专门验了这条）；
+  3. `/memory/anchors` 传了锚点却一个都没留下（全是幽灵 id）必须 422，而不是 200 + 空列表
+     （否则界面显示「设置成功」但锚点没了）；
+  4. 本机从 E: 同步时发现 E: 仓库缺 v1.58「生成批次确认卡」全套（`CanvasGenerationBatches.tsx`、
+     vendor 3.8v、mount 挂载、test 断言），同步会把它覆盖掉 —— 已按原设计重建，发布前必须双向核对；
+  5. **`GET /copilot` 不许走 bridge**（2026-10-20 真机检查一口气红到 fail=68 的真凶）：副驾面板每 30s
+     轮询一次，第一版让它 `bridge.request({action:'read'})` 去问「活画布」。画布一关/一重载，
+     上一个页面的 client 还留在桥里，指令被投给一个已经消失的长轮询，于是这一问要等满 5s；
+     headless 的虚拟时间在等这个 fetch → 页面探针一条都发不出去（现象看起来像「画布没挂起来」，
+     截图里却一切正常）。现在的口径：**后台轮询只读磁盘文档**，`live=1`（用户真打开面板）才问活画布，
+     且 host 侧只问「最近 5s 内还在轮询」的页面、超时 1.5s 兜底。
+     `test-canvas-copilot` 加了两条断言（不带 live 必须 <500ms 回、带 live 不能挂死）。
+- ⚠️ 改了 host 半：**要重启 DSH**；画布侧刷新页面即生效。
+
 ## 验证
 
-三套：类型门禁（`pnpm typecheck`，`src/` 零错误）+ jsdom 回归（37 套，`pnpm test`）+ 真浏览器检查（26 场景，`scripts/browser-check.mjs`，不在 `pnpm test` 里）。
+三套：类型门禁（`pnpm typecheck`，`src/` 零错误）+ jsdom 回归（44 套，`pnpm test`）+ 真浏览器检查（26 场景，`scripts/browser-check.mjs`，不在 `pnpm test` 里）。
 
-**0）类型门禁：`pnpm typecheck` 的 `src` 零错误**（2026-10-20 v1.57；`scripts/typecheck.mjs` 用 TS 编译器 API 只统计 `src/`，`vendor/` 上游自带的类型错误不进门禁）
+**0）类型门禁：`pnpm typecheck` 的 `src` 零错误**（2026-10-20 v1.61；`scripts/typecheck.mjs` 用 TS 编译器 API 只统计 `src/`，`vendor/` 上游自带的类型错误不进门禁）
 
-**1）jsdom 回归：37 套 2210 项全绿（2026-10-20 v1.57；下面分项是 v1.44–v1.57 的累加记录，最新总数以 `run-all-regressions` 的 TOTAL 行为准）**
+**1）jsdom 回归：44 套 2400 项全绿（2026-10-20 v1.61；下面分项是 v1.44–v1.57 的累加记录，最新总数以 `run-all-regressions` 的 TOTAL 行为准）**
 
 smoke 59 / **backend 81**（v1.44 加 15 项：画布侧技能目录 —— 用户层扫到 / bundled 层保留 / 同名以用户为准 /
 `user-invocable:false`·旧式 invocation 键·`SKILL.disabled.md` 三种过滤 / 正文 UTF-8 原样 / bundled 仍能取正文 /
@@ -1085,7 +1170,11 @@ smoke 59 / **backend 81**（v1.44 加 15 项：画布侧技能目录 —— 用�
 直连两个文本节点按 y-x 序拼接/文本节点「自己正文 + 直连文本父节点」/「接进来的正文 + 自己的提示词」拼接顺序） /
 panel-exit 26 / **chat-dock 40**（v1.41 加 1 项：新对话输入区贴底那条规则的**精确选择器**
 `[data-conversation-scroll] > [data-composer-seat]` + `margin-top:auto`） / agent 27 / agent-chat 66 / references 16 / generation 65 /
-media 88 / library 85 / custom-workflows 121 / workflow-config 100 / local-workflows 64 / cloud 38 / ark 84 /
+media 88 / library 85 / custom-workflows 121 / workflow-config 100 / local-workflows 64 / cloud 38 / ark 85 /
+**ark-video 49**（v1.60 新增：方舟视频异步任务的提交/轮询/落盘、四种 role 映射、参考图内联与
+参考视频/音频只收公网直链、五类输入拦截（无首帧/无提示词/音频无视觉/尾帧混参考/本站素材）、
+queued 不算收尾、任务失败带原因、超时带任务号、401/404/400/无任务号、分发边界不串线、
+自定义模型 ID 覆盖、构建期 `selectable` 补丁与常用清单断言） /
 **cloud-channels 130**（v1.29 加 10 项：方言判定/`image_url`/按次提交；v1.30 再加 21 项：`workfisher` 方言判
 定/单数路径/`size`+`resolution`+`nsfw_check`/任务轮询/`FAILURE`→`fail_reason`/参考图先上传换直链/按次提交/
 额度不足 403 的人话提示；v1.31 再加 8 项：403 时节点上显示「额度不足」原话/带 HTTP 403/诊断码不变/
@@ -1134,7 +1223,7 @@ $node = "$env:DSH_HOME\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\no
 & $node scripts/verify-live-channel-upload.mjs   # 真机且不花额度：参考素材 → /files/upload 换公网直链（假模型 ID 提交）
 ```
 
-**2）真浏览器检查：26 场景 fail=0**（2026-10-19 v1.49 后全量复跑；其中 `grid-pan-hidpi` 用 `--force-device-scale-factor=1.25` 启动，守「网格不比节点快」；
+**2）真浏览器检查：26 场景 336 条断言 fail=0**（2026-10-20 v1.61 全量复跑；其中 `grid-pan-hidpi` 用 `--force-device-scale-factor=1.25` 启动，守「网格不比节点快」；
 v1.49 新增 `knife` 场景（Ctrl+右键真拖一刀：预览、只断被划过的那条、第二刀停在拖拽中当交付图）；
 v1.48 给 `grid-pan` / `grid-pan-hidpi` 两场加了**三层显隐**真机断言（真浏览器里量每层 wrapper 的 inline opacity：zoom 1 = 小+大、0.2 = 大+更大、0.05 = 只剩最大一层），
 并把 `canvas` 场景的截图像素上限按「大星交点叠墨」重新校准（p99 仍 ≤90，最亮交点 ≤170）；

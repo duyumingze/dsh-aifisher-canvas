@@ -419,6 +419,21 @@ export function CanvasApplication(React: Runtime, dependencies: Dependencies) {
   React.useEffect(() => {
     if (activeProjectId) void canvasCreation.restore(activeProjectId).catch(() => {});
   }, [activeProjectId, canvasCreation]);
+  // ---------------------------------------------------------------- dsh-aifisher-canvas v1.58
+  // 生成批次的确认 UI 在 DSH 版里被压掉了（上游那块卡在 canvasAgentPanel 里）。
+  // 把控制器挂到 window，由 src/canvas-ui/canvas/CanvasGenerationBatches.tsx 画确认卡。
+  // 只暴露对象，不新增任何 canvas 协议动作 —— approve 仍然只有页面里的 UI 能调。
+  React.useEffect(() => {
+    const holder = window as unknown as {
+      __FISHERAI_CANVAS_GENERATION_BATCHES__?: typeof canvasCreation;
+    };
+    holder.__FISHERAI_CANVAS_GENERATION_BATCHES__ = canvasCreation;
+    return () => {
+      if (holder.__FISHERAI_CANVAS_GENERATION_BATCHES__ === canvasCreation) {
+        holder.__FISHERAI_CANVAS_GENERATION_BATCHES__ = undefined;
+      }
+    };
+  }, [canvasCreation]);
   const projectRuntime = React.useRef<Parameters<typeof createCanvasProjectControl>[1]>(() => null);
   const canvasProjects = React.useMemo(
     () =>

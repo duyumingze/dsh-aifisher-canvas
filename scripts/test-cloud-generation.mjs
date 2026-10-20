@@ -48,6 +48,7 @@ const PNG_BYTES = Buffer.from(
 // 假云端上游：一个 http 服务同时扮演「生成端点」和「结果图床」
 // ---------------------------------------------------------------------------
 const received = [];
+let flakyHits = 0;
 const upstream = createServer((req, res) => {
   const chunks = [];
   req.on('data', (chunk) => chunks.push(chunk));
@@ -73,11 +74,26 @@ const upstream = createServer((req, res) => {
       return;
     }
 
+    // 「任务已完成、文件还没落地」的图床：前两次 404，第三次才可读。
+    // host 侧的落盘下载必须重试，否则节点会永远指向一个临时链接（过期即空图）。
+    if (req.url === '/flaky-result.png') {
+      flakyHits += 1;
+      if (flakyHits <= 2) {
+        res.writeHead(404, { 'content-type': 'text/plain' });
+        res.end('not yet');
+        return;
+      }
+      res.writeHead(200, { 'content-type': 'image/png' });
+      res.end(PNG_BYTES);
+      return;
+    }
+
     if (req.url === '/v1/images/generations' || req.url === '/v1/custom/path') {
       if (body?.model === 'boom') return json(500, { error: { message: '显卡烧了' } });
       if (body?.model === 'weird') return json(200, { ok: true, nothing: 'useful' });
       if (body?.model === 'b64') return json(200, { data: [{ b64_json: PNG_BYTES.toString('base64') }] });
       if (body?.model === 'deadlink') return json(200, { data: [{ url: 'http://127.0.0.1:1/nope.png' }] });
+      if (body?.model === 'flaky') return json(200, { data: [{ url: `${base}/flaky-result.png` }] });
       return json(200, { created: 123, data: [{ url: `${base}/fake-result.png` }] });
     }
     if (req.url === '/v1/chat/completions') {
@@ -146,6 +162,7 @@ async function saveChannel(patch = {}) {
         { id: 'boom', kind: 'image' },
         { id: 'weird', kind: 'image' },
         { id: 'deadlink', kind: 'image' },
+        { id: 'flaky', kind: 'image' },
         { id: 'fake-text', kind: 'text' },
       ],
       ...patch,
@@ -280,6 +297,23 @@ console.log('\n=== 错误路径 ===');
     dead.status === 200 && deadBody.resultUrl === 'http://127.0.0.1:1/nope.png',
     JSON.stringify(deadBody.resultUrl),
   );
+
+  // 落盘重试（2026-10-20）：服务商图床常常「任务已经 SUCCESS、文件还没落地」，
+  // 前几次 GET 是 404。旧实现一次失败就把临时链接写进节点 —— 链接过期后节点只剩一块黑。
+  const flaky = await generate('image', { prompt: 'x', imageModel: 'flaky' });
+  const flakyBody = JSON.parse(flaky.body);
+  check(
+    '图床前两次 404 → 重试后照样落盘（节点不指向临时链接）',
+    flaky.status === 200 && String(flakyBody.resultUrl).startsWith('/api/aifisher/canvas/media/'),
+    `${flaky.status} ${String(flakyBody.resultUrl).slice(0, 80)}`,
+  );
+  const flakyPath = diskPathOf(flakyBody.resultUrl || '');
+  check(
+    '重试落盘的文件内容与图床字节一致',
+    existsSync(flakyPath) && readFileSync(flakyPath).equals(PNG_BYTES),
+    flakyPath.slice(-60),
+  );
+  check('图床被请求 3 次（2 次 404 + 1 次 200）', flakyHits === 3, `hits=${flakyHits}`);
 
   await saveChannel({ baseUrl: 'http://127.0.0.1:1/v1' });
   const unreachable = await generate('image', { prompt: 'x', imageModel: 'fake-image' });

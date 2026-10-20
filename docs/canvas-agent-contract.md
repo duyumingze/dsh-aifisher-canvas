@@ -92,6 +92,75 @@ edit  →  （看返回里的 snapshot）
 5. 排查：`GET /api/aifisher/canvas/events?recent=20` 是只读回看；`/api/aifisher/canvas/status` 里的 `events`（`openBatches`/`bindings`）与 `plans` 是计数。
 6. `/agent/plans` 是内存实现（v1.57）：DSH 重启后旧的 pending 批次会消失，画布上那张确认卡片也随之不再出现——节点状态以画布为准，重新准备即可。
 
+### 项目记忆：跨会话记住风格/角色/参数（v1.59）
+
+```jsonc
+{ "action": "memory", "memory": { "op": "list" } }
+{ "action": "memory", "memory": { "op": "set", "kind": "style", "text": "黄昏海边，冷色调，低饱和", "key": "look", "importance": 3 } }
+{ "action": "memory", "memory": { "op": "remove", "id": "记忆id" } }
+{ "action": "memory", "memory": { "op": "anchor-add", "role": "character" }, "nodeIds": ["定妆节点id"] }
+{ "action": "memory", "memory": { "op": "anchor-set", "anchors": [{ "nodeId": "…", "title": "角色A", "role": "character" }] } }
+{ "action": "memory", "memory": { "op": "anchor-remove" }, "nodeIds": ["定妆节点id"] }
+```
+
+- 存储：`<数据目录>/canvas-memory.json`（文本条目 + 参考锚点，最多 40 条/项目）；
+- `kind`：`style` / `character` / `model` / `param` / `rule` / `note`；同 `kind`+`key` 是**原地更新**（不会越记越多）；
+- 注入：画布对话的**每个回合**会带一段【画布项目记忆】（内容没变就不重复注入），所以新会话不必重新交代画风；
+- 主区域会话不硬塞，靠 `read view:"digest"` 里的 `digest.memory` 看到条数。
+
+### 视觉一致性：把参考锚点接到镜头上（v1.59）
+
+```jsonc
+{ "action": "consistency", "consistency": { "op": "status" } }
+{ "action": "consistency", "consistency": { "op": "lock", "nodeIds": ["镜头1", "镜头2"] } }  // nodeIds 可省略 = 全部镜头
+{ "action": "consistency", "consistency": { "op": "unlock" } }
+```
+
+- 画布不发明新协议：**上游节点结果就是参考图**，所以「锁脸/锁服装/锁画风」= 把定妆节点 `connect` 成镜头节点的上游；
+- `lock` 只连缺失的（已连的跳过），锚点自己不算镜头，幽灵锚点会如实回报；
+- 覆盖率口径：**每个镜头都引用全部锚点**才算 covered（两个锚点时只接一个不算）；
+- `status` 返回 `coverage{shots,covered,uncovered[],summary}`，适合判断「还剩几个镜头没锁」。
+
+### 主动副驾：现在最该做什么（v1.59）
+
+```jsonc
+{ "action": "copilot" }
+→ { "summary": "2 条建议，其中 1 条要马上处理。",
+    "suggestions": [{ "id": "failed-nodes", "level": "high", "title": "2 个节点生成失败", "detail": "…", "ask": "…" }],
+    "consistency": { … }, "memory": { "entries": 3, "anchors": ["角色A"] } }
+```
+
+建议来源与优先级：失败节点 > 缺提示词 > 一致性缺口 > 记忆空白 > 孤立节点 > 进行中的长任务，最多 5 条。画布左下角有胶囊，点开可看；用户可以在面板里「不再提示」关掉。
+
+HTTP 面（界面同源调用）：`GET /api/aifisher/canvas/copilot?projectId=` 默认读**磁盘文档**；
+加 `&live=1` 才去问活画布（刚建、还没保存的节点也在）。后台 30s 轮询必须用默认，
+否则画布关掉/正在重载时那一问会等满超时，把页面卡住。
+
+### 长任务：一次提交「做完整短片」（v1.59）
+
+```jsonc
+{ "action": "job", "job": {
+    "op": "create",
+    "name": "雨夜短片",
+    "shots": [{ "title": "镜头 1", "prompt": "…", "model": "画布里的显示名", "parameters": { … } }],
+    "columns": 3,
+    "lockAnchors": true,
+    "prepare": true,
+    "retry": { "enabled": true, "maxAttempts": 2 }
+} }
+{ "action": "job", "job": { "op": "status", "id": "任务id" } }
+{ "action": "job", "job": { "op": "list" } }
+{ "action": "job", "job": { "op": "cancel", "id": "任务id" } }
+```
+
+固定流水线：`read → shots（复用 recipe）→ lock（接锚点）→ prepare（准备批次）→ await（等确认 + 等结果）→ retry（失败自动再准备）→ report`。
+
+- **立即返回**任务快照，不等生成；用 `op:"status"` 看每一步的 state/detail；
+- 审批红线不变：只调用 `prepareGeneration`（`awaiting-approval`），重试也只是**再准备一批**，仍要用户点确认；
+- `state` 语义：`running`（在建节点/准备）→ `awaiting-approval`（等用户点确认）→ `waiting`（批次 running）→ `completed` / `failed` / `cancelled`；
+- 收口/自动重试会给会话推一条【画布长任务】通知（推不出去就在下一回合补）；
+- `GET /api/aifisher/canvas/jobs?projectId=` 与 `POST /jobs/:id/cancel` 是给界面/排查用的同源 HTTP 面。
+
 ---
 
 ## 3. configure 的四条硬约束
@@ -118,13 +187,18 @@ edit  →  （看返回里的 snapshot）
 ```
 prepareGeneration(revision, nodeIds)
   → { generationState: "awaiting-approval", generationPlanId }
-  → 【用户在画布面板点「确认本批生成与费用」】
+  → 【用户在画布右下角点「确认本批生成与费用」】
   → 真正提交
 ```
 
 - `approve()` 只挂在 UI 上，**故意没有暴露给 `canvas_control`**（`canvasCreationControl.ts` 里那句 `This method is held by the UI only`）。
 - 理由：生成是要花钱的动作，费用授权必须由人按下。
 - 因此 Agent 的职责边界是：**把节点、模型、参数、提示词准备到位，把确认卡片递到用户面前**。不要试图绕过，也不要把「跑不通生成」当成待修的缺陷。
+- **确认卡在哪（v1.58）**：上游那张卡在画布内 Agent 面板里，而 DSH 版把那个面板换成了右侧原生会话，所以卡片改由
+  `src/canvas-ui/canvas/CanvasGenerationBatches.tsx` 画在**画布右下角**（只列当前项目的 pending/running 批次）。
+  控制器由 vendor 补丁 3.8v 挂到 `window.__FISHERAI_CANVAS_GENERATION_BATCHES__`；不新增协议动作，
+  `canvas_control` 依旧拿不到 `approve`。排查「看不到确认按钮」：读
+  `/api/aifisher/canvas/diagnostics` 里 `canvasAppBuildInfo().generationBatches`（`bridged` / `visible` / `card`）。
 - 一批次 10 分钟内有效；同一会话同时只允许一个 pending 批次（第二个返回 `CONFLICT`）；一批所有节点合计不得超过 100 张。
 - 准备动作最后要 `POST /api/aifisher/canvas/agent/plans` 落一条批次记录（v1.57 起 host 自己实现，内存态）——
   缺了它整条准备链会 `UNAVAILABLE`（v1.57 之前就是这个状态）。记录里的 `sessionId` + `items[].nodeId`
@@ -152,21 +226,6 @@ prepareGeneration(revision, nodeIds)
 | `NOT_FOUND` | `nodeId` 不存在 | 重新 `read` 拿 id |
 | `UNCONFIRMED` | 指令过期 / 结果未确认 | 核对画布实际状态，别盲目重试 |
 
-### `saved`：这次改动到底落盘了没有（v1.58）
-
-改动文档的动作（`edit` / `undo` / `recipe` / `media` / `workflow` / `importAsset`）在返回里多一个 `saved`：
-
-| saved | 含义 | 怎么办 |
-|---|---|---|
-| `saved` | 画布已确认写进后端库（`canvas.json`） | 正常继续 |
-| `failed` | 画布**已经改好了，但写盘失败**（画布自己报 `UNCONFIRMED`） | 告诉用户点一次「保存」并核对；**不要重发同一次编辑**（节点会重复） |
-| `unknown` | 画布当时忙/被切走/超时，无法确认 | 需要确认就对用户说清楚，别假装已存 |
-
-为什么要有这个字段：画布上游是「编辑 → 1.2s 防抖 → 自动保存」，`edit` 在**画布内部执行完**就返回了，
-落盘还在后面排队。以前没有人能把「看着改成功、其实没存上」说出来 —— 用户报障的
-「画布助手操作了之后很容易保存不上」就是这个缺口（叠加了一个更严重的上游 bug：
-一次字段级合并冲突会让这个文档的保存**永久失败**直到重新打开项目，v1.58 已修）。
-
 ---
 
 ## 6. 排查清单
@@ -174,5 +233,4 @@ prepareGeneration(revision, nodeIds)
 - 参数没生效？→ 先确认 `edit` 返回的 `ok:true`，再 `read` 复核；`configure` 的失败是**整次 edit 失败**，不会部分写入。
 - 数量/比例莫名变了？→ 回想有没有换过模型（第 3 节第 3 条）。
 - 生成点不动？→ 先看是不是落在第 4 节的缺口里，而不是自己的参数写错了。
-- 「改了但保存不上」？→ 看返回里的 `saved`（第 5 节）；再看 `GET /api/aifisher/canvas/diagnostics`，v1.58 起保存 POST 的失败与画布 `[Auto-Save] Failed …` 原文都会上报到那里。
 - 每次操作都慢？→ 数一下工具调用次数。正确姿势是 1~2 次（`edit` 一次完成，`snapshot` 已回带）；每次工具调用都是一次完整模型推理，多出来的轮次都会直接变成等待时间。

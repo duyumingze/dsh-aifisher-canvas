@@ -112,12 +112,17 @@ export const DEFAULT_PATHS: Readonly<Record<CloudKind, string>> = Object.freeze(
 /**
  * 某套方言自己改路径的媒体类型（用户显式填的 `paths` 仍然压过这里）。
  *
- * 只有 FisherAI 需要：它是 `/image/generations`（**单数** image），照 OpenAI 的复数路径打过去
- * 只会拿到网关的 404，而报错里看不出是路径写错了。
+ * 只有 FisherAI 需要：图片是 `/image/generations`（**单数** image）、视频是
+ * `/video/generations`（**单数** video，2026-10-20 用户给的 minimax-h3-ow-r2v curl）。
+ * 照 OpenAI 的复数路径（`/images/generations`、`/videos/generations`）打过去只会拿到网关的 404，
+ * 而报错里看不出是路径写错了 —— 实测 `/videos/generations` 就是 404 "Invalid URL"。
  */
 const DIALECT_PATHS: Readonly<Partial<Record<ChannelDialect, Partial<Record<CloudKind, string>>>>> =
   Object.freeze({
-    workfisher: Object.freeze({ image: '/image/generations' }),
+    workfisher: Object.freeze({
+      image: '/image/generations',
+      video: '/video/generations',
+    }),
   });
 
 /** FisherAI 换参考图直链的上传路径（挂 baseUrl 之后）。 */
@@ -582,6 +587,18 @@ const EXTENSION_MIME: Readonly<Record<string, string>> = Object.freeze({
   '.bmp': 'image/bmp',
   '.gif': 'image/gif',
   '.avif': 'image/avif',
+  // 视频节点的参考素材（`body.videos`）与参考音频（`body.audios`）也要能过 /files/upload：
+  // 表里没有的话上传会用 'image/png' 当 MIME，端点收到一个「名字是 .mp4、类型是 png」的文件。
+  '.mp4': 'video/mp4',
+  '.mov': 'video/quicktime',
+  '.webm': 'video/webm',
+  '.mkv': 'video/x-matroska',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg',
 });
 
 function referenceList(body: Record<string, unknown> | null): string[] {
@@ -866,10 +883,16 @@ export function buildChannelPayload(input: {
   model: CloudChannelModel;
   body: Record<string, unknown> | null;
   images?: readonly string[];
+  /** 视频节点连过来的待编辑/参考视频（只有部分中转扩展模型收，见下面的分支）。 */
+  videos?: readonly string[];
+  /** 视频节点连过来的参考音频。 */
+  audios?: readonly string[];
   dialect?: ChannelDialect;
 }): Record<string, unknown> {
   const { kind, model, body } = input;
   const images = input.images ?? [];
+  const videos = input.videos ?? [];
+  const audios = input.audios ?? [];
   const dialect = input.dialect ?? 'openai';
   const prompt = promptOf(body);
   if (kind === 'text') {
@@ -898,6 +921,51 @@ export function buildChannelPayload(input: {
     const ratio = channelAspectRatio(body);
     if (ratio) payload.size = ratio;
     return { ...payload, ...referenceFields(dialect, images) };
+  }
+  if (kind === 'video' && dialect === 'workfisher') {
+    /**
+     * FisherAI 视频任务（2026-10-20 用户给的 minimax-h3-ow-r2v curl + 用真 key 实测的收尾形状）：
+     *
+     *   POST {base}/video/generations
+     *   { model, prompt, images: [公网直链], seconds: "5",
+     *     metadata: { resolution: "480p", ratio: "16:9", audio_urls: [...], video_url: [...] } }
+     *   → 回 `{ id, task_id, status: "queued", progress: 0 }`
+     *   → GET {base}/video/generations/{id}，是**图片那套两层 data**：
+     *     `{code:'success', data:{status:'IN_PROGRESS'|'SUCCESS', progress:'100%',
+     *       usage:{amount,currency}, result_url, data:{content:{video_url}}}}`
+     *     （状态全大写；视频地址同时出现在 `data.result_url` 与 `data.data.content.video_url`，
+     *      collectResultRefs 两处都认，URL 相同所以去重后只剩一条）
+     *
+     * 与图片那套的四处不同，每一处配错都不报错：
+     *   ① 路径是**单数** video（`/videos/generations` 实测 404 "Invalid URL"）；
+     *   ② `seconds` 必须是**字符串**（实测传数字：`cannot unmarshal number into Go struct
+     *      field .Alias.seconds of type string`）；
+     *   ③ 档位/宽高比不在顶层，而在 `metadata` 里（`resolution` 必填且只有小写三档，
+     *      例如 r2v 只收 1080p/480p/768p —— 大写 `480P` 会被拒）；
+     *   ④ 参考图走顶层 `images`（数组，公网直链），不是 OpenAI 的 `image`。
+     */
+    const payload: Record<string, unknown> = { model: model.id, prompt };
+    const seconds = Number(body?.duration);
+    if (Number.isFinite(seconds) && seconds > 0) payload.seconds = String(seconds);
+    if (images.length) payload.images = [...images];
+    const metadata: Record<string, unknown> = {};
+    const resolution =
+      typeof body?.resolution === 'string' ? body.resolution.trim().toLowerCase() : '';
+    if (resolution) metadata.resolution = resolution;
+    const ratio = channelAspectRatio(body);
+    if (ratio) metadata.ratio = ratio;
+    // 画布视频节点自带的高级参数（有才带，别把未声明的字段塞给端点）
+    if (typeof body?.generate_audio === 'boolean') metadata.generate_audio = body.generate_audio;
+    const seed = Number(body?.seed);
+    if (body?.seed !== undefined && body.seed !== '' && Number.isFinite(seed)) metadata.seed = seed;
+    if (typeof body?.return_last_frame === 'boolean') {
+      metadata.return_last_frame = body.return_last_frame;
+    }
+    // 文档样例里这两个都是**数组**；`-multi`/`g-omni` 一类模型才看它们，r2v 不带就整个省略。
+    if (videos.length) metadata.video_url = [...videos];
+    if (audios.length) metadata.audio_urls = [...audios];
+    if (Object.keys(metadata).length) payload.metadata = metadata;
+    return payload;
   }
   const payload: Record<string, unknown> = { model: model.id, prompt };
   if (count > 1 && dialect !== 'modelscope') payload.n = count;
@@ -940,6 +1008,8 @@ export function buildChannelRequest(input: {
   kind: CloudKind;
   body: Record<string, unknown> | null;
   images?: readonly string[];
+  videos?: readonly string[];
+  audios?: readonly string[];
 }): ChannelRequestPlan {
   const url = `${input.channel.baseUrl}${channelPath(input.channel, input.kind)}`;
   const dialect = channelDialect(input.channel);
@@ -1020,6 +1090,13 @@ export function channelTaskId(parsed: unknown): string | null {
       return body.id.trim();
     }
   }
+  /**
+   * 视频那套（`POST /video/generations`）**只回顶层 `id`**，没有 `task_id`、也没有 task_status。
+   * 只认顶层：图片任务响应里的 `data.id` 是数据库行号（上游 relayProvider 特意注明
+   * "data.id is a database row ID"），拿它去轮询会打到一个不存在的任务上。
+   * 调用方只会在「没有结果素材」时才用这个值，所以成功响应里顺带出现的 id 不会被误用。
+   */
+  if (typeof root.id === 'string' && root.id.trim()) return root.id.trim();
   return null;
 }
 

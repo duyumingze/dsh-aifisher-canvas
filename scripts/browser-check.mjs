@@ -4327,6 +4327,25 @@ if (process.env.DUMP_HOST_PAGE) {
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', ORIGIN);
+  /**
+   * `BROWSER_REQLOG=1` 打出**每一条**请求与它的收尾时间（含 `closed after …ms`）。
+   *
+   * 为什么要有它：「没收到页面探针」有一类真凶是**某条请求永远不回**——headless 的
+   * `--virtual-time-budget` 会停在未落地的 fetch 上，页面的时钟跟着冻住，探针一条都发不出去，
+   * 而截图里画布看着完全正常。2026-10-20 就是靠它抓到 `GET /api/aifisher/canvas/copilot`
+   * 一直挂着（closed after 2758ms = 浏览器退出了它还没回），才把根因从「渲染坏了」纠正到
+   * 「副驾轮询不该走 bridge」。
+   */
+  const reqStartedAt = Date.now();
+  if (process.env.BROWSER_REQLOG) {
+    console.log(`[browser][req] ${req.method} ${url.pathname}${url.search}`);
+    res.on('close', () => {
+      console.log(`[browser][req] ${req.method} ${url.pathname} closed after ${Date.now() - reqStartedAt}ms`);
+    });
+    res.on('finish', () => {
+      console.log(`[browser][req] ${req.method} ${url.pathname} ${res.statusCode} after ${Date.now() - reqStartedAt}ms`);
+    });
+  }
 
   // 页面探针回传（越界检测）
   if (url.pathname === '/__probe') {

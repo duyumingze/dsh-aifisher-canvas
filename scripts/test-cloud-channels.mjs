@@ -70,6 +70,16 @@ let msCalls = 0;
  */
 const WF_MODEL_ID = 'workfisher-image-g-v2.5-lowprice';
 const WF_FAIL_MODEL_ID = 'workfisher-image-g-v2.5-Doomed';
+/**
+ * FisherAI 视频那条（2026-10-20 用户给的 minimax-h3-ow-r2v curl）：POST /video/generations 回
+ * `{id, task_id, status:'queued'}` → 轮询 `/video/generations/{id}`（**图片那套两层 data**：
+ * data.status 大写 IN_PROGRESS/SUCCESS，收尾地址在 data.result_url 与 data.data.content.video_url）。
+ */
+const WF_VIDEO_MODEL_ID = 'minimax-h3-ow-r2v';
+let wfVideoSeq = 0;
+const wfVideoPolls = new Map();
+/** 假视频字节（落盘只验字节与后缀，内容不必是真 mp4）。 */
+const MP4_BYTES = Buffer.from('dsh-aifisher-canvas fake mp4 payload');
 let wfUploads = 0;
 /** 上传请求**尝试次数**（含被掐断的），用来量「重试真的发生了」。 */
 let wfUploadAttempts = 0;
@@ -132,6 +142,57 @@ const upstream = createServer((req, res) => {
     if (req.method === 'GET' && /^\/result-[\w-]+\.png$/.test(req.url)) {
       res.writeHead(200, { 'content-type': 'image/png' });
       return res.end(PNG_BYTES);
+    }
+    // ---- FisherAI 视频：提交回 {id,task_id,status:'queued'}，轮询回**图片那套两层 data**
+    //      （data.status 大写 IN_PROGRESS/SUCCESS，收尾地址在 data.result_url 与
+    //      data.data.content.video_url —— 2026-10-20 用真 key 实测的原始形状）----
+    if (req.method === 'POST' && req.url === '/v1/video/generations') {
+      if (String(body?.model ?? '').startsWith('minimax-h3-')) {
+        const taskId = `vid-${++wfVideoSeq}`;
+        return json(200, {
+          id: taskId,
+          task_id: taskId,
+          object: 'video',
+          model: body.model,
+          status: 'queued',
+          progress: 0,
+          created_at: 1792482081,
+        });
+      }
+    }
+    if (req.method === 'GET' && /^\/v1\/video\/generations\/vid-\d+$/.test(req.url)) {
+      const taskId = req.url.split('/').pop();
+      const polls = (wfVideoPolls.get(taskId) ?? 0) + 1;
+      wfVideoPolls.set(taskId, polls);
+      // 第一次故意 IN_PROGRESS：证明等到了终态，而不是把提交回执当结果
+      if (polls === 1) {
+        return json(200, {
+          code: 'success',
+          message: '',
+          data: { task_id: taskId, status: 'IN_PROGRESS', progress: '50%', fail_reason: '' },
+        });
+      }
+      return json(200, {
+        code: 'success',
+        message: '',
+        data: {
+          task_id: taskId,
+          status: 'SUCCESS',
+          progress: '100%',
+          usage: { amount: 0.198, currency: '¥' },
+          result_url: `${base}/result-${taskId}.mp4`,
+          fail_reason: '',
+          data: {
+            content: { video_url: `${base}/result-${taskId}.mp4` },
+            id: taskId,
+            status: 'succeeded',
+          },
+        },
+      });
+    }
+    if (req.method === 'GET' && /^\/result-vid-\d+\.mp4$/.test(req.url)) {
+      res.writeHead(200, { 'content-type': 'video/mp4' });
+      return res.end(MP4_BYTES);
     }
     // ---- 魔搭方言那条通道的专用模型：每次提交回一个**不同**的结果 URL ----
     // （按次提交要把多份结果合并，撞成同一个 URL 会被去重掉，就验不出「真的提交了几次」）
@@ -252,10 +313,15 @@ const channelsApi = (method, path = '', body) => host.hostApi(method, `/cloud-ch
 
 /** 往假素材库里塞一张真字节图片，返回画布节点上那种本站 URL。 */
 function seedLibraryImage(filename) {
-  const dir = join(host.fakeHome, 'storages', 'dsh-aifisher-canvas', 'media', PROJECT_ID, 'images');
+  return seedLibraryFile('images', filename, PNG_BYTES);
+}
+
+/** 任意媒体类型的素材落盘（视频节点的参考视频/音频要真的能读出字节，才能过 /files/upload）。 */
+function seedLibraryFile(kind, filename, bytes) {
+  const dir = join(host.fakeHome, 'storages', 'dsh-aifisher-canvas', 'media', PROJECT_ID, kind);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, filename), PNG_BYTES);
-  return `/api/aifisher/canvas/media/${PROJECT_ID}/images/${filename}`;
+  writeFileSync(join(dir, filename), bytes);
+  return `/api/aifisher/canvas/media/${PROJECT_ID}/${kind}/${filename}`;
 }
 
 // ---- 1. 通道表 CRUD + 探测 -------------------------------------------------
@@ -980,6 +1046,138 @@ console.log('\n=== 通道表：读取 / 探测 / 保存 ===');
 
     // 收尾：这条通道只为上面几验存在，删掉，别影响后面「两条通道」的条数断言
     await channelsApi('POST', '', { action: 'delete', id: wfChannel.id });
+  }
+
+  // ---- 3d-ter. 视频通道：FisherAI /video/generations（minimax-h3-ow-r2v）------
+  //
+  // 依据：用户 2026-10-20 给的 curl（`POST /v1/video/generations`，body = model/prompt/images/
+  // seconds:"5"/metadata:{resolution,ratio,audio_urls,video_url}），配 upstream relayProvider.js
+  // 的视频实现。四件事都和图片那套不同，而且**配错都不报错**（路径错是网关 404、seconds 传成数字
+  // 是被拒、档位放错层是静默用默认值、参考图放 image 字段是被丢掉）：
+  //   ① 路径单数 video；② seconds 是字符串；③ 档位/宽高比在 metadata；
+  //   ④ 参考图在顶层 images（公网直链），且画布视频节点把素材放在 body.images 而不是 imageBase64。
+  console.log('\n=== 视频通道：FisherAI /video/generations ===');
+  {
+    const savedVideo = await channelsApi('POST', '', {
+      action: 'save',
+      channel: {
+        label: 'FisherAI 视频',
+        baseUrl: CHANNEL_BASE_URL,
+        apiKey: 'sk-wf-video',
+        dialect: 'workfisher',
+        models: [{ id: WF_VIDEO_MODEL_ID, kind: 'video' }],
+      },
+    });
+    const videoChannel =
+      (savedVideo.json().channels ?? []).find((item) => item.label === 'FisherAI 视频') ?? {};
+    check(
+      '视频：workfisher 通道 + 视频模型存得住',
+      savedVideo.status === 200 && Boolean(videoChannel.id),
+      `${savedVideo.status} ${savedVideo.text.slice(0, 120)}`,
+    );
+
+    // 画布视频节点送的形状：参考素材在 images/videos/audios（本站素材 URL），没有 imageBase64
+    const videoRefImage = seedLibraryImage('video-ref.png');
+    const videoRefVideo = seedLibraryFile(
+      'videos',
+      'video-ref.mp4',
+      Buffer.concat([MP4_BYTES, Buffer.from('-ref')]),
+    );
+    const videoRefAudio = seedLibraryFile(
+      'audios',
+      'video-ref.wav',
+      Buffer.from('RIFF....WAVEfmt ', 'utf8'),
+    );
+
+    const before = received.length;
+    const gen = await host.dispatch('POST', '/api/aifisher/canvas/generate-video', {
+      projectId: PROJECT_ID,
+      nodeId: 'node-channel-video',
+      prompt: '雨滴打在窗上，镜头缓缓推近',
+      videoModel: `FisherAI 视频 · ${WF_VIDEO_MODEL_ID}`,
+      videoMode: 'reference-video',
+      resolution: '480p',
+      aspectRatio: '16:9',
+      duration: 5,
+      images: [videoRefImage],
+      videos: [videoRefVideo],
+      audios: [videoRefAudio],
+      generateCount: 1,
+    });
+    const genBody = JSON.parse(gen.body);
+    const calls = received.slice(before);
+    const post = calls.find((item) => item.method === 'POST' && item.url === '/v1/video/generations');
+    check(
+      '视频：路径是单数 /video/generations（不是 OpenAI 的 /videos/generations）',
+      Boolean(post) && !calls.some((item) => item.url === '/v1/videos/generations'),
+      JSON.stringify(calls.map((item) => [item.method, item.url])),
+    );
+    check(
+      '视频：seconds 是**字符串**（按数字传会被端点拒）',
+      post?.body?.seconds === '5',
+      JSON.stringify(post?.body?.seconds),
+    );
+    check(
+      '视频：档位/宽高比在 metadata 里，且档位小写（resolution:"480p" / ratio:"16:9"）',
+      post?.body?.metadata?.resolution === '480p' && post?.body?.metadata?.ratio === '16:9',
+      JSON.stringify(post?.body?.metadata),
+    );
+    check(
+      '视频：**不**带图片那套字段（duration / n / size / image / image_url 都不该出现）',
+      post?.body?.duration === undefined &&
+        post?.body?.n === undefined &&
+        post?.body?.size === undefined &&
+        post?.body?.image === undefined &&
+        post?.body?.image_url === undefined,
+      JSON.stringify(Object.keys(post?.body ?? {})),
+    );
+    check(
+      '视频：参考图走顶层 images，且是上传回来的公网直链（不是本站 URL）',
+      Array.isArray(post?.body?.images) &&
+        post.body.images.length === 1 &&
+        /^https?:\/\/.+uploaded-\d+\.png$/.test(String(post.body.images[0])),
+      JSON.stringify(post?.body?.images).slice(0, 160),
+    );
+    check(
+      '视频：待编辑视频/参考音频进 metadata.video_url / metadata.audio_urls（同样是公网直链）',
+      Array.isArray(post?.body?.metadata?.video_url) &&
+        /^https?:\/\/.+uploaded-\d+/.test(String(post.body.metadata.video_url[0])) &&
+        Array.isArray(post?.body?.metadata?.audio_urls) &&
+        /^https?:\/\/.+uploaded-\d+/.test(String(post.body.metadata.audio_urls[0])),
+      JSON.stringify(post?.body?.metadata).slice(0, 240),
+    );
+    const polls = calls.filter(
+      (item) => item.method === 'GET' && /^\/v1\/video\/generations\/vid-\d+$/.test(item.url),
+    );
+    check(
+      '视频：提交只回顶层 `{id}` → 轮询「提交地址 + /{id}」',
+      polls.length >= 2 && polls[0]?.url === '/v1/video/generations/vid-1',
+      JSON.stringify(polls.map((item) => item.url)),
+    );
+    check(
+      '视频：不拿 IN_PROGRESS 当结果（等到 SUCCESS 才收尾）',
+      gen.status === 200 && polls.length >= 2,
+      `status=${gen.status} polls=${polls.length}`,
+    );
+    check(
+      '视频：轮询带通道自己的 Key',
+      polls[0]?.headers?.authorization === 'Bearer sk-wf-video',
+      String(polls[0]?.headers?.authorization),
+    );
+    check(
+      '视频：收尾地址从 data.result_url / data.data.content.video_url 认出来，并落成 .mp4 素材',
+      gen.status === 200 &&
+        /\/videos\/.+\.mp4$/.test(String(genBody.resultUrl)) &&
+        genBody.resultUrls?.length === 1,
+      `${gen.status} ${String(genBody.resultUrl).slice(0, 120)}`,
+    );
+    check(
+      '视频：回执带 channelDialect=workfisher',
+      genBody.channelDialect === 'workfisher' && genBody.channelLabel === 'FisherAI 视频',
+      JSON.stringify({ dialect: genBody.channelDialect, label: genBody.channelLabel }),
+    );
+
+    await channelsApi('POST', '', { action: 'delete', id: videoChannel.id });
   }
 
   // ---- 3e. 端点额度不足（403）：原话照传 + 补一句人话 -------------------------

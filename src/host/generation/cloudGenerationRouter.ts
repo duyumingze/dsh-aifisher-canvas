@@ -14,8 +14,9 @@
  *      把请求翻译成 `{model, prompt, n, size, image…}` 再发出去。多个通道可以并存，各带各的密钥。
  *   ② 火山方舟直连 —— 请求的模型在目录里标着 `DoubaoImageProvider` 且端点指向
  *      ark.cn-beijing.volces.com 时，交给 `arkImageProvider.ts` 翻成方舟的
- *      `{model, prompt, image, size, watermark…}`。这条**不需要**任何通道，
- *      只要配了 ARK_API_KEY（设置 → 闭源服务 → 火山方舟）。
+ *      `{model, prompt, image, size, watermark…}`；视频（`DoubaoVideoProvider`，Seedance）
+ *      交给 `arkVideoProvider.ts` 走方舟的异步任务接口（提交 → 轮询 → 落盘）。
+ *      这两条都**不需要**任何通道，只要配了 ARK_API_KEY（设置 → 闭源服务 → 火山方舟）。
  *
  * v1.4–v1.12 还有第三条「旧版单端点」路（`AIFISHER_CLOUD_BASE_URL`：其余模型原样转给一个自建
  * AIFISHER 兼容端点），已在 v1.13 随那张设置卡片**整体移除**（2026-10-16，用户要求「移除这个
@@ -43,6 +44,10 @@ import {
   handleArkImageGeneration,
   readArkConfig,
 } from './arkImageProvider';
+import {
+  findArkVideoTarget,
+  handleArkVideoGeneration,
+} from './arkVideoProvider';
 import {
   ChannelRequestError,
   buildChannelRequest,
@@ -102,6 +107,21 @@ function referenceList(body: Record<string, unknown> | null): string[] {
   const values = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : [];
   return values.filter((value): value is string => typeof value === 'string' && Boolean(value.trim()));
 }
+
+/**
+ * 画布送来的 URL 数组。
+ *
+ * 视频节点不带 `imageBase64`：`buildVideoRequest` 把连过来的素材放在 `images`（图片/首帧）、
+ * `videos`（待编辑/参考视频）、`audios`（参考音频）三个数组里，元素都是本站素材 URL。
+ * 只读 `imageBase64` 的话，视频通道会「连了三张参考图却按文生视频发出去」—— 端点那边不会报错。
+ */
+function urlList(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : typeof value === 'string' ? [value] : [];
+  return values.filter((entry): entry is string => typeof entry === 'string' && Boolean(entry.trim()));
+}
+
+/** 视频参考素材（待编辑 / 参考视频）可以很大，别用图片那个 20MB 上限卡它。 */
+const VIDEO_REFERENCE_MAX_BYTES = 200 * 1024 * 1024;
 
 /** 上游报错文本归一：OpenAI 形状的 `{error:{message}}` 与 `{error:'...'}` 都要认。 */
 function upstreamErrorMessage(parsed: unknown, raw: string, status: number): string {
@@ -389,12 +409,22 @@ async function handleChannelGeneration(
 ): Promise<boolean> {
   const { channel, model } = resolved;
   const fetcher = deps.fetcher ?? globalThis.fetch;
-  const references = referenceList(body);
+  // 视频节点的参考素材在 `images` 里（图片/文本节点是 `imageBase64`）；两者都认，去掉重复。
+  const references = [
+    ...new Set([
+      ...(kind === 'video' ? urlList(body?.images) : []),
+      ...referenceList(body),
+    ]),
+  ];
+  const videoReferences = kind === 'video' ? urlList(body?.videos) : [];
+  const audioReferences = kind === 'video' ? urlList(body?.audios) : [];
   const dialect = channelDialect(channel);
 
   let images: string[] = [];
-  if (references.length && (kind === 'image' || kind === 'video')) {
-    try {
+  let videos: string[] = [];
+  let audios: string[] = [];
+  try {
+    if (references.length && (kind === 'image' || kind === 'video')) {
       // FisherAI 只收公网直链：data URL / 本站素材要先 /files/upload 换链接；
       // 其它两套方言要的是内联（或原样带公网链接）。
       images =
@@ -406,22 +436,38 @@ async function handleChannelGeneration(
           : await inlineChannelReferences(references, {
               ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
             });
-    } catch (error) {
-      if (error instanceof ChannelRequestError) {
-        sendJson(res, error.status, {
-          error: error.message,
-          code: error.code,
-          ...(error.hint ? { hint: error.hint } : {}),
-          channel: channel.id,
-          channelLabel: channel.label,
-        });
-        return true;
-      }
-      throw error;
     }
+    // 待编辑视频 / 参考音频同样只在 FisherAI 那套请求体里出现，也只收公网直链。
+    if (kind === 'video' && dialect === 'workfisher' && (videoReferences.length || audioReferences.length)) {
+      videos = videoReferences.length
+        ? await uploadChannelReferences(channel, videoReferences, {
+            ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
+            fetcher,
+            maxBytes: VIDEO_REFERENCE_MAX_BYTES,
+          })
+        : [];
+      audios = audioReferences.length
+        ? await uploadChannelReferences(channel, audioReferences, {
+            ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
+            fetcher,
+          })
+        : [];
+    }
+  } catch (error) {
+    if (error instanceof ChannelRequestError) {
+      sendJson(res, error.status, {
+        error: error.message,
+        code: error.code,
+        ...(error.hint ? { hint: error.hint } : {}),
+        channel: channel.id,
+        channelLabel: channel.label,
+      });
+      return true;
+    }
+    throw error;
   }
 
-  const plan = buildChannelRequest({ channel, model, kind, body, images });
+  const plan = buildChannelRequest({ channel, model, kind, body, images, videos, audios });
   const authHeader: Record<string, string> = channel.apiKey
     ? { authorization: `Bearer ${channel.apiKey}` }
     : {};
@@ -683,10 +729,16 @@ export async function handleCloudGeneration(
   }
 
   // ② 目录里标着方舟直连的图片模型先走方舟：它有自己的请求形状（size/image/watermark…），
-  // 原样转给自配通道只会拿到方舟的 400。视频/音频方舟走的是另一套异步任务接口，暂不接管。
+  // 原样转给自配通道只会拿到方舟的 400。
   if (kind === 'image') {
     const target = findArkImageTarget(body);
     if (target) return handleArkImageGeneration(body, res, deps, target);
+  }
+
+  // ③ 方舟视频（Seedance）走异步任务接口：提交 → 轮询 → 结果落素材库（见 arkVideoProvider）。
+  if (kind === 'video') {
+    const target = findArkVideoTarget(body);
+    if (target) return handleArkVideoGeneration(body, res, deps, target);
   }
 
   // 没配通道、也不是方舟直连：如实说清楚去哪儿配（旧版单端点 AIFISHER_CLOUD_BASE_URL 已在

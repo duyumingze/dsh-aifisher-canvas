@@ -665,6 +665,17 @@ const ARK_DIRECT_MODEL_NAMES = [
   '豆包图片5.0-lite',
 ];
 
+/**
+ * 同理，上游还有两条**方舟直连的视频模型**（Seedance 2.0 / 2.0 fast，端点是
+ * `/api/v3/contents/generations/tasks`）也标着 `selectable: false`。
+ *
+ * 本插件 v1.60 补上了方舟的视频链路（src/host/generation/arkVideoProvider.ts），
+ * 所以同样把它们放回可选清单。**不需要**动 canvasModelCatalogPolicy：它们的
+ * canonicalModel `Seedance 2.0` / `Seedance 2.0 Fast` 本来就在常用清单里，
+ * 只是之前没有本插件的后端能真的出片（选了一按生成就是 501）。
+ */
+const ARK_DIRECT_VIDEO_NAMES = ['豆包视频2.0', '豆包视频2.0 fast'];
+
 const ARK_CATALOG_PATCHES = [
   {
     file: 'src/config/modelConfig.ts',
@@ -673,7 +684,7 @@ const ARK_CATALOG_PATCHES = [
     replace: (match) => `${match}${ARK_SEEDREAM_5_PRO_ENTRY}`,
     why: '给目录补一条方舟直连的 doubao-seedream-5-0-pro（上游只有 4.0/4.5/5.0-lite）',
   },
-  ...ARK_DIRECT_MODEL_NAMES.map((name) => ({
+  ...[...ARK_DIRECT_MODEL_NAMES, ...ARK_DIRECT_VIDEO_NAMES].map((name) => ({
     file: 'src/config/modelConfig.ts',
     pattern: new RegExp(`(name:\\s*'${escapeRegExp(name)}',[\\s\\S]{0,320}?selectable:\\s*)false`),
     expect: 1,
@@ -712,7 +723,8 @@ const ARK_CATALOG_PATCHES = [
     );
   }
   console.log(
-    `[vendor] 方舟（豆包）直连模型：目录补 1 条 + 开放 ${ARK_DIRECT_MODEL_NAMES.length} 条 + 常用清单加 4 条`,
+    `[vendor] 方舟（豆包）直连模型：目录补 1 条 + 开放 ${ARK_DIRECT_MODEL_NAMES.length} 条图片 + ` +
+      `${ARK_DIRECT_VIDEO_NAMES.length} 条视频 + 常用清单加 4 条`,
   );
 }
 
@@ -782,6 +794,74 @@ const GENERATION_ERROR_HINT_PATCHES = [
     );
   }
   console.log(`[vendor] 生成失败提示：${GENERATION_ERROR_HINT_PATCHES.length} 处（hint 接进 error.message）`);
+}
+
+// ------------------------------------------------- 3.8e-bis) 结果图链接失效时，别只留一块黑
+
+/**
+ * 云端生成的结果如果在 host 侧没能落进素材库，画布节点的 `resultUrl` 就是服务商的
+ * **临时链接**（`https://file*.aitohumanize.com/file/<hash>.png`）。链接过期后 <img> 直接 404，
+ * 节点看上去「成功但一块黑」—— 2026-10-20 用户就是这么遇到三个节点的。
+ *
+ * 上游的预览组件（canvasImagePreview.tsx）只挂了 onLoad，没有 onError。补一个：
+ * 图片加载失败时把 <img> 隐藏、在同一个容器里放一句人话，并把失败留痕交给 client 半的
+ * `installImageLoadTelemetry`（它监听 window 的 error 捕获阶段，不依赖这处补丁）。
+ *
+ * 不渲染 React 状态（那要动组件签名，跨版本容易碎）：直接操作 DOM —— 这个容器就是
+ * 媒体底板，补丁失败也只是「没提示」（和上游行为一致），不会把画布搞崩。
+ */
+const IMAGE_RESULT_MISSING_PATCH = {
+  file: 'src/stable/media/canvasImagePreview.tsx',
+  from: `              <img
+                src={node.resultUrl}
+                key={node.resultUrl}
+                onLoad={metadata}
+                alt={'生成结果'}
+                className={'w-full h-full object-cover pointer-events-none'}
+              />`,
+  to: `              <img
+                src={node.resultUrl}
+                key={node.resultUrl}
+                onLoad={metadata}
+                onError={(event) => {
+                  // dsh-aifisher-canvas：结果链接失效（云端临时的图床链接过期 / 没落盘）时，
+                  // 不要只留一块黑。提示放在同一个媒体底板里，不新增 DOM 层级。
+                  const img = event.currentTarget;
+                  const host = img.parentElement as HTMLElement | null;
+                  if (!host) return;
+                  img.style.opacity = '0';
+                  if (host.querySelector('[data-af-image-missing]')) return;
+                  const tip = document.createElement('div');
+                  tip.setAttribute('data-af-image-missing', '1');
+                  tip.textContent = '图片链接已失效\\n云端临时链接过期后不再可读，重新生成即可恢复';
+                  tip.style.cssText =
+                    'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;' +
+                    'padding:16px;text-align:center;white-space:pre-line;' +
+                    'font:12px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;' +
+                    'color:#e2e8f0;background:rgba(0,0,0,.45)';
+                  host.appendChild(tip);
+                }}
+                alt={'生成结果'}
+                className={'w-full h-full object-cover pointer-events-none'}
+              />`,
+  why: '云端结果回落到临时链接后，过期即 404，节点只剩一块黑（用户无法分辨「没生成」和「链接失效」）',
+};
+
+{
+  const target = path.join(VENDOR, IMAGE_RESULT_MISSING_PATCH.file);
+  if (!fs.existsSync(target)) {
+    throw new Error(`[vendor] 结果失效提示补丁没对齐：${IMAGE_RESULT_MISSING_PATCH.file} 不存在`);
+  }
+  const original = fs.readFileSync(target, 'utf8');
+  const hits = original.split(IMAGE_RESULT_MISSING_PATCH.from).length - 1;
+  if (hits !== 1) {
+    throw new Error(
+      `[vendor] 结果失效提示补丁没对齐（上游可能改了写法，请核对）：` +
+        `${IMAGE_RESULT_MISSING_PATCH.file}: ${IMAGE_RESULT_MISSING_PATCH.why} —— 锚点命中 ${hits} 次（预期 1 次）`,
+    );
+  }
+  fs.writeFileSync(target, original.split(IMAGE_RESULT_MISSING_PATCH.from).join(IMAGE_RESULT_MISSING_PATCH.to));
+  console.log('[vendor] 结果图失效提示：1 处（画布预览 onError → 「图片链接已失效」）');
 }
 
 // ---------------------------------------------------------------- 3.8f) 节点搜索面板的「建节点」出口
@@ -3059,6 +3139,73 @@ const TEXT_NODE_BODY_PATCHES = [
     );
   }
   console.log(`[vendor] 文本节点正文：${TEXT_NODE_BODY_PATCHES.length} 处（正文 → textContent）`);
+}
+
+// ---------------------------------------------------------------- 3.8v) 生成批次确认卡（v1.58）
+
+/**
+ * DSH 版把上游「画布内 Agent 面板」整块压掉了（`CanvasShell` 的 SUPPRESS_VENDOR_AGENT_CSS），
+ * 而「确认本批生成与费用」那张卡正好画在那个面板里 —— 于是 Agent 准备的批次停在
+ * awaiting-approval，界面上**没有任何地方能按确认**，v1.57 的推送链路永远等不到批次收口。
+ *
+ * 桥只做一件事：把 `canvasCreation` 控制器挂到 window，由
+ * `src/canvas-ui/canvas/CanvasGenerationBatches.tsx` 在画布图层里画确认卡。
+ * **只挂对象、不新增协议动作** —— `approve` 仍然只有页面里的 UI 能调，`canvas_control`
+ * 拿不到，审批红线不动。
+ *
+ * 为什么挂在 `restore(activeProjectId)` 的 effect 后面：`canvasCreation` 在切项目时会被
+ * useMemo 重建，卡片组件自己会按全局实例比对重订阅（见 CanvasGenerationBatches 的注释）。
+ */
+const GENERATION_BATCHES_PATCHES = [
+  {
+    file: 'src/stable/canvas/canvasApplication.tsx',
+    from: `  React.useEffect(() => {
+    if (activeProjectId) void canvasCreation.restore(activeProjectId).catch(() => {});
+  }, [activeProjectId, canvasCreation]);`,
+    to: `  React.useEffect(() => {
+    if (activeProjectId) void canvasCreation.restore(activeProjectId).catch(() => {});
+  }, [activeProjectId, canvasCreation]);
+  // ---------------------------------------------------------------- dsh-aifisher-canvas v1.58
+  // 生成批次的确认 UI 在 DSH 版里被压掉了（上游那块卡在 canvasAgentPanel 里）。
+  // 把控制器挂到 window，由 src/canvas-ui/canvas/CanvasGenerationBatches.tsx 画确认卡。
+  // 只暴露对象，不新增任何 canvas 协议动作 —— approve 仍然只有页面里的 UI 能调。
+  React.useEffect(() => {
+    const holder = window as unknown as {
+      __FISHERAI_CANVAS_GENERATION_BATCHES__?: typeof canvasCreation;
+    };
+    holder.__FISHERAI_CANVAS_GENERATION_BATCHES__ = canvasCreation;
+    return () => {
+      if (holder.__FISHERAI_CANVAS_GENERATION_BATCHES__ === canvasCreation) {
+        holder.__FISHERAI_CANVAS_GENERATION_BATCHES__ = undefined;
+      }
+    };
+  }, [canvasCreation]);`,
+    why: '画布把生成批次控制器交出来（确认卡是 DSH 版唯一的审批入口）',
+  },
+];
+
+{
+  const problems = [];
+  for (const patch of GENERATION_BATCHES_PATCHES) {
+    const target = path.join(VENDOR, patch.file);
+    if (!fs.existsSync(target)) {
+      problems.push(`${patch.file}（文件不存在）`);
+      continue;
+    }
+    const original = fs.readFileSync(target, 'utf8');
+    const hits = original.split(patch.from).length - 1;
+    if (hits !== 1) {
+      problems.push(`${patch.file}: ${patch.why} —— 锚点命中 ${hits} 次（预期 1 次）`);
+      continue;
+    }
+    fs.writeFileSync(target, original.split(patch.from).join(patch.to));
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `[vendor] 生成批次确认卡补丁没对齐（上游可能改了写法，请核对）：\n  - ${problems.join('\n  - ')}`,
+    );
+  }
+  console.log(`[vendor] 生成批次确认卡：${GENERATION_BATCHES_PATCHES.length} 处（控制器挂 window）`);
 }
 
 // ---------------------------------------------------------------- 3.9) 整文件覆盖（scripts/patches/aifisher/**）

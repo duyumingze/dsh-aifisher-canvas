@@ -10,6 +10,7 @@
  *   2. `localizeCloudResult`：把一条结果落进素材库（拿远程 URL 时先下载），
  *      落盘失败**不把生成判失败** —— 原样返回远程 URL，让画布至少能显示出来。
  */
+import { pushDiagnostic } from '../canvas/diagnostics';
 import type { MediaStore, MediaType } from '../canvas/mediaStore';
 
 export type CloudKind = 'image' | 'video' | 'audio' | 'text';
@@ -29,6 +30,62 @@ export const EXTENSION_OF: Readonly<Record<Exclude<CloudKind, 'text'>, string>> 
 
 /** 单个结果文件的上限（与 mediaStore 的图片上限对齐，够用且防内存爆）。 */
 export const MAX_RESULT_BYTES = 256 * 1024 * 1024;
+
+/**
+ * 下载重试计划（毫秒）：第 N 个元素是「第 N+1 次失败后、下一次之前」的等待。
+ *
+ * 为什么要有（2026-10-20 真机）：服务商的图床（`file1/file2.aitohumanize.com`）在任务回报
+ * SUCCESS 的瞬间文件还没落地，直接 GET 是 404，隔几秒才可读。旧实现一次失败就回落到
+ * 远程 URL —— 节点显示「成功」但画面是一块黑，而那个临时链接几分钟后就彻底 404、
+ * 图永远找不回来（画布里已出现三个这样的节点）。重试把这「几秒」等回来。
+ */
+const DOWNLOAD_RETRY_DELAYS_MS = [500, 1500, 4000];
+
+/** 上游图床偶尔回一张 HTML（Cloudflare 拦截页 / 网关错误页），存成 .png 就是坏图。 */
+function looksLikeMarkup(bytes: Buffer): boolean {
+  const head = bytes.subarray(0, 64).toString('latin1').trimStart().toLowerCase();
+  return head.startsWith('<');
+}
+
+interface DownloadFailure {
+  reason: string;
+  /** 值得重试的失败（超时 / 断连 / 4xx / 5xx / 空文件 / 标记页）。超大文件不重试。 */
+  retryable: boolean;
+}
+
+/**
+ * 把一条远程结果下载成字节，失败按 `DOWNLOAD_RETRY_DELAYS_MS` 退避重试。
+ *
+ * 每次尝试都新建请求：图床的 404 常常是「文件还没写完」，换一个时刻就能拿到 200。
+ * 全部失败时抛出最后一次的原因（带上尝试次数），由调用方决定回落策略。
+ */
+async function downloadResultBytes(
+  url: string,
+  fetcher: typeof fetch,
+  onAttempt?: (attempt: number, failure: DownloadFailure) => void,
+): Promise<Buffer> {
+  let failure: DownloadFailure = { reason: '还没开始下载', retryable: true };
+  for (let attempt = 1; attempt <= DOWNLOAD_RETRY_DELAYS_MS.length + 1; attempt += 1) {
+    try {
+      const response = await fetcher(url, { signal: AbortSignal.timeout(300_000) });
+      if (!response.ok) throw new Error(`下载结果失败 HTTP ${response.status}`);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.byteLength === 0) throw new Error('下载到空文件');
+      if (bytes.byteLength > MAX_RESULT_BYTES) throw new Error('结果文件超过大小上限');
+      if (looksLikeMarkup(bytes)) throw new Error('下载到的不是媒体文件（像 HTML 拦截页）');
+      return bytes;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      failure = { reason, retryable: !reason.includes('超过大小上限') };
+      onAttempt?.(attempt, failure);
+      if (!failure.retryable) break;
+      const delay = DOWNLOAD_RETRY_DELAYS_MS[attempt - 1];
+      if (delay === undefined) break;
+      await new Promise((done) => setTimeout(done, delay));
+    }
+  }
+  throw new Error(`${failure.reason}（尝试 ${DOWNLOAD_RETRY_DELAYS_MS.length + 1} 次）`);
+}
 
 export function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -79,6 +136,9 @@ export function collectResultRefs(body: unknown): ResultRef[] {
    * 列字段：数组里既可能是对象（OpenAI 的 data[]），也可能是**裸 URL 字符串**
    * （魔搭异步任务收尾就是 `output_images: ["https://…png"]`，FisherAI 是
    * `data.data.content.image_urls`）。`content`/`metadata` 是后者的嵌套壳。
+   *
+   * `video_urls` / `video_url` 是视频那套的收尾字段（FisherAI 视频任务与图片同构：
+   * `{code, data:{status, data:{content:{video_urls:[…]}}}}`，单数 `video_url` 兜底）。
    */
   function visitList(node: Record<string, unknown>, depth: number) {
     for (const key of [
@@ -91,6 +151,8 @@ export function collectResultRefs(body: unknown): ResultRef[] {
       'generated_images',
       'image_urls',
       'audio_urls',
+      'video_urls',
+      'video_url',
       'urls',
       'videos',
       'audios',
@@ -223,16 +285,32 @@ export async function localizeCloudResult(
       return await save(Buffer.from(ref.url.slice(comma + 1), 'base64'));
     }
     // 远程结果下载回本地：一是画布能当同源素材处理（缩略图/加工都认），
-    // 二是中转站的临时 URL 过期后素材还在。
-    const response = await fetcher(ref.url, { signal: AbortSignal.timeout(300_000) });
-    if (!response.ok) throw new Error(`下载结果失败 HTTP ${response.status}`);
-    const bytes = Buffer.from(await response.arrayBuffer());
-    if (bytes.byteLength > MAX_RESULT_BYTES) throw new Error('结果文件超过大小上限');
+    // 二是中转站的临时 URL 过期后素材还在。图床「任务完成、文件还没落地」的那几秒靠重试兜。
+    const bytes = await downloadResultBytes(ref.url, fetcher, (attempt, failure) => {
+      if (failure.retryable) {
+        console.warn(
+          `[aifisher-canvas] 云端结果第 ${attempt} 次下载失败（${failure.reason}），重试：${ref.url}`,
+        );
+      }
+    });
     return await save(bytes);
   } catch (error) {
-    console.warn(
-      `[aifisher-canvas] 云端结果落盘失败，回退为远程 URL：${error instanceof Error ? error.message : String(error)}`,
-    );
+    const reason = error instanceof Error ? error.message : String(error);
+    console.warn(`[aifisher-canvas] 云端结果落盘失败，回退为远程 URL：${reason}（${ref.url}）`);
+    // 回落到远程 URL 意味着这个节点的图随时会「变黑」：把它记进 /diagnostics，
+    // 让「节点成功但没图」不再只能靠猜（GET /api/aifisher/canvas/diagnostics 能读到）。
+    pushDiagnostic({
+      level: 'warn',
+      message: '云端结果未能落盘，已回退为远程 URL（链接过期后节点会空图）',
+      detail: {
+        kind,
+        url: ref.url ?? '(base64)',
+        projectId: context.projectId,
+        nodeId: context.nodeId ?? null,
+        model: context.model ?? null,
+        reason,
+      },
+    });
     return ref.url ?? '';
   }
 }

@@ -40,6 +40,20 @@ import { placeCreateOperations, type CanvasPlacementNode } from './canvas/nodePl
 import { buildShotListRecipe } from './canvas/recipe';
 import { collectPreviewFiles } from './canvas/preview';
 import { summarizeCanvasRead } from './canvas/readSummary';
+import { createProjectMemory, type ProjectMemoryBlock } from './canvas/projectMemory';
+import { createCanvasJobs } from './canvas/canvasJob';
+import { createCanvasNoticeQueue } from './canvas/noticeQueue';
+import {
+  buildCopilotSuggestions,
+  copilotSummary,
+  type CopilotSuggestion,
+} from './canvas/copilot';
+import {
+  coverageReport,
+  planLockOperations,
+  planUnlockOperations,
+  type AnchorInput,
+} from './canvas/consistency';
 import type { WebServerLike } from './http/httpUtil';
 import { dirname, join } from 'node:path';
 
@@ -275,6 +289,143 @@ function installGenerationEventNotices(
   }
 }
 
+/**
+ * 项目记忆注入（v1.59，P1 第一项）：画布对话每回合带上前缀。
+ *
+ * 用户原话（提议路线图时）：「画布助手记忆：项目风格/角色/参数沉淀，跨会话注入」——
+ * 目标就是「新开一个会话不用重新交代画风」。所以注入点选在 `agent/pre-step`，
+ * 只对**画布对话面板的会话**生效（主区域会话仍然靠 digest/工具读，不硬塞）。
+ *
+ * 两条防重复：
+ *   1. 同一会话、同一份记忆文本只插一次（记忆变了才重新插）；
+ *   2. 插在最后一条用户消息**前面**，与「画布助手上下文」同一个位置，
+ *      不影响用户原话与 @ 节点快照的相对顺序。
+ */
+function installCanvasProjectMemory(
+  ctx: Context,
+  deps: {
+    memory: ReturnType<typeof createProjectMemory>;
+    hub: ReturnType<typeof createCanvasChatHub>;
+    store: ReturnType<typeof createCanvasStore>;
+  },
+): void {
+  try {
+    const on = (ctx as unknown as {
+      on(
+        name: string,
+        listener: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>,
+      ): unknown;
+    }).on;
+    if (typeof on !== 'function') return;
+    /** sessionId → 上次注入的文本（文本变了才重新注入）。 */
+    const injected = new Map<string, string>();
+    on.call(ctx, 'agent/pre-step', async (payload: unknown, next: () => Promise<unknown>) => {
+      const decision = (await next()) as PreStepDecision | undefined;
+      try {
+        if (!decision || decision.kind !== 'enter' || !Array.isArray(decision.messages)) {
+          return decision;
+        }
+        const sessionId = (payload as { agent?: { session?: { header?: { id?: unknown } } } })?.agent
+          ?.session?.header?.id;
+        if (typeof sessionId !== 'string' || !sessionId) return decision;
+        if (!deps.hub.isCanvasSession(sessionId)) return decision;
+        const projectId = deps.hub.projectForSession(sessionId);
+        if (!projectId) return decision;
+        const title = deps.store.getDocument(projectId)?.title;
+        const text = deps.memory.formatForPrompt(projectId, {
+          ...(typeof title === 'string' && title ? { title } : {}),
+        });
+        if (!text || injected.get(sessionId) === text) return decision;
+        injected.set(sessionId, text);
+        if (injected.size > 200) injected.delete(injected.keys().next().value as string);
+        const messages = [...decision.messages];
+        let index = -1;
+        for (let i = messages.length - 1; i >= 0; i -= 1) {
+          if (messages[i]?.source?.kind === 'user') {
+            index = i;
+            break;
+          }
+        }
+        messages.splice(index < 0 ? messages.length : index, 0, {
+          id: randomUUID(),
+          role: 'user',
+          content: [{ type: 'text', text }],
+          source: { kind: 'plugin:dsh-aifisher-canvas', form: 'notice', summary: '画布项目记忆' },
+        });
+        return { ...decision, messages };
+      } catch (error) {
+        ctx.logger?.warn?.(
+          `[aifisher-canvas] 项目记忆注入失败（已放行原始消息）：${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return decision;
+      }
+    });
+  } catch (error) {
+    ctx.logger?.warn?.(
+      `[aifisher-canvas] agent/pre-step 事件不可用，项目记忆不会自动注入：${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
+/**
+ * 长任务通知的兜底入口（v1.59）：通知推送失败时，在会话下一回合补进去。
+ *
+ * 与 installGenerationEventNotices 同形；分离是因为载荷不同（任意一段话 vs 批次事件）。
+ */
+function installCanvasNoticeNotices(
+  ctx: Context,
+  notices: ReturnType<typeof createCanvasNoticeQueue>,
+): void {
+  try {
+    const on = (ctx as unknown as {
+      on(
+        name: string,
+        listener: (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>,
+      ): unknown;
+    }).on;
+    if (typeof on !== 'function') return;
+    on.call(ctx, 'agent/pre-step', async (payload: unknown, next: () => Promise<unknown>) => {
+      const decision = (await next()) as PreStepDecision | undefined;
+      try {
+        if (!decision || decision.kind !== 'enter' || !Array.isArray(decision.messages)) {
+          return decision;
+        }
+        const agent = (payload as { agent?: { session?: { header?: { id?: unknown }; id?: unknown } } })
+          ?.agent;
+        const sessionId = agent?.session?.header?.id ?? agent?.session?.id;
+        if (typeof sessionId !== 'string' || !sessionId) return decision;
+        const text = notices.takePendingText(sessionId);
+        if (!text) return decision;
+        const messages = [...decision.messages];
+        messages.push({
+          id: randomUUID(),
+          role: 'user',
+          content: [{ type: 'text', text }],
+          source: { kind: 'plugin:dsh-aifisher-canvas', form: 'notice', summary: '画布长任务' },
+        });
+        return { ...decision, messages };
+      } catch (error) {
+        ctx.logger?.warn?.(
+          `[aifisher-canvas] 长任务通知注入失败（已放行原始消息）：${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+        return decision;
+      }
+    });
+  } catch (error) {
+    ctx.logger?.warn?.(
+      `[aifisher-canvas] agent/pre-step 事件不可用，长任务通知只能靠主动推送：${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
 export function apply(ctx: Context) {
   // ============================================================
   // 0) webServer
@@ -359,6 +510,25 @@ export function apply(ctx: Context) {
   });
   // 推送层：把收口的批次投进 DSH 会话（推不出去就留到该会话下一回合，见 pre-step 注入）
   const generationPush = createGenerationPush({ ctx, events: generationEvents });
+  // ------------------------------------------------------------
+  // v1.59（P1）：项目记忆 / 长任务 / 主动副驾
+  // ------------------------------------------------------------
+  // 项目记忆：<数据目录>/canvas-memory.json（文本条目 + 参考锚点）
+  const projectMemory = createProjectMemory({ filePath: join(dataDir, 'canvas-memory.json') });
+  // 长任务通知：推不进会话就留着，下一回合由 pre-step 补给（与生成事件同一套护栏）
+  const canvasNotices = createCanvasNoticeQueue({ ctx });
+  /**
+   * 后台长任务编排：read → shots → lock → prepare → await → retry → report。
+   *
+   * 只调用 prepareGeneration（产出 awaiting-approval），从不 approve —— 审批仍只在画布 UI。
+   */
+  const canvasJobs = createCanvasJobs({
+    bridge,
+    events: generationEvents,
+    plans: generationPlans,
+    memory: projectMemory,
+    notify: (sessionId, text) => canvasNotices.push(sessionId, text),
+  });
   // 提交前对账：本机 ComfyUI 的节点/模型清单（模板里的文件名可能与本机不一致）
   // 缓存时长可用 AIFISHER_COMFY_OBJECT_INFO_TTL_MS 覆盖（回归测试用 0 = 每次都重新拉）
   const objectInfoTtl = Number(process.env.AIFISHER_COMFY_OBJECT_INFO_TTL_MS);
@@ -394,6 +564,34 @@ export function apply(ctx: Context) {
       events: generationEvents,
       // 生成批次记录（v1.57）：`/status` 里报计数（对话面板的 plans 走 chat deps）
       plans: generationPlans,
+      // 画布助手 P1（v1.59）：项目记忆 / 参考锚点 / 副驾建议 / 长任务
+      copilot: {
+        memory: projectMemory,
+        jobs: canvasJobs,
+        plans: generationPlans,
+        /**
+         * 副驾/锚点优先读**活画布**的节点（刚建、刚连的节点也在），拿不到再退回磁盘文档。
+         *
+         * 两条硬约束（2026-10-20 真机检查踩到）：
+         *   ① 只有**最近还在轮询**的页面才值得问：上一个页面的 client 会留在桥里，
+         *      向一个已经消失的页面下发指令只能等超时（表现是界面/页面卡住）；
+         *   ② 超时给 1.5s 而不是 5s：这是「锦上添花」的读数，磁盘文档才是兜底答案。
+         */
+        liveNodes: async () => {
+          try {
+            const status = bridge.status() as { clients?: Array<{ idleMs?: unknown }> };
+            const clients = Array.isArray(status.clients) ? status.clients : [];
+            const polling = clients.some(
+              (client) => typeof client.idleMs === 'number' && client.idleMs < 5_000,
+            );
+            if (!polling) return null;
+            const result = await bridge.request({ action: 'read' }, { timeoutMs: 1_500 });
+            return Array.isArray(result.nodes) ? result.nodes : null;
+          } catch {
+            return null;
+          }
+        },
+      },
     });
     // 技能路由**无条件挂**：文件系统那一层不依赖 ctx.skills（见 createSkillsCatalog）。
     attachSkillsRoutes(webServer, skillsCatalog);
@@ -410,6 +608,10 @@ export function apply(ctx: Context) {
   installCanvasNodeReferences(ctx, canvasStore);
   // v1.57：生成事件推送的兜底入口（主动推送失败的批次在这里补给会话）
   installGenerationEventNotices(ctx, generationPush);
+  // v1.59：画布对话每回合带上项目记忆（风格/角色/参数，跨会话不再重新交代）
+  installCanvasProjectMemory(ctx, { memory: projectMemory, hub: chatHub, store: canvasStore });
+  // v1.59：长任务通知的兜底入口（收口/自动重试没推出去时，下一回合补给会话）
+  installCanvasNoticeNotices(ctx, canvasNotices);
 
   ctx.tools.register(
     defineTool({
@@ -441,6 +643,10 @@ export function apply(ctx: Context) {
         'Persistence (v1.58): every mutating edit is followed by a forced save, and the result carries "saved": "saved" | "failed" | "unknown". ' +
         'saved:"failed" means the canvas applied your change but could NOT write it to disk — tell the user to press Save and verify; never resubmit the same edit (it would duplicate nodes). ' +
         'saved:"unknown" means the canvas was busy or switched away, so persistence could not be confirmed. ' +
+        'Project memory (v1.59): action:"memory" list|set|remove|anchor-set|anchor-add|anchor-remove keeps the project’s look/characters/model prefs in canvas-memory.json; entries with the same kind+key update in place. ' +
+        'Consistency (v1.59): action:"consistency" op:"status"|"lock"|"unlock" wires the project’s reference anchors (character sheet / style refs) into shot nodes as upstream inputs — the canvas then uses them as reference images; no new protocol. ' +
+        'Copilot (v1.59): action:"copilot" returns actionable suggestions (failed nodes, missing prompts, unlocked shots, empty memory). ' +
+        'Long task (v1.59): action:"job" op:"create" runs a deterministic pipeline (read → shot-list → lock anchors → prepareGeneration → await approval/result → auto-retry failed nodes → summary) and returns immediately with a job snapshot; the user still confirms every batch. ' +
         'Full contract and error codes: docs/canvas-agent-contract.md.',
       parameters: {
         action: {
@@ -452,6 +658,7 @@ export function apply(ctx: Context) {
             'prepareGeneration', 'runGeneration', 'cancelTask',
             'media', 'workflow', 'product',
             'skills', 'skillLoad', 'recipe', 'preview',
+            'memory', 'consistency', 'copilot', 'job',
           ],
         },
         /** edit/undo 必须带上一轮 read 返回的 revision（乐观并发令牌）。 */
@@ -480,6 +687,24 @@ export function apply(ctx: Context) {
          * 一次 expand 成节点 + 可选 configure，画布侧只收到一条普通 edit。
          */
         recipe: { type: 'object', additionalProperties: true },
+        /**
+         * 项目记忆参数（action:"memory"）：
+         *   { op:"list" } | { op:"set", kind, text, key?, importance? } | { op:"remove", id }
+         *   | { op:"anchor-add", nodeIds:[id], role?, title? } | { op:"anchor-set", anchors:[{nodeId,title?,role?}] }
+         *   | { op:"anchor-remove", nodeIds:[id] }
+         */
+        memory: { type: 'object', additionalProperties: true },
+        /**
+         * 一致性参数（action:"consistency"）：{ op:"status" } | { op:"lock"|"unlock", nodeIds?: [镜头] }
+         */
+        consistency: { type: 'object', additionalProperties: true },
+        /**
+         * 长任务参数（action:"job"）：
+         *   { op:"create", name, shots:[{title?,prompt,type?,model?,parameters?}], columns?, anchorId?,
+         *     lockAnchors?, prepare?, retry?:{enabled?,maxAttempts?} }
+         *   | { op:"list" } | { op:"status", id } | { op:"cancel", id }
+         */
+        job: { type: 'object', additionalProperties: true },
         /**
          * 逃生舱：直接给一条完整画布指令（canvasControlProtocol 的 CanvasControl），
          * 用于那些参数较多、暂时没有单独暴露的动作（prepareGeneration/media/workflow…）。
@@ -765,6 +990,306 @@ export function apply(ctx: Context) {
         }
 
         // ----------------------------------------------------------
+        // v1.59（P1）：项目记忆 / 视觉一致性 / 主动副驾 / 长任务
+        //
+        // 这四个动作都在 host 侧完成（不经过画布协议）：记忆是文件、锚点是纯计算、
+        // 副驾是建议、长任务是一条 host 流水线。只有「改画布」时才用 bridge 下发普通 edit。
+        // ----------------------------------------------------------
+        const activeProjectId = (): string => {
+          try {
+            const status = bridge.status() as { clients?: Array<{ projectId?: unknown }> };
+            const client = Array.isArray(status.clients) ? status.clients[0] : undefined;
+            return client && typeof client.projectId === 'string' ? client.projectId : '';
+          } catch {
+            return '';
+          }
+        };
+        const anchorList = (projectId: string): AnchorInput[] =>
+          projectMemory.get(projectId).anchors.map((anchor) => ({
+            nodeId: anchor.nodeId,
+            title: anchor.title,
+            role: anchor.role,
+          }));
+        /** 读当前打开的画布节点（副驾/锚点/一致性都要「活」的节点，不是磁盘快照）。 */
+        const readLiveNodes = async (): Promise<unknown[]> => {
+          const read = (await bridge.request({ action: 'read' }, { sessionId })) as {
+            nodes?: unknown;
+          } | null;
+          return read && Array.isArray(read.nodes) ? read.nodes : [];
+        };
+
+        if (args.action === 'memory') {
+          const projectId = activeProjectId();
+          if (!projectId) {
+            return { ok: false, code: 'NO_PROJECT', message: '画布没有打开项目，无法读写项目记忆。' };
+          }
+          const input = ((args as { memory?: unknown }).memory ?? {}) as Record<string, unknown>;
+          const op = typeof input.op === 'string' ? input.op : 'list';
+          try {
+            if (op === 'list') {
+              const block = projectMemory.get(projectId);
+              const title = canvasStore.getDocument(projectId)?.title;
+              return {
+                ok: true,
+                action: 'memory',
+                result: { ...block, prompt: projectMemory.formatForPrompt(projectId, { ...(title ? { title } : {}) }) } as unknown as ToolJson,
+              };
+            }
+            if (op === 'set') {
+              const entry = await projectMemory.upsert(projectId, input);
+              if (!entry) {
+                return {
+                  ok: false,
+                  code: 'INVALID',
+                  message: '记忆需要非空 text；kind 取 style/character/model/param/rule/note，key 用于同类原地更新。',
+                };
+              }
+              return { ok: true, action: 'memory', result: { entry } as unknown as ToolJson };
+            }
+            if (op === 'remove') {
+              const id = typeof input.id === 'string' ? input.id : '';
+              const removed = await projectMemory.remove(projectId, id);
+              return removed
+                ? { ok: true, action: 'memory', result: { removed: id } as unknown as ToolJson }
+                : { ok: false, code: 'NOT_FOUND', message: '没有这条记忆。' };
+            }
+            if (op === 'anchor-add' || op === 'anchor-set' || op === 'anchor-remove') {
+              const nodeIds = Array.isArray((args as { nodeIds?: unknown }).nodeIds)
+                ? ((args as { nodeIds: unknown[] }).nodeIds.filter(
+                    (value): value is string => typeof value === 'string' && value.length > 0,
+                  ))
+                : [];
+              const nodes = await readLiveNodes();
+              const titleOf = (id: string): string => {
+                const found = nodes.find(
+                  (raw) => raw && typeof raw === 'object' && (raw as { id?: unknown }).id === id,
+                );
+                const title = found ? (found as { title?: unknown }).title : undefined;
+                return typeof title === 'string' && title ? title : id;
+              };
+              const known = new Set(
+                nodes.flatMap((raw) => {
+                  if (!raw || typeof raw !== 'object') return [];
+                  const id = (raw as { id?: unknown }).id;
+                  return typeof id === 'string' ? [id] : [];
+                }),
+              );
+              let anchors;
+              if (op === 'anchor-remove') {
+                anchors = await projectMemory.removeAnchor(projectId, nodeIds[0] ?? '');
+              } else if (op === 'anchor-add') {
+                if (!nodeIds[0]) {
+                  return { ok: false, code: 'INVALID', message: 'anchor-add 需要 nodeIds:[节点 id]。' };
+                }
+                anchors = await projectMemory.addAnchor(projectId, {
+                  nodeId: nodeIds[0],
+                  title: typeof input.title === 'string' ? input.title : titleOf(nodeIds[0]),
+                  role: input.role,
+                });
+              } else {
+                const raw = Array.isArray(input.anchors)
+                  ? (input.anchors as Array<Record<string, unknown>>).map((anchor) => ({
+                      nodeId: anchor?.nodeId,
+                      title: typeof anchor?.title === 'string' ? anchor.title : titleOf(String(anchor?.nodeId ?? '')),
+                      role: anchor?.role,
+                    }))
+                  : nodeIds.map((id) => ({ nodeId: id, title: titleOf(id), role: input.role }));
+                anchors = await projectMemory.setAnchors(projectId, raw, known.size > 0 ? known : undefined);
+              }
+              if (!anchors) {
+                return { ok: false, code: 'INVALID', message: '锚点需要 nodeId，且节点必须在当前画布上。' };
+              }
+              return {
+                ok: true,
+                action: 'memory',
+                result: {
+                  anchors,
+                  consistency: coverageReport(nodes, anchors),
+                } as unknown as ToolJson,
+              };
+            }
+            return { ok: false, code: 'INVALID', message: `未知 op：${op}（list/set/remove/anchor-add/anchor-set/anchor-remove）。` };
+          } catch (error) {
+            return {
+              ok: false,
+              code: 'MEMORY_FAILED',
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+
+        if (args.action === 'consistency') {
+          const projectId = activeProjectId();
+          if (!projectId) {
+            return { ok: false, code: 'NO_PROJECT', message: '画布没有打开项目，无法核对参考一致性。' };
+          }
+          const input = ((args as { consistency?: unknown }).consistency ?? {}) as Record<string, unknown>;
+          const op = typeof input.op === 'string' ? input.op : 'status';
+          try {
+            let nodes = await readLiveNodes();
+            let operations = 0;
+            if (op === 'lock' || op === 'unlock') {
+              const anchors = anchorList(projectId);
+              if (anchors.length === 0) {
+                return {
+                  ok: false,
+                  code: 'NO_ANCHORS',
+                  message: '项目还没有参考锚点：先用 action:"memory" op:"anchor-add" 把角色定妆/画风参考节点设为锚点。',
+                };
+              }
+              const wanted = Array.isArray((args as { nodeIds?: unknown }).nodeIds)
+                ? ((args as { nodeIds: unknown[] }).nodeIds.filter(
+                    (value): value is string => typeof value === 'string' && value.length > 0,
+                  ))
+                : undefined;
+              const read = (await bridge.request({ action: 'read' }, { sessionId })) as {
+                revision?: unknown;
+                nodes?: unknown;
+              };
+              const revision = typeof read?.revision === 'string' ? read.revision : '';
+              if (!revision) {
+                return { ok: false, code: 'NEED_REVISION', message: '画布没有返回 revision。' };
+              }
+              const plan =
+                op === 'lock'
+                  ? planLockOperations(nodes, anchors, wanted)
+                  : planUnlockOperations(nodes, anchors, wanted);
+              operations = plan.operations.length;
+              if (operations > 0) {
+                const editResult = (await bridge.request(
+                  { action: 'edit', revision, operations: plan.operations },
+                  { sessionId },
+                )) as Record<string, unknown> | null;
+                if (editResult && editResult.ok === false) {
+                  return {
+                    ok: false,
+                    code: typeof editResult.code === 'string' ? editResult.code : 'CANVAS_REJECTED',
+                    message: '画布拒绝了参考连线操作。',
+                  };
+                }
+              }
+              nodes = await readLiveNodes();
+              return {
+                ok: true,
+                action: 'consistency',
+                result: {
+                  op,
+                  operations,
+                  coverage: coverageReport(nodes, anchors),
+                } as unknown as ToolJson,
+              };
+            }
+            const anchors = anchorList(projectId);
+            return {
+              ok: true,
+              action: 'consistency',
+              result: {
+                op: 'status',
+                anchors,
+                coverage: coverageReport(nodes, anchors),
+              } as unknown as ToolJson,
+            };
+          } catch (error) {
+            return {
+              ok: false,
+              code: 'CONSISTENCY_FAILED',
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+
+        if (args.action === 'copilot') {
+          const projectId = activeProjectId();
+          if (!projectId) {
+            return { ok: false, code: 'NO_PROJECT', message: '画布没有打开项目。' };
+          }
+          try {
+            const nodes = await readLiveNodes();
+            const memory = projectMemory.get(projectId);
+            const anchors = anchorList(projectId);
+            const openBatches = generationPlans
+              .list(projectId)
+              .filter((plan) => plan.state === 'pending' || plan.state === 'running').length;
+            const openJobs = canvasJobs
+              .list(projectId)
+              .filter((job) => ['running', 'awaiting-approval', 'waiting'].includes(job.state))
+              .map((job) => ({ id: job.id, name: job.name, state: job.state }));
+            const suggestions: CopilotSuggestion[] = buildCopilotSuggestions({
+              nodes,
+              memory,
+              openBatches,
+              openJobs,
+            });
+            return {
+              ok: true,
+              action: 'copilot',
+              result: {
+                summary: copilotSummary(suggestions),
+                suggestions,
+                consistency: coverageReport(nodes, anchors),
+                memory: {
+                  entries: memory.entries.length,
+                  anchors: memory.anchors.map((anchor) => anchor.title),
+                },
+              } as unknown as ToolJson,
+            };
+          } catch (error) {
+            return {
+              ok: false,
+              code: 'COPILOT_FAILED',
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+
+        if (args.action === 'job') {
+          const input = ((args as { job?: unknown }).job ?? {}) as Record<string, unknown>;
+          const op = typeof input.op === 'string' ? input.op : 'create';
+          if (op === 'create') {
+            const created = canvasJobs.create(input, {
+              sessionId: sessionId ?? 'dsh',
+              projectId: activeProjectId(),
+            });
+            if (created.error) {
+              return { ok: false, code: 'INVALID', action: 'job', message: created.error };
+            }
+            return {
+              ok: true,
+              action: 'job',
+              result: {
+                job: created.job,
+                hint:
+                  '任务在后台跑：建节点 → 锁参考 → 准备批次，然后等你在画布右下角点「确认本批生成与费用」。' +
+                  '失败会自动准备重试批次（仍需你确认）；用 action:"job" op:"status" 查进度。',
+              } as unknown as ToolJson,
+            };
+          }
+          const projectId = activeProjectId();
+          if (op === 'list') {
+            return {
+              ok: true,
+              action: 'job',
+              result: { jobs: canvasJobs.list(projectId || undefined) } as unknown as ToolJson,
+            };
+          }
+          const id = typeof input.id === 'string' ? input.id : '';
+          if (!id) return { ok: false, code: 'INVALID', message: 'job 需要 id（status/cancel）。' };
+          if (op === 'status') {
+            const job = canvasJobs.get(id);
+            return job
+              ? { ok: true, action: 'job', result: { job } as unknown as ToolJson }
+              : { ok: false, code: 'NOT_FOUND', message: '没有这个长任务。' };
+          }
+          if (op === 'cancel') {
+            const job = canvasJobs.cancel(id);
+            return job
+              ? { ok: true, action: 'job', result: { job } as unknown as ToolJson }
+              : { ok: false, code: 'NOT_FOUND', message: '没有这个长任务。' };
+          }
+          return { ok: false, code: 'INVALID', message: `未知 op：${op}（create/list/status/cancel）。` };
+        }
+
+        // ----------------------------------------------------------
         // 其余动作交给画布：host 把指令长轮询下发，画布内 controlExecutor 执行后回执
         // ----------------------------------------------------------
         const command = buildCanvasCommand(args as unknown as CanvasToolArgs);
@@ -891,6 +1416,46 @@ export function apply(ctx: Context) {
           const detail = (args as { detail?: unknown }).detail;
           const view = (args as { view?: unknown }).view;
           const saved = savePromise ? await savePromise : null;
+          /**
+           * digest 的补充段（v1.59）：记忆条数、一致性覆盖率、可执行建议。
+           *
+           * 放在 digest 里而不是另开一个工具：模型做规划时本来就要先读摘要，
+           * 顺手拿到「这个项目记着什么、哪些镜头没锁、当前最该做什么」，省一次往返。
+           */
+          let digestExtra: Record<string, unknown> | undefined;
+          if (view === 'digest' && result && typeof result === 'object') {
+            try {
+              const rawNodes = (result as { nodes?: unknown }).nodes;
+              const nodes = Array.isArray(rawNodes) ? rawNodes : [];
+              const projectId = activeProjectId();
+              const memory: ProjectMemoryBlock = projectId
+                ? projectMemory.get(projectId)
+                : { projectId: '', entries: [], anchors: [], updatedAt: '' };
+              const anchors: AnchorInput[] = projectId ? anchorList(projectId) : [];
+              const coverage = coverageReport(nodes, anchors);
+              const suggestions = buildCopilotSuggestions({ nodes, memory });
+              digestExtra = {
+                projectId: projectId || null,
+                memory: {
+                  entries: memory.entries.length,
+                  anchors: memory.anchors.map((anchor) => anchor.title),
+                  hint: '风格/角色/参数用 action:"memory" 写入，下次会话自动注入。',
+                },
+                consistency: {
+                  shots: coverage.shots,
+                  covered: coverage.covered,
+                  uncovered: coverage.uncovered.length,
+                  summary: coverage.summary,
+                },
+                copilot: {
+                  summary: copilotSummary(suggestions),
+                  suggestions: suggestions.map((item) => `${item.level}: ${item.title}`),
+                },
+              };
+            } catch {
+              /* 摘要补充失败不影响 digest 本身 */
+            }
+          }
           return {
             ok: true,
             action: args.action,
@@ -908,6 +1473,7 @@ export function apply(ctx: Context) {
             result: summarizeCanvasRead(result, {
               full: detail === 'full',
               digest: view === 'digest',
+              ...(digestExtra ? { digestExtra } : {}),
             }) as unknown as ToolJson,
           };
         } catch (error) {
@@ -927,3 +1493,16 @@ export function apply(ctx: Context) {
 
   ctx.logger?.info?.('[aifisher-canvas] host plugin loaded');
 }
+
+// ---------------------------------------------------------------- 纯函数出口（v1.59）
+// 回归脚本直接 import lib/index.js 拿这些函数做单测：它们没有 I/O，
+// 从产物里 import 可以避免测试去跑 TS（node 的类型剥离不支持无扩展名 import）。
+export {
+  coverageReport,
+  orderShots,
+  planLockOperations,
+  planUnlockOperations,
+  shotNumberFromTitle,
+} from './canvas/consistency';
+export { buildCopilotSuggestions, copilotSummary } from './canvas/copilot';
+export type { CopilotSuggestion } from './canvas/copilot';

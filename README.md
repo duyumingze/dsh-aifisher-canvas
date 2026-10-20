@@ -2,7 +2,7 @@
 
 > 把专业级 AI 创作无限画布带进 DeepSeek Harness：**不是插件内置一个聊天框，而是让 DSH 原生 AI Agent 直接接管整个画布**——本地 ComfyUI、多云端生成、节点编排、素材整理，全靠你在右侧说一句话完成。
 
-**Version**: v1.58 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
+**Version**: v1.61 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
 
 ---
 
@@ -36,6 +36,11 @@
 - 🔍 **上下文全感知**：Agent 知道你当前画布上有什么项目、你上次用的是哪个模型、你之前生成过什么图，不需要反复跟它交代背景
 - 📎 **@ 画布节点当上下文**：在输入框敲 `@` 直接选画布上的文本 / 图像 / 视频 / 音频节点，发送时自动把该节点的只读快照（标题、正文、结果地址）带在消息后面——指着某个节点说「把这张图改成…」就行，不用先让 Agent 自己 read 一轮
 - 🔔 **生成事件推回面板**：Agent 准备的批次跑完后，宿主会把结果（成功/失败、错误码、节点 id）**推回这条对话**——Agent 接着就能看图自评、修失败、重新准备，你不用再问一句「生成完了吗」；费用确认仍然只在画布上按
+- 🧠 **项目记忆**：画风、角色设定、常用模型/参数记进项目记忆后，新开一个对话会自动带上（同一份内容只注入一次），不用每次重新交代
+- 🎭 **视觉一致性**：把角色定妆 / 画风参考节点设为「锚点」，一次 `lock` 就接到所有镜头上（锚点即上游参考图），跨镜头锁脸锁服装；副驾会提示还剩几个镜头没锁
+- 🎬 **长任务编排**：一句话提交「做完这组镜头」——host 端按既定流水线建节点、锁参考、准备批次，然后等你在确认卡上按一次；某个镜头失败会**自动再准备一批重试**（仍然要你确认，不自动花钱）
+- 🗂️ **分镜板**：画布底部一条缩略图带，按镜头号排好、点一张聚焦过去、按播放自动翻页——只看顺序，不塞完整导演台
+- 🧭 **主动副驾**：发现失败节点、空提示词、没锁的镜头时，在左下角安静冒一个小胶囊，点开才看建议；没有建议时不出现，点「不再提示」彻底关掉
 
 > 传统 AI 画布是"你手动摆节点 + 点按钮生成单张图"，这个插件是"你跟 AI 说你要做什么，AI 自己在无限画布上帮你搭整个创作流水线"。
 
@@ -168,6 +173,8 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
 - 与 DSH 宿主的边界：画布会把「从系统拖进来的文件」事件止步在自己的容器上（`src/client/canvas/mount.tsx` 的 `containFileDrags`）。原因是宿主把「拖入即可添加附件」的全屏提示层挂在 `document` 的 dragenter/dragleave 计数上，而画布的 `onDrop` 会 `stopPropagation` —— 放进去的话宿主永远收不到那次 drop，计数停在 1，整屏遮罩再也退不掉（真机踩过）。同理，任何一次鼠标点击都会补一次 dragleave，把已经卡住的遮罩解开。
 - 测试覆盖：类型门禁（`pnpm typecheck`，`src/` 零错误）+ jsdom 契约测试 + 真机浏览器视觉校验，累计 2200+ 回归用例守住画布几何、交互、响应逻辑
 - 保存链路（v1.58，见 `scripts/patches/aifisher/src/stable/persistence/canvasWorkflow.ts`）：上游的乐观并发是「撞 409 → 重读服务端 → 三向合并 → 重发」，但三向合并遇到**同一字段两边都改**会抛冲突，并把这份文档的保存**永久封锁**（只有重新打开项目才解），画布照常能编辑、实际一个字都存不进去。本插件改成「救援合并」：节点/分组按 id 取并集、同 id 以当前窗口为准、**一定落盘**，并提示用户核对；保存/读取请求另加 20s 超时，避免一次挂住的请求把保存队列永久占死。agent 的每次改动还会由 host 立刻追加一次保存，回执里用 `saved` 说明有没有真的写进 `canvas.json`。
+- 云端结果落盘（2026-10-20）：云端通道回的是**服务商临时链接**（如 `https://file*.aitohumanize.com/file/<hash>.png`），host 侧会先把字节下载进素材库，节点的 `resultUrl` 才是同源 `/api/aifisher/canvas/media/...`。图床在任务刚回报 SUCCESS 的头几秒常常还是 404（文件没落地），所以下载带 4 次退避重试；真要失败，节点会显示「图片链接已失效」并留痕到 `/api/aifisher/canvas/diagnostics`（`installImageLoadTelemetry` 收 img 的 error 事件），而不是静默留一块黑。
+- 火山方舟直连（v1.60）：一张卡片管两种媒体，只认 `ARK_API_KEY`。**图片**走 `POST /api/v3/images/generations`（`arkImageProvider.ts`：档位+比例 → `size`、参考图内联成 data URL、组图/图层拆分按模型能力分流）；**视频**（Seedance 2.0，`arkVideoProvider.ts`）走异步任务 —— `POST /api/v3/contents/generations/tasks` 提交 `content` 数组（`text` / `first_frame` / `last_frame` / `reference_image` / `reference_video` / `reference_audio`）再轮询 `GET …/tasks/{id}`，出片后立刻把 mp4 下载进素材库。参考图的字节内联（方舟访问不到 `127.0.0.1`），参考视频/音频只收公网直链；模型名逐字取自画布目录（`豆包视频2.0`），界面的「自定义模型 ID」可换成账号下的推理接入点（`ep-…`）。
 - Agent 契约：[docs/canvas-agent-contract.md](docs/canvas-agent-contract.md) —— `canvas_control` 每类 operation 的字段、`configure` 的四条硬约束（模型名逐字匹配 / 换模型会重置高级参数）、生成授权边界与错误码速查。**要让 AI 正确操作画布，先喂它这份文档。**
 
 ---

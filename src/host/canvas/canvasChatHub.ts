@@ -582,6 +582,16 @@ export function createCanvasChatHub(options: CanvasChatHubOptions) {
       return store.findByDshSessionId(dshSessionId) !== null;
     },
 
+    /**
+     * 这个画布会话当前打开的项目 id（v1.59：项目记忆注入要用）。
+     *
+     * 来源是 runTurn 时面板带上来的 `projectId`；没带过（老面板/直接调用）就回 null。
+     */
+    projectForSession(dshSessionId: string): string | null {
+      const projectId = projects.get(dshSessionId);
+      return projectId && projectId.trim() ? projectId : null;
+    },
+
     /** 上下文提示：同一个会话只给一次；返回 null 表示不用再注入。 */
     takeInstructions(dshSessionId: string): string | null {
       if (instructed.has(dshSessionId)) return null;

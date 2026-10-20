@@ -58,7 +58,7 @@ export interface CanvasDigest {
  *   - 附带 counts（按类型/状态）、edgeCount、groups、selectedNodeIds；
  *   - 附带 hints：缺提示词、正在生成、生成失败、孤岛节点、未分组——直接告诉 agent 下一步该干嘛。
  */
-export function buildCanvasDigest(result: unknown): unknown {
+export function buildCanvasDigest(result: unknown, extra?: Record<string, unknown>): unknown {
   const record = result as Record<string, unknown>;
   const rawNodes = Array.isArray(record.nodes) ? record.nodes : [];
   const rawGroups = Array.isArray(record.groups) ? record.groups : [];
@@ -151,11 +151,16 @@ export function buildCanvasDigest(result: unknown): unknown {
   if (rawNodes.length > DIGEST_NODE_LIMIT) digest.truncated = true;
   // 注意：不要展开 record —— read 的原始返回里 nodes 是**全量节点**（带正文/参数），
   // 展开就等于把原文又传了一遍，digest 白做。真机验证踩到过：顶层仍回传 7 个完整节点。
+  const merged: Record<string, unknown> = extra
+    ? { ...(digest as unknown as Record<string, unknown>), ...extra }
+    : (digest as unknown as Record<string, unknown>);
   return {
     ...(record.ok === true ? { ok: true } : {}),
     ...(typeof record.revision === 'string' ? { revision: record.revision } : {}),
     view: 'digest',
-    digest,
+    // 形状保持不变：`digest` 是摘要本体，v1.59 的补充段（memory/consistency/copilot）
+    // 放在它**里面** —— 顶层多几个键看起来更方便，但会破坏所有读 result.digest 的调用方。
+    digest: merged,
   };
 }
 
@@ -166,6 +171,8 @@ export interface SummarizeCanvasReadOptions {
   maxTextChars?: number;
   /** 输出项目摘要（对应工具参数 `view:"digest"`）。 */
   digest?: boolean;
+  /** digest 视图追加的字段（v1.59：项目记忆条数 / 一致性覆盖率 / 副驾建议）。 */
+  digestExtra?: Record<string, unknown>;
 }
 
 /**
@@ -183,7 +190,9 @@ export function summarizeCanvasRead(
   const { full = false, maxTextChars = READ_TEXT_LIMIT, digest = false } = options;
   if (digest && result && typeof result === 'object') {
     const record = result as Record<string, unknown>;
-    if (record.ok === true && Array.isArray(record.nodes)) return buildCanvasDigest(result);
+    if (record.ok === true && Array.isArray(record.nodes)) {
+      return buildCanvasDigest(result, options.digestExtra);
+    }
   }
   if (full || !result || typeof result !== 'object') return result;
   const record = result as Record<string, unknown>;

@@ -5,7 +5,8 @@
  * 密钥存在后端，模型目录与价格由后端发布。本插件在这一页只留一张诚实卡片：
  *
  *   「火山方舟（豆包）直连」—— 只认 ARK_API_KEY，模型表就是画布自己目录里那几条
- *   `DoubaoImageProvider` 记录（见 generation/arkImageProvider.ts）。
+ *   `DoubaoImageProvider`（图片）与 `DoubaoVideoProvider`（视频，Seedance）记录
+ *   （见 generation/arkImageProvider.ts 与 generation/arkVideoProvider.ts）。
  *
  * 用户自配的端点走**另一块自己的面板**：「OpenAI 通道」（多通道 + 每条通道勾模型，
  * 见 host/canvas/cloudChannelsRouter.ts 与 canvas-ui/canvas/CloudChannelPanel.ts）。
@@ -56,6 +57,13 @@ import {
   type ArkCatalogEntry,
 } from '../generation/arkImageProvider';
 import {
+  arkVideoEntries,
+  arkVideoPriceFor,
+  isArkVideoModel,
+  readArkVideoConfig,
+  type ArkVideoEntry,
+} from '../generation/arkVideoProvider';
+import {
   channelModelEntries,
   readCloudChannels,
   type CloudChannel,
@@ -67,12 +75,15 @@ export interface SourceSettingsDeps {
 
 /** 能从界面改、且真的会改行为的键。 */
 export const SETTINGS_KEY_WHITELIST: readonly string[] = Object.freeze([
-  // 火山方舟（豆包）直连
+  // 火山方舟（豆包）直连 —— 图片（Seedream）与视频（Seedance）共用同一个 Key / 域名
   'ARK_API_KEY',
   'ARK_BASE_URL',
   'ARK_IMAGE_PATH',
   'ARK_TIMEOUT_MS',
   'ARK_WATERMARK',
+  // 视频任务接口（异步任务：提交 → 轮询）
+  'ARK_VIDEO_PATH',
+  'ARK_VIDEO_TIMEOUT_MS',
 ]);
 
 /** 每个模型一条的「自定义模型 ID」键：`MODEL_ID_CUSTOM_<码点十六进制>`（与 vendor 同形）。 */
@@ -180,12 +191,18 @@ function catalogOf(kind: 'image' | 'video' | 'text' | 'audio'): CatalogModel[] {
 /**
  * 「火山方舟（豆包）直连」卡片。
  *
- * 只列画布目录里那几条方舟图片模型 —— 它们的 `endpoint[...].model` 就是方舟模型 ID，
- * host 半的 arkImageProvider 按同一份目录翻译请求，所以这里不做第二份模型表。
+ * 只列画布目录里那几条方舟模型 —— 它们的 `endpoint[...].model` 就是方舟模型 ID，
+ * host 半的 arkImageProvider / arkVideoProvider 按同一份目录翻译请求，所以这里不做第二份模型表。
+ *
+ * 图片（Seedream）与视频（Seedance）共用同一把 ARK_API_KEY，所以是**一张卡片、两种媒体**：
+ * 视频那条 `configured` 同样看 Key —— 画布 agent 的 prepareGeneration 就是靠这份 blocks
+ * 判断「这个模型能不能生成」的。
  */
 function arkBlock(env: NodeJS.ProcessEnv) {
   const config = readArkConfig(env);
+  const videoConfig = readArkVideoConfig(env);
   const configured = Boolean(config.apiKey);
+  const videoConfigured = Boolean(videoConfig.apiKey);
   const models = arkImageEntries().map((entry) => {
     const override = (env[modelOverrideKey(entry.name)] ?? '').trim();
     const defaultModelId =
@@ -201,12 +218,30 @@ function arkBlock(env: NodeJS.ProcessEnv) {
       configured,
     };
   });
+  const videoModels = arkVideoEntries().map((entry) => {
+    const override = (env[modelOverrideKey(entry.name)] ?? '').trim();
+    const defaultModelId =
+      entry.endpoint?.['text-to-video']?.model ?? entry.endpoint?.['multimodal']?.model ?? '';
+    return {
+      name: entry.name,
+      vision: 'unknown',
+      ...(override ? { customModelId: override } : {}),
+      ...(defaultModelId ? { modelIds: [defaultModelId] } : {}),
+      tier: 'standard',
+      variantLabel: '视频',
+      requiredSecrets: ['ARK_API_KEY'],
+      configured: videoConfigured,
+    };
+  });
   return {
     source: 'ark',
     label: '火山方舟（豆包直连）',
     singleKey: true,
     secrets: [{ key: 'ARK_API_KEY', configured }],
-    media: [{ kind: 'image', models }],
+    media: [
+      { kind: 'image', models },
+      { kind: 'video', models: videoModels },
+    ],
   };
 }
 
@@ -230,7 +265,13 @@ function arkBlock(env: NodeJS.ProcessEnv) {
  */
 function modelGroups(
   env: NodeJS.ProcessEnv,
-  query: { resolution?: string | null; aspectRatio?: string | null; mode?: string | null } = {},
+  query: {
+    resolution?: string | null;
+    aspectRatio?: string | null;
+    mode?: string | null;
+    duration?: number | null;
+    generateAudio?: boolean | null;
+  } = {},
   channels: readonly CloudChannel[] = [],
 ) {
   const arkReady = Boolean(readArkConfig(env).apiKey);
@@ -297,6 +338,46 @@ function modelGroups(
       priceNote: estimate?.note ?? '价格以方舟账单为准。',
       priceExact: false,
       configured: arkReady,
+      requiredSecrets: ['ARK_API_KEY'],
+    });
+    groups.set(canonical, group);
+  }
+
+  // ①b 火山方舟直连的**视频**模型（Seedance，异步任务接口）
+  //
+  // 与图片同一条原则：模型名逐字取目录，host 的 arkVideoProvider 按同一份目录翻译请求。
+  // 价格是**元/秒**（目录里上游记的分档价）—— 画布的视频 composer 会自己乘时长与数量，
+  // 所以这里给单价、并在 priceLabel 上写明「/秒」，免得二级下拉把它读成整条片子的价。
+  const arkVideoReady = Boolean(readArkVideoConfig(env).apiKey);
+  for (const model of catalogOf('video')) {
+    const name = typeof model.name === 'string' ? model.name : '';
+    if (!name || !isArkVideoModel(name)) continue;
+    const canonical = (typeof model.canonicalModel === 'string' && model.canonicalModel) || name;
+    const group = groups.get(canonical) ?? {
+      canonicalModel: canonical,
+      brand: '火山方舟',
+      capabilities: capsByName.get(name) ?? [],
+      available: arkVideoReady,
+      variants: [] as Record<string, unknown>[],
+    };
+    if (arkVideoReady) group.available = true;
+    const estimate = arkVideoPriceFor(model as unknown as ArkVideoEntry, {
+      resolution: query.resolution,
+      duration: query.duration,
+    });
+    (group.variants as Record<string, unknown>[]).push({
+      name,
+      source: 'ark',
+      sourceLabel: '火山方舟',
+      variantLabel:
+        typeof model.variantLabel === 'string' && model.variantLabel ? model.variantLabel : '视频',
+      tier: typeof model.tier === 'string' && model.tier ? model.tier : 'standard',
+      premium: model.premium === true,
+      price: estimate.price,
+      priceLabel: estimate.price === null ? null : `≈¥${estimate.price}/秒`,
+      priceNote: estimate.note,
+      priceExact: false,
+      configured: arkVideoReady,
       requiredSecrets: ['ARK_API_KEY'],
     });
     groups.set(canonical, group);
@@ -505,8 +586,10 @@ export async function handleSourceSettingsApi(input: {
       return true;
     }
     // 纯内存合成：前端这条的超时只有 2 秒。
-    // 画布会把当前选的档位/宽高比/模式带过来，方舟的单价预估要用它们（见 modelGroups）。
+    // 画布会把当前选的档位/宽高比/模式/时长带过来，方舟的单价预估要用它们（见 modelGroups）。
     // 自配通道表要读一次磁盘（小文件），所以放在这条 await 里。
+    const rawDuration = Number(url.searchParams.get('duration'));
+    const rawGenerateAudio = url.searchParams.get('generateAudio');
     sendJson(res, 200, {
       groups: modelGroups(
         process.env,
@@ -514,6 +597,9 @@ export async function handleSourceSettingsApi(input: {
           resolution: url.searchParams.get('resolution'),
           aspectRatio: url.searchParams.get('aspectRatio'),
           mode: url.searchParams.get('mode'),
+          duration: Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : null,
+          generateAudio:
+            rawGenerateAudio === null ? null : rawGenerateAudio === 'true',
         },
         await readCloudChannels(deps.dataDir),
       ),

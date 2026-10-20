@@ -316,9 +316,38 @@ const batchSession = 'sess-batch';
   );
 
   const before = host.chat.prompts.filter((item) => item.sessionId === sessionId).length;
-  await failGeneration(host, nodeId);
+
+  // ---- v1.58：确认入口必须真的在页面上（真机曾断在这一步：面板被压掉，没有地方能点确认）
+  const card = window.document.querySelector('[data-fisherai-generation-batches="true"]');
+  check(
+    '画布右下角出现「生成批次」确认卡（DSH 里唯一的确认入口）',
+    Boolean(card) && String(card.textContent).includes('确认本批生成与费用'),
+    String(card?.textContent ?? '(没有卡片)').slice(0, 160),
+  );
+  check(
+    '确认卡列出的就是要生成的那个节点',
+    Boolean(card) && String(card.textContent).includes('镜头A'),
+    String(card?.textContent ?? '').slice(0, 160),
+  );
+  const planId = String(prepared.result?.generationPlanId ?? '');
+  const approveButton = card?.querySelector('[data-fisherai-generation-approve]');
+  check(
+    '确认按钮绑在这批上（data-fisherai-generation-approve=批次 id）',
+    Boolean(approveButton) && approveButton.getAttribute('data-fisherai-generation-approve') === planId,
+    String(approveButton?.getAttribute('data-fisherai-generation-approve')),
+  );
+
+  // 真点一次「确认本批生成与费用」：批次必须真的被 claim（= 提交了生成），而不是只画个样子
+  approveButton?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const claimed = await waitFor(async () => {
+    const list = (await host.hostApi('GET', `/agent/plans?projectId=${canvasProject}`)).json();
+    return list.find((item) => item.id === planId)?.state === 'running';
+  }, 8000);
+  check('点确认 → 批次进入 running（真的提交了生成）', claimed, `plan=${planId}`);
+
   const delivered = await waitFor(
     () => host.chat.prompts.filter((item) => item.sessionId === sessionId).length === before + 1,
+    20000,
   );
   const prompts = host.chat.prompts.filter((item) => item.sessionId === sessionId);
   const text = String(prompts[prompts.length - 1]?.content?.[0]?.text ?? '');

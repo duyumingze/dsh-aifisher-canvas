@@ -61,6 +61,33 @@ export function reportCanvasInfo(message: string, detail?: ReportDetail): void {
   post('info', message, detail);
 }
 
+/**
+ * 图片加载失败留痕（2026-10-20）。
+ *
+ * 云端生成的回执里可能是服务商的**临时链接**（host 侧落盘失败时的回落，见
+ * `src/host/generation/cloudResult.ts`）。那种链接过一阵就 404，画布节点变成一块黑：
+ * JS 不报错、控制台干干净净，只有一条资源加载失败事件 —— 用户只能说「图没了」。
+ * 这里在捕获阶段收下它（img 的 error 不冒泡），报进 /diagnostics，
+ * 「节点状态成功但没图」才能和「临时链接过期」对上号。
+ */
+export function installImageLoadTelemetry(): () => void {
+  const reported = new Set<string>();
+  const onError = (event: Event) => {
+    const target = event.target as HTMLImageElement | null;
+    if (!target || target.tagName !== 'IMG') return;
+    const src = target.currentSrc || target.src || '';
+    if (!src || reported.has(src)) return;
+    reported.add(src);
+    reportCanvasWarning('画布图片加载失败（链接可能已失效）', {
+      url: src.slice(0, 500),
+      alt: target.alt,
+      remote: /^https?:/i.test(src),
+    });
+  };
+  window.addEventListener('error', onError, true);
+  return () => window.removeEventListener('error', onError, true);
+}
+
 /** 安装全局错误钩子（幂等）。 */
 export function installCanvasDiagnostics(): () => void {
   if (installed) return () => {};

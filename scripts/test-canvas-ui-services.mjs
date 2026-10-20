@@ -399,11 +399,11 @@ host = await startHost();
     arkCard?.secrets?.every((secret) => secret.configured === false),
   );
   check(
-    '方舟卡片带图片模型清单',
+    '方舟卡片带图片 + 视频两组模型清单（v1.60 起视频也走方舟直连）',
     Array.isArray(arkCard?.media) &&
-      arkCard.media.length === 1 &&
-      arkCard.media[0].kind === 'image' &&
-      Array.isArray(arkCard.media[0].models),
+      arkCard.media.length === 2 &&
+      arkCard.media.some((entry) => entry.kind === 'image' && Array.isArray(entry.models)) &&
+      arkCard.media.some((entry) => entry.kind === 'video' && Array.isArray(entry.models)),
     arkCard?.media?.map((entry) => `${entry.kind}:${entry.models.length}`).join(' '),
   );
 

@@ -225,6 +225,24 @@ export function CanvasImagePreview(
                 src={node.resultUrl}
                 key={node.resultUrl}
                 onLoad={metadata}
+                onError={(event) => {
+                  // dsh-aifisher-canvas：结果链接失效（云端临时的图床链接过期 / 没落盘）时，
+                  // 不要只留一块黑。提示放在同一个媒体底板里，不新增 DOM 层级。
+                  const img = event.currentTarget;
+                  const host = img.parentElement as HTMLElement | null;
+                  if (!host) return;
+                  img.style.opacity = '0';
+                  if (host.querySelector('[data-af-image-missing]')) return;
+                  const tip = document.createElement('div');
+                  tip.setAttribute('data-af-image-missing', '1');
+                  tip.textContent = '图片链接已失效\n云端临时链接过期后不再可读，重新生成即可恢复';
+                  tip.style.cssText =
+                    'position:absolute;inset:0;display:flex;align-items:center;justify-content:center;' +
+                    'padding:16px;text-align:center;white-space:pre-line;' +
+                    'font:12px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;' +
+                    'color:#e2e8f0;background:rgba(0,0,0,.45)';
+                  host.appendChild(tip);
+                }}
                 alt={'生成结果'}
                 className={'w-full h-full object-cover pointer-events-none'}
               />

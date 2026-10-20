@@ -38,6 +38,7 @@ import { workflowCoversStatus } from '../comfyui/workflowCovers';
 import type { GenerationJournal } from '../comfyui/generationJournal';
 import { channelDiagnostics, readCloudChannels } from '../generation/cloudChannels';
 import { handleAgentChatApi, type AgentChatDeps } from './agentChatRouter';
+import { handleCopilotApi, type CopilotApiDeps } from './copilotRouter';
 import type { ComfyClient } from '../comfyui/comfyClient';
 import {
   CLOUD_REQUEST_LIMIT_BYTES,
@@ -46,6 +47,7 @@ import {
   handleCloudGeneration,
 } from '../generation/cloudGenerationRouter';
 import { arkImageStatus } from '../generation/arkImageProvider';
+import { arkVideoStatus } from '../generation/arkVideoProvider';
 import type { MediaStore } from './mediaStore';
 import type { ComfyDelegate } from '../comfyui/comfyRouter';
 
@@ -92,6 +94,11 @@ export interface CanvasApiExtras {
    * 生成批次记录（v1.57）：画布 prepareGeneration 落库要它，`/status` 里也报一份计数。
    */
   plans?: GenerationPlans;
+  /**
+   * 画布助手 P1（v1.59）：项目记忆 / 主动副驾 / 长任务。
+   * 缺省时 `/memory`、`/copilot`、`/jobs` 全都落到 NOT_PORTED（老装配/单测兼容）。
+   */
+  copilot?: Omit<CopilotApiDeps, 'store'>;
 }
 
 function segment(pathname: string): string[] {
@@ -145,6 +152,8 @@ export async function handleCanvasApi(
       cloud: await cloudGenerationStatus(dirname(store.filePath)),
       // 火山方舟（豆包）直连：图片模型的 API Key / 端点 / 目录里的模型 ID
       ark: arkImageStatus(),
+      // 火山方舟视频（Seedance）：同一个 Key，另走异步任务接口（提交 → 轮询 → 落盘）
+      arkVideo: arkVideoStatus(),
       // 画布外观背景图 / 媒体下载 / 闭源服务 / 提示词（v1.1 补的四块）
       appearance: await appearanceStatus(dirname(store.filePath)),
       downloads: await mediaDownloadStatus(dirname(store.filePath)),
@@ -165,6 +174,9 @@ export async function handleCanvasApi(
       events: extras.events ? extras.events.stats() : null,
       // 生成批次记录（v1.57）：prepareGeneration 的落库与状态（pending 一直不动 = 用户还没确认）
       plans: extras.plans ? extras.plans.stats() : null,
+      // 画布助手 P1（v1.59）：项目记忆条数 / 长任务计数 / 锚点（记忆没生效时先看这里）
+      memory: extras.copilot ? extras.copilot.memory.stats() : null,
+      jobs: extras.copilot ? extras.copilot.jobs.stats() : null,
       // 工作流配图（v1.28）：左侧「工作流节点」面板里每张卡片的封面图
       workflowCovers: workflowCoversStatus(),
     });
@@ -211,9 +223,32 @@ export async function handleCanvasApi(
     return;
   }
 
-  // ---- 生成任务队列（v1.24，画布右侧那块面板）----
-  // 数据源是生成任务日记（本地 ComfyUI + 云端两条链路都写它），见 canvas/taskQueueRouter.ts。
-  // 日记没接上（老装配 / 单测里没给）时明确回 503，面板会显示「任务队列不可用」。
+  // ---- 画布助手 P1（v1.59）：项目记忆 / 参考锚点 / 主动副驾 / 长任务 ----
+  // 放在最前面几段里（不依赖 mediaStore / comfy）：纯 JSON 数据 + 进程内状态。
+  if (extras.copilot) {
+    try {
+      if (
+        await handleCopilotApi({
+          req,
+          res,
+          url,
+          parts,
+          deps: { store, ...extras.copilot },
+        })
+      )
+        return;
+    } catch (error) {
+      if (!res.headersSent) {
+        sendJson(res, 500, {
+          error: error instanceof Error ? error.message : '画布助手数据处理失败',
+          code: 'COPILOT_ROUTE_FAILED',
+        });
+      }
+      return;
+    }
+  }
+
+  // ---- 生成任务队列（v1.24）：任务队列面板读的日记 ----
   if (parts[0] === 'tasks') {
     if (!extras.tasks) {
       sendJson(res, 503, { error: '生成任务日记未就绪。', code: 'TASKS_UNAVAILABLE' });

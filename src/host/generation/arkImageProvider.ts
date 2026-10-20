@@ -768,7 +768,7 @@ export function collectArkResults(body: unknown): ArkResultItem[] {
 // 路由
 // ---------------------------------------------------------------------------
 
-function arkErrorMessage(parsed: unknown, raw: string, status: number): { message: string; code?: string } {
+export function arkErrorMessage(parsed: unknown, raw: string, status: number): { message: string; code?: string } {
   if (isObject(parsed) && isObject(parsed.error)) {
     const message = typeof parsed.error.message === 'string' ? parsed.error.message : '';
     const code = typeof parsed.error.code === 'string' ? parsed.error.code : undefined;
@@ -782,7 +782,7 @@ function arkErrorMessage(parsed: unknown, raw: string, status: number): { messag
 }
 
 /** 401/403/404/429 这些「配错了」的情况给出可操作的下一步，而不是光回一句上游报错。 */
-function arkHint(status: number, code: string | undefined, modelId: string): string | undefined {
+export function arkHint(status: number, code: string | undefined, modelId: string): string | undefined {
   const text = `${code ?? ''}`.toLowerCase();
   if (status === 401 || status === 403 || text.includes('authentication') || text.includes('accessdenied')) {
     return '方舟鉴权失败：请核对 API Key（设置 → 闭源服务 → 火山方舟，或环境变量 ARK_API_KEY）。';

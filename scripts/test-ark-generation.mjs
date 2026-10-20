@@ -183,10 +183,18 @@ console.log('\n=== 设置页 / 诊断：方舟卡片与目录 ===');
   check('方舟卡片是单密钥 + ARK_API_KEY + 图片模型', ark?.singleKey === true && ark?.secrets?.[0]?.key === 'ARK_API_KEY' && ark?.media?.[0]?.kind === 'image');
   check('已配 Key → 卡片密钥 configured:true', ark?.secrets?.[0]?.configured === true);
   check(
-    '这张卡片只列方舟直连的图片模型（别的目录模型不来冒名）',
+    '这张卡片的 image 一组只列方舟直连的图片模型（别的目录模型不来冒名）',
     (ark?.media ?? [])
+      .filter((m) => m.kind === 'image')
       .flatMap((m) => m.models ?? [])
       .every((m) => [MODEL_5_PRO, MODEL_5_LITE, MODEL_4_5, '豆包图片4.0(多参考)'].includes(m.name)),
+  );
+  check(
+    '同一张卡片的 video 一组只列方舟直连的视频模型（Seedance，v1.60）',
+    (ark?.media ?? [])
+      .filter((m) => m.kind === 'video')
+      .flatMap((m) => m.models ?? [])
+      .every((m) => ['豆包视频2.0', '豆包视频2.0 fast'].includes(m.name)),
   );
 
   const availability = await host.hostApi('GET', '/generation/model-availability');

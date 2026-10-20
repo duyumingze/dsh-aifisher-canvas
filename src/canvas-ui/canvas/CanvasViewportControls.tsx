@@ -26,6 +26,8 @@ import { Slider } from '@/ui/slider';
 import { Switch } from '@/ui/switch';
 import { cn } from '@/lib/utils';
 import { CanvasNodeSearch } from './CanvasNodeSearch';
+import { CanvasStoryboard } from './CanvasStoryboard';
+import { CanvasCopilot } from './CanvasCopilot';
 import { CanvasProjectArchive } from './CanvasProjectArchivePanel';
 import { CanvasTaskQueue } from './CanvasTaskQueue';
 import { CanvasWorkflowLibrary } from './CanvasWorkflowLibrary';
@@ -160,6 +162,29 @@ const ProjectArchiveBound: ReactTypes.ComponentType<{ view: string; projectId?: 
   props,
 ) => CanvasProjectArchive(reactRuntime, props);
 ProjectArchiveBound.displayName = 'CanvasProjectArchiveBound';
+
+/**
+ * 「分镜板」与「主动副驾」（v1.59，P1 第五/第四项）。
+ *
+ * 挂在这里的唯一原因：Controls 槽位同时拿到 nodes / viewport / projectId / documentEpoch
+ * —— 分镜板要按节点顺序列缩略图并聚焦，副驾要按 projectId 拉建议。组件类型必须模块级稳定
+ * （否则每次 Controls 重渲染都重挂载，播放状态与吸附状态会被清掉，见上面那段踩坑注释）。
+ */
+const StoryboardBound: ReactTypes.ComponentType<{
+  view: string;
+  nodes: MinimapNode[];
+  selectedNodeIds: string[];
+  documentEpoch?: number;
+  onFocusFallback?(nodeIds: string[]): void;
+}> = (props) => CanvasStoryboard(reactRuntime, props);
+StoryboardBound.displayName = 'CanvasStoryboardBound';
+
+const CopilotBound: ReactTypes.ComponentType<{
+  view: string;
+  projectId?: string;
+  documentEpoch?: number;
+}> = (props) => CanvasCopilot(reactRuntime, props);
+CopilotBound.displayName = 'CanvasCopilotBound';
 
 export function CanvasViewportControls(
   react: Runtime,
@@ -468,6 +493,34 @@ export function CanvasViewportControls(
         })
       : null;
 
+  /**
+   * 分镜板（v1.59）：缩略图带 + 播放。只认顺序，不碰节点数据。
+   * 聚焦兜底走 onResetCanvas（vendor 没挂全局入口时也能用）。
+   */
+  const storyboard =
+    view === 'canvas'
+      ? react.createElement(StoryboardBound, {
+          key: 'storyboard',
+          view,
+          nodes,
+          selectedNodeIds,
+          documentEpoch,
+          onFocusFallback: (nodeIds: string[]) =>
+            onResetCanvas(nodes.filter((node) => nodeIds.includes(String(node.id)))),
+        })
+      : null;
+
+  /** 主动副驾（v1.59）：没建议时什么都不渲染（低打扰）；可关。 */
+  const copilot =
+    view === 'canvas'
+      ? react.createElement(CopilotBound, {
+          key: 'copilot',
+          view,
+          projectId,
+          documentEpoch,
+        })
+      : null;
+
   return h(
     react.Fragment,
     null,
@@ -490,6 +543,8 @@ export function CanvasViewportControls(
     taskQueue,
     workflowLibrary,
     projectArchive,
+    storyboard,
+    copilot,
   );
 }
 
