@@ -41,6 +41,10 @@ import { buildShotListRecipe } from './canvas/recipe';
 import { collectPreviewFiles } from './canvas/preview';
 import { summarizeCanvasRead } from './canvas/readSummary';
 import { createProjectMemory, type ProjectMemoryBlock } from './canvas/projectMemory';
+import { createAssetLibrary } from './canvas/assetLibrary';
+import { compileIntent } from './canvas/intent';
+import { planPromptFixes, reviewCanvas } from './canvas/review';
+import { planCrew, receiveCrew } from './canvas/crew';
 import { createCanvasJobs } from './canvas/canvasJob';
 import { createCanvasNoticeQueue } from './canvas/noticeQueue';
 import {
@@ -515,6 +519,8 @@ export function apply(ctx: Context) {
   // ------------------------------------------------------------
   // 项目记忆：<数据目录>/canvas-memory.json（文本条目 + 参考锚点）
   const projectMemory = createProjectMemory({ filePath: join(dataDir, 'canvas-memory.json') });
+  // 资产库（v1.63）：<数据目录>/canvas-assets.json（角色/场景/道具/画风的锁定串 + 定妆节点）
+  const assetLibrary = createAssetLibrary({ filePath: join(dataDir, 'canvas-assets.json') });
   // 长任务通知：推不进会话就留着，下一回合由 pre-step 补给（与生成事件同一套护栏）
   const canvasNotices = createCanvasNoticeQueue({ ctx });
   /**
@@ -569,6 +575,7 @@ export function apply(ctx: Context) {
         memory: projectMemory,
         jobs: canvasJobs,
         plans: generationPlans,
+        assets: assetLibrary,
         /**
          * 副驾/锚点优先读**活画布**的节点（刚建、刚连的节点也在），拿不到再退回磁盘文档。
          *
@@ -647,6 +654,11 @@ export function apply(ctx: Context) {
         'Consistency (v1.59): action:"consistency" op:"status"|"lock"|"unlock" wires the project’s reference anchors (character sheet / style refs) into shot nodes as upstream inputs — the canvas then uses them as reference images; no new protocol. ' +
         'Copilot (v1.59): action:"copilot" returns actionable suggestions (failed nodes, missing prompts, unlocked shots, empty memory). ' +
         'Long task (v1.59): action:"job" op:"create" runs a deterministic pipeline (read → shot-list → lock anchors → prepareGeneration → await approval/result → auto-retry failed nodes → summary) and returns immediately with a job snapshot; the user still confirms every batch. ' +
+        'Intent compiler (v1.63): action:"intent" {op:"compile"|"apply", brief, shots?, type?, aspectRatio?, duration?, model?, style?} turns a natural-language brief into a deterministic shot list (style + asset lock strings woven into every prompt, fixed quality/limit clauses appended); op:"apply" expands it into nodes in ONE call; human approval still gates generation. Prefer it over hand-writing shots when the user says 「一句话做短片」. ' +
+        'Quality review (v1.63): action:"review" {op:"scan"} checks prompts (missing light/quality/limits, length), anchor coverage, and result files (format/pixel size/bytes via file header) and returns summary.retry — it does NOT score aesthetics; use preview + read_image for that. {op:"fix", apply:true} appends the missing fixed clauses (never rewrites the original text). ' +
+        'Assets (v1.63): action:"assetlibrary" list/add/update/remove/link/import/use keeps per-project character/scene/prop/style cards with a verbatim lock string; op:"use" registers a card’s node as a reference anchor and locks it onto shots. intent weaves these lock strings automatically. ' +
+        'Multi-agent (v1.63): action:"crew" {op:"plan", brief, shots?} returns assignments (role, task, deliverable JSON schema, boundary, compact context) that you can hand to DSH subagents; {op:"receive", role, deliverable, apply?} validates and normalizes their shots/locks — subagents never get canvas approve rights. ' +
+        'job also accepts brief (v1.63): {op:"create", brief:"…", shotsCount?} runs the intent compiler first, so 「一句话做完整短片」 is one call; explicit shots still win. ' +
         'Full contract and error codes: docs/canvas-agent-contract.md.',
       parameters: {
         action: {
@@ -659,6 +671,7 @@ export function apply(ctx: Context) {
             'media', 'workflow', 'product',
             'skills', 'skillLoad', 'recipe', 'preview',
             'memory', 'consistency', 'copilot', 'job',
+            'intent', 'review', 'assetlibrary', 'crew',
           ],
         },
         /** edit/undo 必须带上一轮 read 返回的 revision（乐观并发令牌）。 */
@@ -705,6 +718,34 @@ export function apply(ctx: Context) {
          *   | { op:"list" } | { op:"status", id } | { op:"cancel", id }
          */
         job: { type: 'object', additionalProperties: true },
+        /**
+         * 意图编译器（action:"intent"，v1.63）：
+         *   { op:"compile"|"apply", brief, shots?, type?, aspectRatio?, duration?, model?,
+         *     style?, includeLocks?, qualityAnchor?, limitClause?, columns?, anchorId? }
+         * 确定性把一句话意图编译成 shots（风格/锁定串来自项目记忆与资产库），
+         * op:"apply" 会直接展开成节点。
+         */
+        intent: { type: 'object', additionalProperties: true },
+        /**
+         * 质量评估（action:"review"，v1.63）：
+         *   { op:"scan"|"fix", apply? }
+         * scan 只读：提示词结构、锚点覆盖、结果文件（格式/尺寸/大小）、失败归因；
+         * fix 给追加式修补计划，apply:true 才写回画布。不做主观画质打分。
+         */
+        review: { type: 'object', additionalProperties: true },
+        /**
+         * 资产库（action:"assetlibrary"，v1.63）：
+         *   { op:"list" } | { op:"add"|"update", kind:"character"|"scene"|"prop"|"style", name, prompt, tags?, nodeId? }
+         *   | { op:"remove", id } | { op:"link", id, nodeId } | { op:"import", locks:[…] }
+         *   | { op:"use", id }（把已挂节点的资产登记为锚点并锁到镜头，nodeIds 可限定）
+         */
+        assetlibrary: { type: 'object', additionalProperties: true },
+        /**
+         * 多 agent 协作（action:"crew"，v1.63）：
+         *   { op:"plan", brief, shots?, roles? } → 可直接派给 DSH 子代理的任务包
+         *   { op:"receive", role, deliverable:{shots?/locks?/verdicts?}, apply?, importLocks? }
+         */
+        crew: { type: 'object', additionalProperties: true },
         /**
          * 逃生舱：直接给一条完整画布指令（canvasControlProtocol 的 CanvasControl），
          * 用于那些参数较多、暂时没有单独暴露的动作（prepareGeneration/media/workflow…）。
@@ -778,6 +819,80 @@ export function apply(ctx: Context) {
         /** 改完画布内容后要追加落盘的动作（这些动作会改 nodes/groups）。 */
         const SAVE_AFTER_ACTIONS = new Set(['edit', 'undo', 'recipe', 'media', 'workflow', 'importAsset']);
 
+        /**
+         * shot-list 展开（v1.55；v1.63 抽成可复用）：
+         * 读 revision → recipe 纯函数 → 一条普通 edit → 落盘 → 带回快照。
+         * 被 action:"recipe"、intent 的 op:"apply"、crew receive 的 apply 共用。
+         */
+        const expandShotList = async (
+          recipeInput: unknown,
+          targetSessionId: string | undefined,
+        ): Promise<
+          | { ok: true; response: Record<string, unknown> }
+          | { ok: false; code: string; message: string; response?: Record<string, unknown> }
+        > => {
+          try {
+            const readResult = (await bridge.request({ action: 'read' }, { sessionId: targetSessionId })) as {
+              revision?: unknown;
+              nodes?: unknown;
+            } | null;
+            const revision = readResult?.revision;
+            if (typeof revision !== 'string' || !revision) {
+              return {
+                ok: false,
+                code: 'NEED_REVISION',
+                message: '画布没有返回 revision，无法展开 recipe。',
+              };
+            }
+            const nodes = Array.isArray(readResult?.nodes) ? readResult.nodes : [];
+            const planned = buildShotListRecipe(recipeInput, nodes);
+            if ('error' in planned) {
+              return { ok: false, code: 'INVALID', message: planned.error };
+            }
+            const editResult = (await bridge.request(
+              { action: 'edit', revision, operations: planned.operations },
+              { sessionId: targetSessionId },
+            )) as Record<string, ToolJson> | null;
+            if (editResult && editResult.ok === false) {
+              return {
+                ok: false,
+                code: typeof editResult.code === 'string' ? editResult.code : 'CANVAS_REJECTED',
+                message: `画布拒绝了这次操作：${String(editResult.code ?? 'CANVAS_REJECTED')}。`,
+                response: editResult as Record<string, unknown>,
+              };
+            }
+            const response: Record<string, unknown> = {
+              ...(editResult ?? {}),
+              recipe: {
+                name: 'shot-list',
+                shots: planned.count,
+                placed: planned.placed as unknown as ToolJson,
+                anchorFound: planned.anchorFound,
+              },
+            };
+            // 与 edit 分支同一条纪律：展开完立刻落盘，别等画布那 1.2s 防抖。
+            const savePromise = flushCanvasSave(targetSessionId, editResult?.revision);
+            try {
+              const snapshot = (await bridge.request({ action: 'read' }, { sessionId: targetSessionId })) as unknown;
+              if (snapshot && typeof snapshot === 'object') {
+                response.snapshot = summarizeCanvasRead(snapshot, { maxTextChars: 160 }) as unknown as ToolJson;
+              }
+            } catch {
+              /* 快照失败不影响 recipe 结果 */
+            }
+            const saved = await savePromise;
+            if (saved) response.saved = saved;
+            return { ok: true, response };
+          } catch (error) {
+            const code = (error as { code?: string }).code ?? 'CANVAS_BRIDGE_FAILED';
+            return {
+              ok: false,
+              code,
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+        };
+
         // skills: 列出 DSH 当前已装技能（与画布 UI 调 /api/aifisher/skills 同源）
         if (args.action === 'skills') {
           try {
@@ -838,77 +953,25 @@ export function apply(ctx: Context) {
         // recipe：一次调用把结构化镜头列表展开成节点（host 端确定性排布）
         // ----------------------------------------------------------
         if (args.action === 'recipe') {
-          try {
-            const readResult = (await bridge.request({ action: 'read' }, { sessionId })) as {
-              revision?: unknown;
-              nodes?: unknown;
-            } | null;
-            const revision = readResult?.revision;
-            if (typeof revision !== 'string' || !revision) {
-              return {
-                ok: false,
-                code: 'NEED_REVISION',
-                action: 'recipe',
-                message: '画布没有返回 revision，无法展开 recipe。',
-              };
-            }
-            const nodes = Array.isArray(readResult?.nodes) ? readResult.nodes : [];
-            const planned = buildShotListRecipe((args as { recipe?: unknown }).recipe, nodes);
-            if ('error' in planned) {
-              return { ok: false, code: 'INVALID', action: 'recipe', message: planned.error };
-            }
-            const editResult = (await bridge.request(
-              { action: 'edit', revision, operations: planned.operations },
-              { sessionId },
-            )) as Record<string, ToolJson> | null;
-            if (editResult && editResult.ok === false) {
-              return {
-                ok: false,
-                code: typeof editResult.code === 'string' ? editResult.code : 'CANVAS_REJECTED',
-                action: 'recipe',
-                message: `画布拒绝了这次操作：${String(editResult.code ?? 'CANVAS_REJECTED')}。`,
-                result: editResult,
-              };
-            }
-            const response: Record<string, ToolJson> = {
-              ...(editResult ?? {}),
-              recipe: {
-                name: 'shot-list',
-                shots: planned.count,
-                placed: planned.placed as unknown as ToolJson,
-                anchorFound: planned.anchorFound,
-              },
-            };
-            // 与 edit 分支同一条纪律：展开完立刻落盘，别等画布那 1.2s 防抖。
-            const savePromise = flushCanvasSave(sessionId, editResult?.revision);
-            try {
-              const snapshot = (await bridge.request({ action: 'read' }, { sessionId })) as unknown;
-              if (snapshot && typeof snapshot === 'object') {
-                response.snapshot = summarizeCanvasRead(snapshot, { maxTextChars: 160 }) as unknown as ToolJson;
-              }
-            } catch {
-              /* 快照失败不影响 recipe 结果 */
-            }
-            const saved = await savePromise;
-            if (saved) response.saved = saved;
-            if (sessionId) {
-              chatHub.noteCanvasAction(sessionId, {
-                action: 'recipe',
-                ok: true,
-                ...(typeof editResult?.operationId === 'string'
-                  ? { operationId: editResult.operationId }
-                  : {}),
-              });
-            }
-            return { ok: true, action: 'recipe', result: response };
-          } catch (error) {
-            const code = (error as { code?: string }).code ?? 'CANVAS_BRIDGE_FAILED';
+          const expansion = await expandShotList((args as { recipe?: unknown }).recipe, sessionId);
+          if (!expansion.ok) {
             return {
               ok: false,
-              code,
-              message: error instanceof Error ? error.message : String(error),
+              code: expansion.code,
+              action: 'recipe',
+              message: expansion.message,
+              ...(expansion.response ? { result: expansion.response as unknown as ToolJson } : {}),
             };
           }
+          const response = expansion.response;
+          if (sessionId) {
+            chatHub.noteCanvasAction(sessionId, {
+              action: 'recipe',
+              ok: true,
+              ...(typeof response.operationId === 'string' ? { operationId: response.operationId } : {}),
+            });
+          }
+          return { ok: true, action: 'recipe', result: response as unknown as ToolJson };
         }
 
         // ----------------------------------------------------------
@@ -1246,7 +1309,41 @@ export function apply(ctx: Context) {
           const input = ((args as { job?: unknown }).job ?? {}) as Record<string, unknown>;
           const op = typeof input.op === 'string' ? input.op : 'create';
           if (op === 'create') {
-            const created = canvasJobs.create(input, {
+            /**
+             * v1.63：job 也可以直接吃 brief —— 用意图编译器把「一句话做完整短片」
+             * 变成 shots，模型不必先自己编一遍镜头清单（硬指标：6 镜 ≤3 轮）。
+             * 显式给 shots 时优先用 shots，编译只作为缺省。
+             */
+            let jobInput = input;
+            if (!Array.isArray(input.shots) && typeof input.brief === 'string' && input.brief.trim()) {
+              const projectId = activeProjectId();
+              const memory = projectId ? projectMemory.get(projectId) : null;
+              const compiled = compileIntent(
+                {
+                  brief: input.brief,
+                  ...(input.shotsCount !== undefined ? { shots: input.shotsCount } : {}),
+                  ...(input.type !== undefined ? { type: input.type } : {}),
+                  ...(input.aspectRatio !== undefined ? { aspectRatio: input.aspectRatio } : {}),
+                  ...(input.duration !== undefined ? { duration: input.duration } : {}),
+                  ...(input.model !== undefined ? { model: input.model } : {}),
+                  ...(input.style !== undefined ? { style: input.style } : {}),
+                },
+                {
+                  style: memory?.entries.filter((entry) => entry.kind === 'style').map((entry) => entry.text),
+                  characters: memory?.entries
+                    .filter((entry) => entry.kind === 'character')
+                    .map((entry) => entry.text),
+                  rules: memory?.entries.filter((entry) => entry.kind === 'rule').map((entry) => entry.text),
+                  locks: projectId ? assetLibrary.locksFor(projectId) : [],
+                },
+              );
+              if ('error' in compiled) {
+                return { ok: false, code: 'INVALID', action: 'job', message: compiled.error };
+              }
+              jobInput = { ...input, shots: compiled.plan.shots };
+            }
+
+            const created = canvasJobs.create(jobInput, {
               sessionId: sessionId ?? 'dsh',
               projectId: activeProjectId(),
             });
@@ -1287,6 +1384,397 @@ export function apply(ctx: Context) {
               : { ok: false, code: 'NOT_FOUND', message: '没有这个长任务。' };
           }
           return { ok: false, code: 'INVALID', message: `未知 op：${op}（create/list/status/cancel）。` };
+        }
+
+        // ----------------------------------------------------------
+        // v1.63（P2）：意图编译器 / 质量评估 / 多 agent / 资产库
+        //
+        // 四项都尽量在 host 侧做确定性计算：编译器不调模型、评估只读文件头、
+        // 任务包是纯模板、资产库是 JSON 文件。需要改画布时才走普通 edit。
+        // ----------------------------------------------------------
+        if (args.action === 'intent') {
+          const projectId = activeProjectId();
+          const memory = projectId ? projectMemory.get(projectId) : null;
+          const input = (args as { intent?: unknown }).intent;
+          const compiled = compileIntent(input, {
+            style: memory?.entries.filter((entry) => entry.kind === 'style').map((entry) => entry.text),
+            characters: memory?.entries.filter((entry) => entry.kind === 'character').map((entry) => entry.text),
+            rules: memory?.entries.filter((entry) => entry.kind === 'rule').map((entry) => entry.text),
+            locks: projectId ? assetLibrary.locksFor(projectId) : [],
+          });
+          if ('error' in compiled) {
+            return { ok: false, code: 'INVALID', action: 'intent', message: compiled.error };
+          }
+          const plan = compiled.plan;
+          const planJson = plan as unknown as ToolJson;
+          const op = (() => {
+            const value = (input as { op?: unknown } | null)?.op;
+            return typeof value === 'string' ? value : 'compile';
+          })();
+          if (op !== 'apply') {
+            return {
+              ok: true,
+              action: 'intent',
+              result: {
+                plan: planJson,
+                hint:
+                  'op:"compile" 只返回计划，不改画布；确认后用 op:"apply" 一次展开成节点。' +
+                  '生成仍需在画布右下角点「确认本批生成与费用」。',
+              } as unknown as ToolJson,
+            };
+          }
+          const anchorId =
+            typeof (input as { anchorId?: unknown } | null)?.anchorId === 'string'
+              ? String((input as { anchorId: string }).anchorId)
+              : '';
+          const expansion = await expandShotList(
+            {
+              name: 'shot-list',
+              shots: plan.shots,
+              columns: plan.columns,
+              ...(anchorId ? { anchorId } : {}),
+            },
+            sessionId,
+          );
+          if (!expansion.ok) {
+            return {
+              ok: false,
+              code: expansion.code,
+              action: 'intent',
+              message: expansion.message,
+              ...(expansion.response ? { result: expansion.response as unknown as ToolJson } : {}),
+            };
+          }
+          if (sessionId && typeof expansion.response.operationId === 'string') {
+            chatHub.noteCanvasAction(sessionId, {
+              action: 'recipe',
+              ok: true,
+              operationId: expansion.response.operationId,
+            });
+          }
+          return {
+            ok: true,
+            action: 'intent',
+            result: { plan: planJson, ...expansion.response } as unknown as ToolJson,
+          };
+        }
+
+        if (args.action === 'review') {
+          const projectId = activeProjectId();
+          if (!projectId) {
+            return { ok: false, code: 'NO_PROJECT', message: '画布没有打开项目，无法评估。' };
+          }
+          try {
+            const input = ((args as { review?: unknown }).review ?? {}) as Record<string, unknown>;
+            const op = typeof input.op === 'string' ? input.op : 'scan';
+            const nodes = await readLiveNodes();
+            const anchors = anchorList(projectId);
+            const coverage = coverageReport(nodes, anchors);
+            const report = reviewCanvas({
+              nodes,
+              uncovered: coverage.uncovered,
+              resolvePath: (url) => mediaStore.localPathForUrl(url)?.path ?? null,
+            });
+            const reportJson = { ...report, coverage } as unknown as ToolJson;
+            if (op !== 'fix' && input.apply !== true) {
+              return {
+                ok: true,
+                action: 'review',
+                result: { report: reportJson } as unknown as ToolJson,
+              };
+            }
+            const prompts = new Map<string, string>();
+            for (const raw of nodes) {
+              if (!raw || typeof raw !== 'object') continue;
+              const node = raw as Record<string, unknown>;
+              if (typeof node.id === 'string' && typeof node.prompt === 'string') {
+                prompts.set(node.id, node.prompt);
+              }
+            }
+            const fixes = planPromptFixes(report, prompts);
+            let applied = 0;
+            let receipt: Record<string, unknown> = {};
+            if (input.apply === true && fixes.operations.length > 0) {
+              const read = (await bridge.request({ action: 'read' }, { sessionId })) as {
+                revision?: unknown;
+              } | null;
+              const revision = typeof read?.revision === 'string' ? read.revision : '';
+              if (!revision) {
+                return { ok: false, code: 'NEED_REVISION', message: '画布没有返回 revision。' };
+              }
+              const editResult = (await bridge.request(
+                { action: 'edit', revision, operations: fixes.operations },
+                { sessionId },
+              )) as Record<string, unknown> | null;
+              if (editResult && editResult.ok === false) {
+                return {
+                  ok: false,
+                  code: typeof editResult.code === 'string' ? editResult.code : 'CANVAS_REJECTED',
+                  action: 'review',
+                  message: '画布拒绝了提示词修补操作（update 只接受 title/prompt/text/x/y）。',
+                };
+              }
+              applied = fixes.operations.length;
+              receipt = (editResult ?? {}) as Record<string, unknown>;
+              await flushCanvasSave(sessionId, editResult?.revision);
+            }
+            return {
+              ok: true,
+              action: 'review',
+              result: {
+                ...receipt,
+                report: reportJson,
+                fixes: { applied, patches: fixes.patches as unknown as ToolJson },
+                hint:
+                  input.apply === true
+                    ? '已把缺失的固定串追加到提示词末尾（只追加，不重写原文）。'
+                    : 'op:"fix" 只给修补计划；带 apply:true 才会写进画布。',
+              } as unknown as ToolJson,
+            };
+          } catch (error) {
+            return {
+              ok: false,
+              code: 'REVIEW_FAILED',
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+
+        if (args.action === 'assetlibrary') {
+          const projectId = activeProjectId();
+          if (!projectId) {
+            return { ok: false, code: 'NO_PROJECT', message: '画布没有打开项目，无法读写资产库。' };
+          }
+          const input = ((args as { assetlibrary?: unknown }).assetlibrary ?? {}) as Record<string, unknown>;
+          const op = typeof input.op === 'string' ? input.op : 'list';
+          try {
+            if (op === 'list') {
+              return {
+                ok: true,
+                action: 'assetlibrary',
+                result: {
+                  entries: assetLibrary.list(projectId) as unknown as ToolJson,
+                  summary: assetLibrary.summary(projectId) as unknown as ToolJson,
+                  anchors: assetLibrary.anchorsFor(projectId) as unknown as ToolJson,
+                  locks: assetLibrary.locksFor(projectId) as unknown as ToolJson,
+                  hint: '资产卡片要能被 intent 自动织进每镜提示词；use 会把已挂定妆节点的资产登记成参考锚点并锁到镜头上。',
+                } as unknown as ToolJson,
+              };
+            }
+            if (op === 'add' || op === 'update') {
+              const entry = await assetLibrary.upsert(projectId, input);
+              return entry
+                ? { ok: true, action: 'assetlibrary', result: { entry: entry as unknown as ToolJson } as unknown as ToolJson }
+                : {
+                    ok: false,
+                    code: 'INVALID',
+                    message: '资产需要 name（kind 取 character/scene/prop/style）；同名同类型原地更新，满了要删旧条目。',
+                  };
+            }
+            if (op === 'remove') {
+              const id = typeof input.id === 'string' ? input.id : '';
+              const removed = await assetLibrary.remove(projectId, id);
+              return removed
+                ? { ok: true, action: 'assetlibrary', result: { removed: id } as unknown as ToolJson }
+                : { ok: false, code: 'NOT_FOUND', message: '没有这条资产。' };
+            }
+            if (op === 'link') {
+              const id = typeof input.id === 'string' ? input.id : '';
+              const nodeId = typeof input.nodeId === 'string' && input.nodeId ? input.nodeId : null;
+              const entry = await assetLibrary.setNode(projectId, id, nodeId);
+              return entry
+                ? { ok: true, action: 'assetlibrary', result: { entry: entry as unknown as ToolJson } as unknown as ToolJson }
+                : { ok: false, code: 'NOT_FOUND', message: '没有这条资产。' };
+            }
+            if (op === 'import') {
+              const locks = Array.isArray(input.locks) ? input.locks : [];
+              const saved: unknown[] = [];
+              const rejected: Array<{ index: number; reason: string }> = [];
+              for (let index = 0; index < locks.length; index += 1) {
+                const entry = await assetLibrary.upsert(projectId, locks[index]);
+                if (entry) saved.push(entry);
+                else rejected.push({ index, reason: '缺 name 或超过每项目上限' });
+              }
+              return {
+                ok: true,
+                action: 'assetlibrary',
+                result: { entries: saved, rejected } as unknown as ToolJson,
+              };
+            }
+            if (op === 'use') {
+              const id = typeof input.id === 'string' ? input.id : '';
+              const entry = assetLibrary.get(projectId, id);
+              if (!entry) return { ok: false, code: 'NOT_FOUND', message: '没有这条资产。' };
+              if (!entry.nodeId) {
+                return {
+                  ok: false,
+                  code: 'NEED_NODE',
+                  message:
+                    '这条资产没有挂画布节点：先 op:"link" 把定妆/定版节点绑上，或把锁定串写进提示词（intent 会自动织入）。',
+                };
+              }
+              let nodes = await readLiveNodes();
+              const known = new Set(
+                nodes.flatMap((raw) => {
+                  if (!raw || typeof raw !== 'object') return [];
+                  const value = (raw as { id?: unknown }).id;
+                  return typeof value === 'string' ? [value] : [];
+                }),
+              );
+              if (known.size > 0 && !known.has(entry.nodeId)) {
+                return {
+                  ok: false,
+                  code: 'NODE_GONE',
+                  message: `资产「${entry.name}」绑的节点 ${entry.nodeId} 不在当前画布上，重新 link 一个定妆节点。`,
+                };
+              }
+              const anchors = await projectMemory.addAnchor(projectId, {
+                nodeId: entry.nodeId,
+                title: entry.name,
+                role: entry.kind === 'character' ? 'character' : entry.kind === 'style' ? 'style' : 'prop',
+              });
+              if (!anchors) {
+                return { ok: false, code: 'INVALID', message: '锚点需要有效 nodeId。' };
+              }
+              const anchorInputs = anchorList(projectId);
+              const read = (await bridge.request({ action: 'read' }, { sessionId })) as {
+                revision?: unknown;
+                nodes?: unknown;
+              } | null;
+              const revision = typeof read?.revision === 'string' ? read.revision : '';
+              if (!revision) return { ok: false, code: 'NEED_REVISION', message: '画布没有返回 revision。' };
+              const wanted = Array.isArray((args as { nodeIds?: unknown }).nodeIds)
+                ? (args as { nodeIds: unknown[] }).nodeIds.filter(
+                    (value): value is string => typeof value === 'string' && value.length > 0,
+                  )
+                : undefined;
+              const plan = planLockOperations(nodes, anchorInputs, wanted);
+              if (plan.operations.length > 0) {
+                const editResult = (await bridge.request(
+                  { action: 'edit', revision, operations: plan.operations },
+                  { sessionId },
+                )) as Record<string, unknown> | null;
+                if (editResult && editResult.ok === false) {
+                  return {
+                    ok: false,
+                    code: typeof editResult.code === 'string' ? editResult.code : 'CANVAS_REJECTED',
+                    message: '画布拒绝了参考连线操作。',
+                  };
+                }
+                await flushCanvasSave(sessionId, editResult?.revision);
+                nodes = await readLiveNodes();
+              }
+              return {
+                ok: true,
+                action: 'assetlibrary',
+                result: {
+                  op,
+                  entry: entry as unknown as ToolJson,
+                  operations: plan.operations.length,
+                  coverage: coverageReport(nodes, anchorInputs) as unknown as ToolJson,
+                } as unknown as ToolJson,
+              };
+            }
+            return {
+              ok: false,
+              code: 'INVALID',
+              message: `未知 op：${op}（list/add/update/remove/link/import/use）。`,
+            };
+          } catch (error) {
+            return {
+              ok: false,
+              code: 'ASSET_LIBRARY_FAILED',
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+
+        if (args.action === 'crew') {
+          const input = ((args as { crew?: unknown }).crew ?? {}) as Record<string, unknown>;
+          const op = typeof input.op === 'string' ? input.op : 'plan';
+          const projectId = activeProjectId();
+          if (op === 'plan') {
+            let nodes: unknown[] = [];
+            try {
+              nodes = await readLiveNodes();
+            } catch {
+              nodes = [];
+            }
+            const memory = projectId ? projectMemory.get(projectId) : null;
+            const byType: Record<string, number> = {};
+            for (const raw of nodes) {
+              if (!raw || typeof raw !== 'object') continue;
+              const type = String((raw as { type?: unknown }).type ?? 'unknown');
+              byType[type] = (byType[type] ?? 0) + 1;
+            }
+            const planned = planCrew(input, {
+              ...(projectId && canvasStore.getDocument(projectId)?.title
+                ? { projectTitle: canvasStore.getDocument(projectId)?.title }
+                : {}),
+              style: (memory?.entries ?? [])
+                .filter((entry) => entry.kind === 'style')
+                .map((entry) => entry.text)
+                .join('；'),
+              assets: projectId
+                ? assetLibrary.list(projectId).map((entry) => ({ name: entry.name, kind: entry.kind }))
+                : [],
+              ...(typeof input.shots === 'number' ? { shotCount: input.shots } : {}),
+              digest: { nodes: nodes.length, byType },
+            });
+            if ('error' in planned) {
+              return { ok: false, code: 'INVALID', action: 'crew', message: planned.error };
+            }
+            return {
+              ok: true,
+              action: 'crew',
+              result: {
+                plan: planned.plan as unknown as ToolJson,
+                hint:
+                  '每个 assignment 都是一条可直接派给 DSH 子代理的任务（角色/交付 JSON/边界/压过的上下文）。' +
+                  '子代理只能回 JSON，不能提交生成；收回来后用 op:"receive" 校验，再 apply 展开。',
+              } as unknown as ToolJson,
+            };
+          }
+          if (op === 'receive') {
+            const received = receiveCrew(input);
+            if ('error' in received) {
+              return { ok: false, code: 'INVALID', action: 'crew', message: received.error };
+            }
+            const { result } = received;
+            const response: Record<string, unknown> = { ...result };
+            if (result.acceptedLocks.length > 0 && input.importLocks !== false && projectId) {
+              const imported: unknown[] = [];
+              for (const lock of result.acceptedLocks) {
+                const entry = await assetLibrary.upsert(projectId, lock);
+                if (entry) imported.push(entry);
+              }
+              if (imported.length > 0) response.imported = imported;
+            }
+            if (result.acceptedShots.length > 0 && input.apply === true) {
+              const columns = Number(input.columns);
+              const expansion = await expandShotList(
+                {
+                  name: 'shot-list',
+                  shots: result.acceptedShots,
+                  ...(Number.isFinite(columns) ? { columns: Math.max(1, Math.min(6, Math.trunc(columns))) } : {}),
+                  ...(typeof input.anchorId === 'string' && input.anchorId ? { anchorId: input.anchorId } : {}),
+                },
+                sessionId,
+              );
+              if (!expansion.ok) {
+                return {
+                  ok: false,
+                  code: expansion.code,
+                  action: 'crew',
+                  message: expansion.message,
+                  ...(expansion.response ? { result: expansion.response as unknown as ToolJson } : {}),
+                };
+              }
+              Object.assign(response, expansion.response);
+            }
+            return { ok: true, action: 'crew', result: response as unknown as ToolJson };
+          }
+          return { ok: false, code: 'INVALID', message: `未知 op：${op}（plan/receive）。` };
         }
 
         // ----------------------------------------------------------
@@ -1441,6 +1929,7 @@ export function apply(ctx: Context) {
                   anchors: memory.anchors.map((anchor) => anchor.title),
                   hint: '风格/角色/参数用 action:"memory" 写入，下次会话自动注入。',
                 },
+                assets: projectId ? assetLibrary.summary(projectId) : { entries: 0, byKind: {}, linked: 0 },
                 consistency: {
                   shots: coverage.shots,
                   covered: coverage.covered,
@@ -1506,3 +1995,6 @@ export {
 } from './canvas/consistency';
 export { buildCopilotSuggestions, copilotSummary } from './canvas/copilot';
 export type { CopilotSuggestion } from './canvas/copilot';
+export { compileIntent, splitBrief, distributeBeats } from './canvas/intent';
+export { planPromptFixes, probeImageFile, reviewCanvas } from './canvas/review';
+export { planCrew, receiveCrew } from './canvas/crew';

@@ -337,13 +337,17 @@ const batchSession = 'sess-batch';
     String(approveButton?.getAttribute('data-fisherai-generation-approve')),
   );
 
-  // 真点一次「确认本批生成与费用」：批次必须真的被 claim（= 提交了生成），而不是只画个样子
+  // 真点一次「确认本批生成与费用」：批次必须真的被 claim（= 提交了生成），而不是只画个样子。
+  // 注意：终点状态可能是 running（生成还在跑）或 finished（这个用例没有可用生成来源，
+  // 提交后立刻失败收尾）。判「真的提交了」看 state 离开 pending 即可 —— 只等 running
+  // 会在生成秒失败的环境里永远等不到（2026-10-22 复现 33/34）。
   approveButton?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   const claimed = await waitFor(async () => {
     const list = (await host.hostApi('GET', `/agent/plans?projectId=${canvasProject}`)).json();
-    return list.find((item) => item.id === planId)?.state === 'running';
+    const state = list.find((item) => item.id === planId)?.state;
+    return state === 'running' || state === 'finished';
   }, 8000);
-  check('点确认 → 批次进入 running（真的提交了生成）', claimed, `plan=${planId}`);
+  check('点确认 → 批次被 claim（离开 pending）', claimed, `plan=${planId}`);
 
   const delivered = await waitFor(
     () => host.chat.prompts.filter((item) => item.sessionId === sessionId).length === before + 1,

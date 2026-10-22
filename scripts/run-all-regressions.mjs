@@ -56,6 +56,8 @@ const order = [
   'test-canvas-workflow-library.mjs',
   'test-canvas-shadcn-ui.mjs',
   'verify-canvas-ui.mjs',
+  'test-canvas-p2.mjs',
+  'test-canvas-crew.mjs',
 ];
 
 const present = new Set(readdirSync('scripts'));

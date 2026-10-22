@@ -156,10 +156,62 @@ HTTP 面（界面同源调用）：`GET /api/aifisher/canvas/copilot?projectId=`
 固定流水线：`read → shots（复用 recipe）→ lock（接锚点）→ prepare（准备批次）→ await（等确认 + 等结果）→ retry（失败自动再准备）→ report`。
 
 - **立即返回**任务快照，不等生成；用 `op:"status"` 看每一步的 state/detail；
+- v1.63 起 `op:"create"` 也可以只给 `brief`（可带 `shotsCount`/`type`/`aspectRatio`/`duration`/`model`/`style`）：host 先用意图编译器编出 shots 再进流水线，显式 `shots` 仍然优先 —— 「一句话做完整短片」于是变成一次调用；
 - 审批红线不变：只调用 `prepareGeneration`（`awaiting-approval`），重试也只是**再准备一批**，仍要用户点确认；
 - `state` 语义：`running`（在建节点/准备）→ `awaiting-approval`（等用户点确认）→ `waiting`（批次 running）→ `completed` / `failed` / `cancelled`；
 - 收口/自动重试会给会话推一条【画布长任务】通知（推不出去就在下一回合补）；
 - `GET /api/aifisher/canvas/jobs?projectId=` 与 `POST /jobs/:id/cancel` 是给界面/排查用的同源 HTTP 面。
+
+### 意图编译器：一句话 → 一排镜头（v1.63）
+
+```jsonc
+{ "action": "intent", "intent": { "op": "compile", "brief": "雨夜追车。挡风玻璃上水痕。远处警灯逼近。", "shots": 3 } }
+{ "action": "intent", "intent": { "op": "apply",   "brief": "雨夜追车，6 个镜头，16:9，视频 5 秒", "columns": 3 } }
+```
+
+`compile` 只返回计划（不改画布），`apply` 一次展开成节点（内部走 recipe，审批仍在画布 UI）。编译规则：
+
+- **镜头数**：显式 `shots` > brief 里的「6 个镜头 / 六镜」 > 句子数；句子不够时先把长句按逗号细分（不复制文本），仍不够就**少出镜头**并写进 `notes`/`missing`——不会编造画面内容。
+- **类型/画幅/时长**：`type` 显式 > brief 关键词（视频/短片/seedance → Video）；`aspectRatio` 认 `16:9` 这种写法；`duration` 认 `5s/5 秒`。
+- **风格与锁定串**：`style` 显式 > 项目记忆里 `kind:"style"` 的条目；资产库与记忆里的角色（`kind:"character"`）逐字织进**每一镜**。`includeLocks:false` 可关。
+- **固定串**：每镜末尾必带质感锚点与画面内限制（`qualityAnchor`/`limitClause` 可覆盖），项目记忆里的 `rule` 条目作为约束追加。
+- **参数**：只有给了 `model` 才挂 `parameters`（画布要求 `model+parameters` 同时给，见第 3 节）；没给 model 时画幅/时长只写进 `notes`。
+
+### 质量评估：只判能判的（v1.63）
+
+```jsonc
+{ "action": "review", "review": { "op": "scan" } }
+{ "action": "review", "review": { "op": "fix", "apply": true } }
+```
+
+- **scan**：提示词（缺失/过短/过长/缺光源/缺质感锚点/缺限制）、锚点覆盖（直接复用 `coverageReport().uncovered`）、结果文件（存在/0 字节/过小/格式/像素尺寸，只读文件头）、失败归因；输出 `summary.retry[]` = 该重新准备的节点。
+- **不评价构图好坏**：报告带一段固定 rubric，视觉判断仍由 agent `preview` → `read_image` 完成；报告本身不改画布。
+- **fix**：把缺失的固定串**追加**到提示词末尾（原文保留），`apply:true` 才写回画布（update 只接受 title/prompt/text/x/y）。
+
+### 资产库：一次定版、多镜引用（v1.63）
+
+```jsonc
+{ "action": "assetlibrary", "assetlibrary": { "op": "add", "kind": "character", "name": "林溯", "prompt": "林溯：35 岁男性，短寸头，左眉有一道疤…" } }
+{ "action": "assetlibrary", "assetlibrary": { "op": "link", "id": "资产id", "nodeId": "定妆节点id" } }
+{ "action": "assetlibrary", "assetlibrary": { "op": "use", "id": "资产id" } }        // 登记为锚点 + 锁到镜头
+{ "action": "assetlibrary", "assetlibrary": { "op": "import", "locks": [ … ] } }
+```
+
+- 存储：`<数据目录>/canvas-assets.json`（每项目最多 60 条）；`kind` 取 `character`/`scene`/`prop`/`style`，同名同类型**原地更新**；
+- 分工：项目记忆是「一两句偏好」，资产库是「可复用资产卡片 + 锁定串 + 定妆节点」；
+- `use` 只对**挂了节点**的资产有效（`NEED_NODE` 会提示先 `link`）；它复用一致性机制：定妆节点 → 上游连线，覆盖率按「每个镜头引用全部锚点」算；
+- HTTP 面：`GET/POST /api/aifisher/canvas/asset-library`、`POST /asset-library/link|import`、`DELETE /asset-library/:id`。
+
+### 多 agent：任务是协议，不是口头约定（v1.63）
+
+```jsonc
+{ "action": "crew", "crew": { "op": "plan", "brief": "雨夜追车短片，6 个镜头", "shots": 6 } }
+{ "action": "crew", "crew": { "op": "receive", "role": "storyboard", "deliverable": { "shots": [ … ] }, "apply": true } }
+```
+
+- **plan**：按任务复杂度派角色（导演/分镜/设定/审片），每个 `assignment` 带 `task`、`deliverable`（JSON 契约）、`boundary`（不许调用 canvas_control/prepareGeneration、不许改画布）和**压过的上下文**（brief 摘要 + 风格 + 资产名 + 摘要统计，≤1600 字符，不含节点正文）；
+- **receive**：逐条校验交付（空 prompt 等逐条 `rejected` 并给原因），合格 `shots` 归一后 `apply:true` 走 recipe 展开；`locks` 默认批量登记进资产库（`importLocks:false` 可关）；
+- host **不替你起子代理**：把 assignments 交给 DSH 的 subagent 机制即可，审批权永远不随任务包下发。
 
 ---
 

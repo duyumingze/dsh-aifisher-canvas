@@ -1,6 +1,6 @@
 {
   "name": "dsh-aifisher-canvas",
-  "version": "1.61.0",
+  "version": "1.63.0",
   "private": true,
   "type": "module",
   "main": "lib/index.js",
@@ -61,6 +61,8 @@
     "test:consistency": "node scripts/test-canvas-consistency.mjs",
     "test:copilot": "node scripts/test-canvas-copilot.mjs",
     "test:job": "node scripts/test-canvas-job.mjs",
+    "test:p2": "node scripts/test-canvas-p2.mjs",
+    "test:crew": "node scripts/test-canvas-crew.mjs",
     "test:storyboard": "node scripts/test-canvas-storyboard.mjs",
     "test:references": "node scripts/test-canvas-references.mjs",
     "test:generation": "node scripts/test-canvas-generation.mjs",
@@ -92,7 +94,7 @@
     "check:host-page": "node scripts/check-host-page.mjs",
     "test:task-queue": "node scripts/test-canvas-task-queue.mjs",
     "test:workflow-library": "node scripts/test-canvas-workflow-library.mjs",
-    "test": "node scripts/typecheck.mjs && node scripts/smoke-contract.mjs && node scripts/test-canvas-backend.mjs && node scripts/test-canvas-render.mjs && node scripts/test-panel-exit.mjs && node scripts/test-canvas-chat-dock.mjs && node scripts/test-canvas-agent.mjs && node scripts/test-canvas-agent-chat.mjs && node scripts/test-canvas-agent-speed.mjs && node scripts/test-canvas-placement.mjs && node scripts/test-canvas-digest.mjs && node scripts/test-canvas-recipe.mjs && node scripts/test-canvas-preview.mjs && node scripts/test-canvas-events.mjs && node scripts/test-canvas-references.mjs && node scripts/test-canvas-generation.mjs && node scripts/test-media-editing.mjs && node scripts/test-canvas-library.mjs && node scripts/test-custom-workflows.mjs && node scripts/test-canvas-workflow-config.mjs && node scripts/test-canvas-local-workflows.mjs && node scripts/test-cloud-generation.mjs && node scripts/test-ark-generation.mjs && node scripts/test-cloud-channels.mjs && node scripts/test-canvas-cloud-generation.mjs && node scripts/test-canvas-ui-services.mjs && node scripts/test-canvas-grid.mjs && node scripts/test-canvas-node-search.mjs && node scripts/test-canvas-stack.mjs && node scripts/test-canvas-knife.mjs && node scripts/test-canvas-outpaint.mjs && node scripts/test-canvas-last-model.mjs && node scripts/test-project-archive.mjs && node scripts/test-canvas-data-dir.mjs && node scripts/test-canvas-task-queue.mjs && node scripts/test-canvas-workflow-library.mjs && node scripts/test-canvas-shadcn-ui.mjs && node scripts/verify-canvas-ui.mjs && node scripts/test-canvas-memory.mjs && node scripts/test-canvas-consistency.mjs && node scripts/test-canvas-copilot.mjs && node scripts/test-canvas-job.mjs && node scripts/test-canvas-storyboard.mjs",
+    "test": "node scripts/typecheck.mjs && node scripts/smoke-contract.mjs && node scripts/test-canvas-backend.mjs && node scripts/test-canvas-render.mjs && node scripts/test-panel-exit.mjs && node scripts/test-canvas-chat-dock.mjs && node scripts/test-canvas-agent.mjs && node scripts/test-canvas-agent-chat.mjs && node scripts/test-canvas-agent-speed.mjs && node scripts/test-canvas-placement.mjs && node scripts/test-canvas-digest.mjs && node scripts/test-canvas-recipe.mjs && node scripts/test-canvas-preview.mjs && node scripts/test-canvas-events.mjs && node scripts/test-canvas-references.mjs && node scripts/test-canvas-generation.mjs && node scripts/test-media-editing.mjs && node scripts/test-canvas-library.mjs && node scripts/test-custom-workflows.mjs && node scripts/test-canvas-workflow-config.mjs && node scripts/test-canvas-local-workflows.mjs && node scripts/test-cloud-generation.mjs && node scripts/test-ark-generation.mjs && node scripts/test-cloud-channels.mjs && node scripts/test-canvas-cloud-generation.mjs && node scripts/test-canvas-ui-services.mjs && node scripts/test-canvas-grid.mjs && node scripts/test-canvas-node-search.mjs && node scripts/test-canvas-stack.mjs && node scripts/test-canvas-knife.mjs && node scripts/test-canvas-outpaint.mjs && node scripts/test-canvas-last-model.mjs && node scripts/test-project-archive.mjs && node scripts/test-canvas-data-dir.mjs && node scripts/test-canvas-task-queue.mjs && node scripts/test-canvas-workflow-library.mjs && node scripts/test-canvas-shadcn-ui.mjs && node scripts/verify-canvas-ui.mjs && node scripts/test-canvas-memory.mjs && node scripts/test-canvas-consistency.mjs && node scripts/test-canvas-copilot.mjs && node scripts/test-canvas-job.mjs && node scripts/test-canvas-storyboard.mjs && node scripts/test-canvas-p2.mjs && node scripts/test-canvas-crew.mjs",
     "dev": "tsdown --watch"
   },
   "peerDependencies": {

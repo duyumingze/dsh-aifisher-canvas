@@ -29,12 +29,15 @@ import { coverageReport, type AnchorInput } from './consistency';
 import type { CanvasJobs } from './canvasJob';
 import type { GenerationPlans } from './generationPlans';
 import type { ProjectMemory } from './projectMemory';
+import type { AssetLibrary } from './assetLibrary';
 
 export interface CopilotApiDeps {
   memory: ProjectMemory;
   jobs: CanvasJobs;
   store: CanvasStore;
   plans?: GenerationPlans;
+  /** 资产库（v1.63）：`/asset-library` 的同源 JSON 面。 */
+  assets?: AssetLibrary;
   /** 读当前打开的画布节点（优先于磁盘文档；拿不到返回 null）。 */
   liveNodes?: () => Promise<unknown[] | null>;
 }
@@ -227,6 +230,109 @@ async function handleCopilot(context: Parts, deps: CopilotApiDeps): Promise<bool
   return true;
 }
 
+/**
+ * 资产库 HTTP 面（v1.63）：
+ *   GET    /asset-library?projectId=…            条目 + 统计 + 已挂锚点 + 锁定串
+ *   POST   /asset-library {projectId, …entry}    新增/更新（同 kind+name 原地更新）
+ *   DELETE /asset-library/:id?projectId=…        删除
+ *   POST   /asset-library/link {projectId, id, nodeId}  绑定/解绑定妆节点
+ *   POST   /asset-library/import {projectId, locks[]}   批量登记（crew receive 的交付）
+ */
+async function handleAssetLibrary(context: Parts, deps: CopilotApiDeps): Promise<boolean> {
+  const { parts, method, url, req, res } = context;
+  const assets = deps.assets;
+  if (!assets) {
+    sendJson(res, 503, { error: '资产库未就绪。', code: 'ASSETS_UNAVAILABLE' });
+    return true;
+  }
+  if (parts.length === 1) {
+    if (method === 'GET') {
+      const projectId = projectIdOf(url.searchParams);
+      if (!projectId) {
+        sendJson(res, 422, { error: '缺少 projectId。', code: 'MISSING_PROJECT_ID' });
+        return true;
+      }
+      sendJson(res, 200, {
+        ok: true,
+        projectId,
+        entries: assets.list(projectId),
+        summary: assets.summary(projectId),
+        anchors: assets.anchorsFor(projectId),
+        locks: assets.locksFor(projectId),
+      });
+      return true;
+    }
+    if (method === 'POST') {
+      const body = (await readJsonBody(req, 256 * 1024)) as Record<string, unknown> | null;
+      const projectId = projectIdOf(body ?? {});
+      if (!projectId) {
+        sendJson(res, 422, { error: '缺少 projectId。', code: 'MISSING_PROJECT_ID' });
+        return true;
+      }
+      const entry = await assets.upsert(projectId, body);
+      sendJson(
+        res,
+        entry ? 200 : 422,
+        entry ? { ok: true, projectId, entry } : { error: '资产需要 name；同名同类型会原地更新。', code: 'INVALID_ASSET' },
+      );
+      return true;
+    }
+    sendJson(res, 405, { error: 'method not allowed', code: 'METHOD_NOT_ALLOWED' });
+    return true;
+  }
+
+  if (parts[1] === 'link') {
+    if (method !== 'POST') {
+      sendJson(res, 405, { error: 'method not allowed', code: 'METHOD_NOT_ALLOWED' });
+      return true;
+    }
+    const body = (await readJsonBody(req, 64 * 1024)) as Record<string, unknown> | null;
+    const projectId = projectIdOf(body ?? {});
+    const id = typeof body?.id === 'string' ? body.id : '';
+    if (!projectId || !id) {
+      sendJson(res, 422, { error: '需要 projectId 与 id。', code: 'INVALID' });
+      return true;
+    }
+    const nodeId = typeof body?.nodeId === 'string' && body.nodeId ? body.nodeId : null;
+    const entry = await assets.setNode(projectId, id, nodeId);
+    sendJson(res, entry ? 200 : 404, entry ? { ok: true, entry } : { error: '没有这条资产。', code: 'NOT_FOUND' });
+    return true;
+  }
+
+  if (parts[1] === 'import') {
+    if (method !== 'POST') {
+      sendJson(res, 405, { error: 'method not allowed', code: 'METHOD_NOT_ALLOWED' });
+      return true;
+    }
+    const body = (await readJsonBody(req, 256 * 1024)) as Record<string, unknown> | null;
+    const projectId = projectIdOf(body ?? {});
+    const locks = Array.isArray(body?.locks) ? body.locks : null;
+    if (!projectId || !locks) {
+      sendJson(res, 422, { error: '需要 projectId 与 locks[]。', code: 'INVALID' });
+      return true;
+    }
+    const saved = [];
+    const rejected: Array<{ index: number; reason: string }> = [];
+    for (let index = 0; index < locks.length; index += 1) {
+      const entry = await assets.upsert(projectId, locks[index]);
+      if (entry) saved.push(entry);
+      else rejected.push({ index, reason: '缺 name 或超过每项目上限' });
+    }
+    sendJson(res, 200, { ok: true, projectId, entries: saved, rejected });
+    return true;
+  }
+
+  if (method === 'DELETE' && parts.length === 2) {
+    const projectId = projectIdOf(url.searchParams);
+    const removed = projectId ? await assets.remove(projectId, parts[1]!) : false;
+    sendJson(res, removed ? 200 : 404, removed ? { ok: true } : { error: '没有这条资产。', code: 'NOT_FOUND' });
+    return true;
+  }
+
+  sendJson(res, 405, { error: 'method not allowed', code: 'METHOD_NOT_ALLOWED' });
+  return true;
+}
+
 async function handleJobs(context: Parts, deps: CopilotApiDeps): Promise<boolean> {
   const { parts, method, url, res } = context;
   if (parts.length === 1) {
@@ -268,12 +374,13 @@ export async function handleCopilotApi(
   const { req, res, url, parts, deps } = input;
   const method = (req.method ?? 'GET').toUpperCase();
   if (!parts[0]) return false;
-  if (parts[0] !== 'memory' && parts[0] !== 'copilot' && parts[0] !== 'jobs') return false;
+  if (!['memory', 'copilot', 'jobs', 'asset-library'].includes(parts[0])) return false;
   if (rejectCrossOrigin(req, res)) return true;
   const context: Parts = { parts, method, url, req, res };
   try {
     if (parts[0] === 'memory') return await handleMemory(context, deps);
     if (parts[0] === 'copilot') return await handleCopilot(context, deps);
+    if (parts[0] === 'asset-library') return await handleAssetLibrary(context, deps);
     return await handleJobs(context, deps);
   } catch (error) {
     if (!res.headersSent) {
