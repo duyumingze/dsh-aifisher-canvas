@@ -2,7 +2,7 @@
 
 > 把专业级 AI 创作无限画布带进 DeepSeek Harness：**不是插件内置一个聊天框，而是让 DSH 原生 AI Agent 直接接管整个画布**——本地 ComfyUI、多云端生成、节点编排、素材整理，全靠你在右侧说一句话完成。
 
-**Version**: v1.69 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
+**Version**: v1.70 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
 
 > **界面标识**：画布里露出的图形标识、画布名（渡雨鸣泽 画布）与助手名（渡雨鸣泽 Agent）都是**渡雨鸣泽**的视觉标识 v1.0，上游 AIFISHER 的图形标识已不在界面上出现（文件名沿用上游的兼容壳见 [`public/brand/README.md`](public/brand/README.md)）。`docs/shots/` 里的截图仍是旧标识，重新截图前以下文的文字说明为准。
 
@@ -188,6 +188,7 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
   - `query`（`src/host/canvas/query.ts`）：纯函数跑在一次 `read` 之上，回命中节点 + 两端都在结果里的边；提示词只回前 160 字（`read detail:"full"` 取全文），越界带 `truncated` 与「还有 N 条」。
   - `progress`（`src/host/canvas/progress.ts`）：十阶段线 + brief/approvedPlan/定稿与参考节点，存 `<数据目录>/canvas-progress.json`；阶段变了才记 history（最近 20 条），非法 phase 直接 `INVALID`（不静默落回 intake）。注入走 v1.59 那条 `agent/pre-step` 通道，与项目记忆拼成一段、内容变了才重插。
   - 回归 `test:tools`（63 项）：幂等/剥离/非法值、邻域与分页、阶段机与注入。
+- `canvas_control` 表面收敛（v1.70，2026-10-26）：枚举从 29 项降到 26 项 —— `runGeneration` / `media` / `workflow` / `product` 这四个「实现只回一句『请改用 command』」的动作撤掉，统一走 `action:"command"` + 完整 `CanvasControl`；host 白名单（`src/host/canvas/commandMapping.ts`）只放行**不会让 Agent 自己花钱**的动作，`runGeneration` 与 `prepareBudget` / `revokeBudget` 永久拒绝并给出可读理由。工具描述同时从 7,657 字符压到 2,710 字符（每个 DSH 会话少付约 1.6k tokens），各动作细节留在 [docs/canvas-agent-contract.md](docs/canvas-agent-contract.md) 的 §2.5 / §2.6。回归 `test:tools` 69 项（新增 6 项逃生舱用例）。
 - 测试覆盖：类型门禁（`pnpm typecheck`，`src/` 零错误）+ jsdom 契约测试 + 真机浏览器视觉校验，累计 2500+ 回归用例守住画布几何、交互、响应逻辑
 - 保存链路（v1.58，见 `scripts/patches/aifisher/src/stable/persistence/canvasWorkflow.ts`）：上游的乐观并发是「撞 409 → 重读服务端 → 三向合并 → 重发」，但三向合并遇到**同一字段两边都改**会抛冲突，并把这份文档的保存**永久封锁**（只有重新打开项目才解），画布照常能编辑、实际一个字都存不进去。本插件改成「救援合并」：节点/分组按 id 取并集、同 id 以当前窗口为准、**一定落盘**，并提示用户核对；保存/读取请求另加 20s 超时，避免一次挂住的请求把保存队列永久占死。agent 的每次改动还会由 host 立刻追加一次保存，回执里用 `saved` 说明有没有真的写进 `canvas.json`。
 - 云端结果落盘（2026-10-20）：云端通道回的是**服务商临时链接**（如 `https://file*.aitohumanize.com/file/<hash>.png`），host 侧会先把字节下载进素材库，节点的 `resultUrl` 才是同源 `/api/aifisher/canvas/media/...`。图床在任务刚回报 SUCCESS 的头几秒常常还是 404（文件没落地），所以下载带 4 次退避重试；真要失败，节点会显示「图片链接已失效」并留痕到 `/api/aifisher/canvas/diagnostics`（`installImageLoadTelemetry` 收 img 的 error 事件），而不是静默留一块黑。

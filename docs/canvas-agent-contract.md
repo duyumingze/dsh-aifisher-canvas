@@ -69,7 +69,7 @@ edit  →  （看返回里的 snapshot）
 { "action": "preview", "nodeIds": ["节点id"] }   // nodeIds 可省略 = 全部节点
 ```
 
-返回每个有结果的节点：`media[{ url, kind:"file"|"remote"|"data"|"missing", path?, type? }]`。`kind:"file"` 的 `path` 是本机绝对路径，图片直接 `read_image` 打开自评；视频/音频需要画面时用 `media` 动作截帧。**preview 不改画布**。画布把项目加载进内存时会规范化节点（`resultUrl` 可能被剥离），host 已回退到项目持久化文档补齐，所以刚生成完和重开项目后都能拿到结果。
+返回每个有结果的节点：`media[{ url, kind:"file"|"remote"|"data"|"missing", path?, type? }]`。`kind:"file"` 的 `path` 是本机绝对路径，图片直接 `read_image` 打开自评；视频/音频需要画面时用 `action:"command"` 的 `media` 逃生舱截帧（见下面「command 逃生舱」）。**preview 不改画布**。画布把项目加载进内存时会规范化节点（`resultUrl` 可能被剥离），host 已回退到项目持久化文档补齐，所以刚生成完和重开项目后都能拿到结果。
 
 ### 生成事件推送：批次跑完会主动找你（v1.57）
 
@@ -266,6 +266,41 @@ HTTP 面（界面同源调用）：`GET /api/aifisher/canvas/copilot?projectId=`
 
 ---
 
+## 2.5 其余动作（平坦参数）
+
+| action | 参数 | 说明 |
+|---|---|---|
+| `focus` | `nodeIds` | 把视口移到这些节点（至少一个） |
+| `projects` | `name?` `offset?` | 项目列表/搜索；`name` 是关键词，`offset` 是分页游标 |
+| `assets` | `name?` `offset?` | 素材库列表/搜索 |
+| `models` | `type` `name?` | 查某类节点的可选模型（`type` ∈ `Image`/`Video`/`Audio`/`Text`） |
+| `tasks` | `nodeIds?` | 生成任务状态（省略 = 全部在跑的任务） |
+| `cancelTask` | `revision` `nodeIds[1]` | 取消一个任务，必须恰好给一个节点 |
+| `skills` | — | 列 DSH 技能目录（项目层按**调用会话的 cwd** 扫） |
+| `skillLoad` | `name` | 读技能正文；结果同时贴回画布面板 |
+
+## 2.6 command 逃生舱：media / workflow / product（v1.70）
+
+参数多、用得少、又必须在画布侧走二次确认的动作，不再伪装成一等参数：
+
+```jsonc
+{ "action": "command",
+  "command": { "action": "media", "revision": "…", "nodeId": "…",
+               "operation": "frames", "times": [1.5, 8] } }
+```
+
+- `media`：`view` / `inspect` / `collage` / `annotate` / `crop` / `grid` / `frames` / `trimVideo` / `trimAudio`。
+- `workflow`：`describe` / `insert` / `configure`（配置工作流节点，不是「运行」）。
+- `product`：`upload` / `replace` / `download` / `saveAsset` / `resize` / `workflowManager` / `runWorkflow`。
+  画布侧只会把它排成一条待办（`awaiting-user`），**用户点开才真正执行**。
+- 白名单（`src/host/canvas/commandMapping.ts`）：`read` `edit` `undo` `focus` `projects` `project`
+  `assets` `importAsset` `models` `tasks` `cancelTask` `prepareGeneration` `media` `workflow`
+  `workflows` `product` `budgets`。
+- **永久拒绝**：`runGeneration`、`prepareBudget`、`revokeBudget`。它们会让 Agent 自己把钱花出去。
+  这不是「参数没写对」——重试也不会通过，理由见第 4 节。
+
+---
+
 ## 3. configure 的四条硬约束
 
 ```jsonc
@@ -295,6 +330,7 @@ prepareGeneration(revision, nodeIds)
 ```
 
 - `approve()` 只挂在 UI 上，**故意没有暴露给 `canvas_control`**（`canvasCreationControl.ts` 里那句 `This method is held by the UI only`）。
+- **`runGeneration` 也没暴露**（v1.70 收敛）：它既不是一等 action，也不在 `command` 白名单里，调用只会拿到一句「只能 prepareGeneration」。同理 `prepareBudget` / `revokeBudget` 也拒绝。
 - 理由：生成是要花钱的动作，费用授权必须由人按下。
 - 因此 Agent 的职责边界是：**把节点、模型、参数、提示词准备到位，把确认卡片递到用户面前**。不要试图绕过，也不要把「跑不通生成」当成待修的缺陷。
 - **确认卡在哪（v1.58）**：上游那张卡在画布内 Agent 面板里，而 DSH 版把那个面板换成了右侧原生会话，所以卡片改由

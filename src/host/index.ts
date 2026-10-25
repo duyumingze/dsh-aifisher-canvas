@@ -654,45 +654,15 @@ export function apply(ctx: Context) {
     defineTool({
       name: 'canvas_control',
       description:
-        'Operate the active AIFISHER infinite canvas. ' +
-        'Fast path is ONE call: edit with operations — revision is optional (the host reads it for you), ' +
-        'and a successful edit returns a compact "snapshot", so no follow-up read is needed. ' +
-        'Use read only when you must inspect state first; it returns a trimmed node list by default ' +
-        '(long prompt/textContent is clipped to ~240 chars with textTruncated) — pass detail:"full" for full text. ' +
-        'For multi-step planning start with view:"digest": a compact project overview (counts by type/status, edges, groups, selected nodes, and hints such as missing prompts or failed generations) without node text. ' +
-        'An operation is discriminated by "kind": ' +
-        'create{ref,type:"Image"|"Video"|"Audio"|"Text",x,y,title?,prompt?,text?}, ' +
-        'create positions are auto-guarded: a create without x/y, or whose position would overlap an existing node, is moved to free space right of existing content (explicit non-overlapping positions are kept) — agent-created nodes never cover existing ones. ' +
-        'update{nodeId,patch{title?,prompt?,x?,y?,text?}}, ' +
-        'configure{nodeId,model,parameters}, delete{nodeId}, ' +
-        'connect{sourceId,targetId,sourcePort?}, disconnect{sourceId,targetId,targetPort?}, ' +
-        'group{ref,nodeIds,label}, ungroup{groupId}, renameGroup{groupId,label}, ' +
-        'arrange{nodeIds,columns}, duplicate{nodes[{nodeId,ref}],x,y}. ' +
-        'For storyboard/shot lists use action:"recipe" with recipe:{name:"shot-list", shots:[{title?,prompt,type?:"Image"|"Video",model?,parameters?}], anchorId?, columns?} — the host expands the whole list into ONE edit (grid below the anchor, or right of existing content; never covering existing nodes). Shots are NOT connected to the script node: connecting would concatenate the whole script into every prompt. ' +
-        'preview: action:"preview" with optional nodeIds returns the local file paths of generated results (resultUrl/resultUrls mapped into the media store) — open images with read_image to judge them; preview never mutates the canvas. ' +
-        'Generation push (v1.57): when a batch you prepared with prepareGeneration reaches its end (success/failed/cancelled), the host posts a 【画布生成事件】 notice into this conversation — treat it as a system event, not a user request: review successful nodes with preview, then fix the cause and prepareGeneration again for failures; the user still approves every batch. ' +
-        'Text nodes have two fields: "text" is the body shown in the node, "prompt" is the transform template — pass "text" for the script/content itself; a lone "prompt" on a Text node is also written to the body (never into the prompt box). ' +
-        'configure rules: "model" must exactly match the canvas catalog display name — create a node then read it back to learn the exact string (never guess); ' +
-        'every "parameters" key must be declared by that model or the whole edit fails with INVALID; ' +
-        'switching model resets any advanced parameter you omit (e.g. generateCount falls back to 1), so always pass model+parameters in the same call. ' +
-        'Generation is human-authorized by design: prepareGeneration only yields an awaiting-approval plan and the approve step is intentionally UI-only. ' +
-        'Your job is to prepare nodes/params/prompt and hand it over — never try to submit or bypass it. ' +
-        'Persistence (v1.58): every mutating edit is followed by a forced save, and the result carries "saved": "saved" | "failed" | "unknown". ' +
-        'saved:"failed" means the canvas applied your change but could NOT write it to disk — tell the user to press Save and verify; never resubmit the same edit (it would duplicate nodes). ' +
-        'saved:"unknown" means the canvas was busy or switched away, so persistence could not be confirmed. ' +
-        'Project memory (v1.59): action:"memory" list|set|remove|anchor-set|anchor-add|anchor-remove keeps the project’s look/characters/model prefs in canvas-memory.json; entries with the same kind+key update in place. ' +
-        'Consistency (v1.59): action:"consistency" op:"status"|"lock"|"unlock" wires the project’s reference anchors (character sheet / style refs) into shot nodes as upstream inputs — the canvas then uses them as reference images; no new protocol. ' +
-        'Copilot (v1.59): action:"copilot" returns actionable suggestions (failed nodes, missing prompts, unlocked shots, empty memory). ' +
-        'Long task (v1.59): action:"job" op:"create" runs a deterministic pipeline (read → shot-list → lock anchors → prepareGeneration → await approval/result → auto-retry failed nodes → summary) and returns immediately with a job snapshot; the user still confirms every batch. ' +
-        'Intent compiler (v1.63): action:"intent" {op:"compile"|"apply", brief, shots?, type?, aspectRatio?, duration?, model?, style?} turns a natural-language brief into a deterministic shot list (style + asset lock strings woven into every prompt, fixed quality/limit clauses appended); op:"apply" expands it into nodes in ONE call; human approval still gates generation. Prefer it over hand-writing shots when the user says 「一句话做短片」. ' +
-        'Quality review (v1.63): action:"review" {op:"scan"} checks prompts (missing light/quality/limits, length), anchor coverage, and result files (format/pixel size/bytes via file header) and returns summary.retry — it does NOT score aesthetics; use preview + read_image for that. {op:"fix", apply:true} appends the missing fixed clauses (never rewrites the original text). ' +
-        'Assets (v1.63): action:"assetlibrary" list/add/update/remove/link/import/use keeps per-project character/scene/prop/style cards with a verbatim lock string; op:"use" registers a card’s node as a reference anchor and locks it onto shots. intent weaves these lock strings automatically. ' +
-        'Multi-agent (v1.63): action:"crew" {op:"plan", brief, shots?} returns assignments (role, task, deliverable JSON schema, boundary, compact context) that you can hand to DSH subagents; {op:"receive", role, deliverable, apply?} validates and normalizes their shots/locks — subagents never get canvas approve rights. ' +
-        'job also accepts brief (v1.63): {op:"create", brief:"…", shotsCount?} runs the intent compiler first, so 「一句话做完整短片」 is one call; explicit shots still win. ' +
-        'Camera (v1.69): action:"camera" op:"list"|"set"|"apply"|"strip"|"reset" keeps a structured camera body / lens / focal length / aperture per project and appends a rewritten English optics clause to the end of node prompts. It is idempotent (re-apply replaces the old clause, never grows the prompt), only touches prompt text (never model/parameters), and generation still needs the human approval step. ' +
-        'Directed queries (v1.69): action:"query" {nodeId?, path:"self"|"upstream"|"downstream"|"connected", depth?:1-3, keyword?, type?, page?, pageSize?} returns only the matching nodes plus edges between them — prefer it over read when the canvas is large; excerpts are capped at 160 chars (read detail:"full" for the whole text). ' +
-        'Progress (v1.69): action:"progress" {op:"get"|"set"|"clear", phase, brief?, approvedPlan?, approvedNodeIds?, referenceNodeIds?, note?} persists the creation phase chain (intake→concept→script→breakdown→references→storyboard→video→audio→review→complete). It is injected into canvas chat turns next to project memory, so a later session knows exactly where you stopped and which plan the user already approved. ' +
-        'Full contract and error codes: docs/canvas-agent-contract.md.',
+        'Operate the active AIFISHER infinite canvas. Usually ONE call is enough: action:"edit" with operations — revision is optional (the host fills it in) and a successful edit returns a compact "snapshot", so no follow-up read. ' +
+        'Inspect only when you must: read returns trimmed nodes (prompt folded to ~240 chars, textTruncated; detail:"full" for the whole text); view:"digest" gives counts/edges/groups/hints without node text; action:"query" slices a big canvas by neighborhood (path self/upstream/downstream/connected, depth 1-3), keyword or type. ' +
+        'Operations (kind): create{ref,type:"Image"|"Video"|"Audio"|"Text",x?,y?,title?,prompt?,text?} — positions are auto-guarded, agent nodes never cover existing ones; update{nodeId,patch}; configure{nodeId,model,parameters}; delete; connect{sourceId,targetId,sourcePort?}; disconnect; group{ref,nodeIds,label}; ungroup; renameGroup; arrange{nodeIds,columns}; duplicate{nodes:[{nodeId,ref}],x?,y?}. ' +
+        'configure is strict: model must exactly match a catalog display name (create a node and read it back, never guess); an undeclared parameter makes the whole edit INVALID; switching model resets omitted advanced parameters, so send model+parameters together. ' +
+        'Storyboard: action:"recipe" with recipe:{name:"shot-list",shots:[{title?,prompt,type?,model?,parameters?}],anchorId?,columns?} expands a whole shot list in one edit; shots are NOT connected to the script node. ' +
+        'Generation is human-authorized: prepareGeneration only yields an awaiting-approval plan; approve is UI-only — never submit or bypass it. When a prepared batch ends, the host posts a 【画布生成事件】 notice here: judge successes with preview + read_image, fix the cause, then prepare again. ' +
+        'Persistence: every mutating edit is followed by a forced save and result.saved is saved|failed|unknown. "failed" means applied but not on disk: tell the user, never resubmit (it would duplicate nodes). ' +
+        'Project state: memory (look/characters/params + anchors), consistency (lock anchors onto shots), assetlibrary (character/scene/prop/style cards), camera (body/lens/focal/aperture appended to prompts, idempotent), progress (10 phases + approved plan, survives sessions), job (read→shots→lock→prepare→retry), intent (brief→shots), crew (multi-agent tasks), review (prompt/format scan), copilot (suggestions). Text nodes: "text" is the body, "prompt" the transform template. ' +
+        'Escape hatch: action:"command" + command{...} sends a full CanvasControl for media (frames/crop/annotate/inspect), workflow (insert/configure), product (upload/replace/download/runWorkflow). runGeneration and budget actions are refused — spending is approved only in the canvas UI. Full contract, error codes, limits: docs/canvas-agent-contract.md.',
       parameters: {
         action: {
           type: 'string',
@@ -700,12 +670,15 @@ export function apply(ctx: Context) {
           enum: [
             'read', 'edit', 'undo', 'focus',
             'assets', 'projects', 'models', 'tasks',
-            'prepareGeneration', 'runGeneration', 'cancelTask',
-            'media', 'workflow', 'product',
+            'prepareGeneration', 'cancelTask',
             'skills', 'skillLoad', 'recipe', 'preview',
             'memory', 'consistency', 'copilot', 'job',
             'intent', 'review', 'assetlibrary', 'crew',
             'camera', 'query', 'progress',
+            // 逃生舱：media / workflow / product 这类「参数多、用得少、且必须在画布侧
+            // 走审批或二次确认」的动作不再伪装成一等参数（v1.70 收敛）——统一走
+            // action:"command" + command:{...}，白名单在 canvas/commandMapping.ts。
+            'command',
           ],
         },
         /** edit/undo 必须带上一轮 read 返回的 revision（乐观并发令牌）。 */
@@ -803,8 +776,14 @@ export function apply(ctx: Context) {
          */
         progress: { type: 'object', additionalProperties: true },
         /**
-         * 逃生舱：直接给一条完整画布指令（canvasControlProtocol 的 CanvasControl），
-         * 用于那些参数较多、暂时没有单独暴露的动作（prepareGeneration/media/workflow…）。
+         * 逃生舱（配合 action:"command"）：直接给一条完整画布指令
+         * （canvasControlProtocol 的 CanvasControl），例如
+         *   { action:"media", revision, nodeId, operation:"frames", times:[1.5, 8] }
+         *   { action:"workflow", revision, operation:"insert", definitionId, x, y }
+         *   { action:"product", revision, operation:"download", nodeId }
+         * 白名单在 src/host/canvas/commandMapping.ts：media / workflow / product /
+         * project 等放行；runGeneration 与费用授权类（prepareBudget / revokeBudget）
+         * 永远拒绝 —— 花钱只由用户在画布 UI 上按。
          * 注意：DSH 的 schema DSL 要求 object 节点显式声明开放度，漏了会直接拒绝注册。
          */
         command: { type: 'object', additionalProperties: true },
@@ -2083,6 +2062,12 @@ export function apply(ctx: Context) {
         if (typeof command === 'string') {
           return { ok: false, code: 'NEED_COMMAND', message: command };
         }
+        /**
+         * 真正下发的动作名：action:"command" 时取 command.action（media/workflow/product…），
+         * 后面的「改完要落盘」「返回快照」都按它判断，而不是按外层那个 'command' 占位符。
+         */
+        const effectiveAction =
+          typeof command.action === 'string' ? command.action : String(args.action);
         try {
           /**
            * v1.52：edit 允许不带 revision —— host 先自己读一次补上。
@@ -2148,7 +2133,7 @@ export function apply(ctx: Context) {
             result &&
             typeof result === 'object' &&
             result.ok !== false &&
-            SAVE_AFTER_ACTIONS.has(String(args.action))
+            SAVE_AFTER_ACTIONS.has(effectiveAction)
               ? flushCanvasSave(sessionId, (result as { revision?: unknown }).revision)
               : null;
 
@@ -2159,7 +2144,7 @@ export function apply(ctx: Context) {
            * 成功的 edit 变成失败，所以整段吞掉异常。
            */
           if (
-            args.action === 'edit' &&
+            effectiveAction === 'edit' &&
             result &&
             typeof result === 'object' &&
             result.ok !== false
@@ -2177,10 +2162,10 @@ export function apply(ctx: Context) {
           }
 
           // 画布对话面板里跑的工具调用：把动作回执转给面板，让它在消息下面画「画布动作」卡片
-          if (sessionId && (args.action === 'edit' || args.action === 'undo')) {
+          if (sessionId && (effectiveAction === 'edit' || effectiveAction === 'undo')) {
             const receipt = (result ?? {}) as Record<string, unknown>;
             const note: CanvasActionNote = {
-              action: String(args.action),
+              action: effectiveAction,
               ok: receipt.ok !== false,
               ...(typeof receipt.operationId === 'string' ? { operationId: receipt.operationId } : {}),
               ...(typeof receipt.code === 'string' ? { code: receipt.code } : {}),
@@ -2193,7 +2178,7 @@ export function apply(ctx: Context) {
             return {
               ok: false,
               code: typeof result.code === 'string' ? result.code : 'CANVAS_REJECTED',
-              action: args.action,
+              action: effectiveAction,
               message: `画布拒绝了这次操作：${String(result.code ?? 'CANVAS_REJECTED')}。`,
               result: result as unknown as ToolJson,
             };
@@ -2268,7 +2253,7 @@ export function apply(ctx: Context) {
           }
           return {
             ok: true,
-            action: args.action,
+            action: effectiveAction,
             // 落盘结果：saved / failed / unknown（见 flushCanvasSave 的注释）。
             // 画布已经改好了才走到这里，所以 ok 仍是 true；`saved:false` 是在告诉模型
             // 「看着改成功了，但盘上没有」——这句话以前没人说得出来。

@@ -246,6 +246,67 @@ const created = {};
   check('镜头 1 → 镜头 2 连线成功', link.ok === true, JSON.stringify(link).slice(0, 160));
 }
 
+// ---------------------------------------------------------------- command 逃生舱（v1.70）
+
+{
+  const noPayload = await run({ action: 'command' });
+  check(
+    'action:"command" 缺载荷 → NEED_COMMAND，且给出写法',
+    noPayload.ok === false &&
+      noPayload.code === 'NEED_COMMAND' &&
+      String(noPayload.message).includes('command:{'),
+    JSON.stringify(noPayload).slice(0, 160),
+  );
+
+  const refused = await run({
+    action: 'command',
+    command: { action: 'runGeneration', revision: 'x', generationPlanId: 'p', authorizationId: 'a' },
+  });
+  check(
+    'command 拒绝 runGeneration（花钱只由用户在画布按）',
+    refused.ok === false &&
+      refused.code === 'NEED_COMMAND' &&
+      String(refused.message).includes('prepareGeneration'),
+    JSON.stringify(refused).slice(0, 200),
+  );
+
+  const budget = await run({
+    action: 'command',
+    command: { action: 'prepareBudget', revision: 'x', nodeIds: [], maxRequests: 1, maxOutputs: 1, minutes: 5 },
+  });
+  check(
+    'command 拒绝 prepareBudget（不碰费用授权）',
+    budget.ok === false && budget.code === 'NEED_COMMAND' && String(budget.message).includes('预算'),
+    JSON.stringify(budget).slice(0, 160),
+  );
+
+  const unknown = await run({ action: 'command', command: { action: 'nope' } });
+  check(
+    'command 未知动作 → 回白名单提示',
+    unknown.ok === false && String(unknown.message).includes('media'),
+    JSON.stringify(unknown).slice(0, 160),
+  );
+
+  let ghostError = null;
+  try {
+    await run({ action: 'media' });
+  } catch (error) {
+    ghostError = error;
+  }
+  check(
+    'media 不再是一等 action（schema 直接拒绝，提示改用 command）',
+    Boolean(ghostError) && String(ghostError.message).includes('command'),
+    String(ghostError?.message ?? '（没有报错）').slice(0, 160),
+  );
+
+  const passThrough = await run({ action: 'command', command: { action: 'budgets' } });
+  check(
+    'command 放行白名单动作（budgets 不是被 host 拦下的）',
+    passThrough.code !== 'NEED_COMMAND',
+    JSON.stringify(passThrough).slice(0, 160),
+  );
+}
+
 // ---------------------------------------------------------------- camera
 
 {

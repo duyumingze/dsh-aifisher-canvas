@@ -8,8 +8,9 @@
  * 约定：
  *   - 返回对象 = 要下发的指令；
  *   - 返回字符串 = 参数不合法，字符串就是给模型看的错误说明（工具据此返回 NEED_COMMAND）；
- *   - `command` 参数是逃生舱：参数多、暂未单独暴露的动作（prepareGeneration/media/workflow…）
- *     直接透传完整协议指令。
+ *   - `action:"command"` + `command{...}` 是逃生舱：把完整 CanvasControl 透传给画布。
+ *     只放行 AGENT_COMMAND_ACTIONS 里的动作；runGeneration 与费用授权类永远拒绝
+ *     （红线见 docs/canvas-agent-contract.md §4）。
  */
 export interface CanvasToolArgs {
   action: string;
@@ -23,6 +24,42 @@ export interface CanvasToolArgs {
   command?: unknown;
 }
 
+/**
+ * 逃生舱放行的动作。
+ *
+ * 判据只有一条：**不会让 Agent 自己把钱花出去**。
+ * 生成的提交（runGeneration）与预算授权（prepareBudget / revokeBudget）不在其中：
+ * 前者只能由用户在画布右下角的确认卡上按，后者属于授权流程本身。
+ * product 虽然能「运行工作流」，但它在画布侧只是排队，等用户点开才执行。
+ */
+const AGENT_COMMAND_ACTIONS = new Set([
+  'read',
+  'edit',
+  'undo',
+  'focus',
+  'projects',
+  'project',
+  'assets',
+  'importAsset',
+  'models',
+  'tasks',
+  'cancelTask',
+  'prepareGeneration',
+  'media',
+  'workflow',
+  'workflows',
+  'product',
+  'budgets',
+]);
+
+/** 明确拒绝的动作：给模型一句能读懂的理由，而不是让它以为参数写错了。 */
+const REFUSED_COMMAND_ACTIONS: Record<string, string> = {
+  runGeneration:
+    'runGeneration 只会由用户在画布右下角点「确认本批生成与费用」时触发；Agent 只能 prepareGeneration，然后等用户按。',
+  prepareBudget: 'prepareBudget 属于费用授权流程，只由画布 UI 发起；Agent 不要碰预算授权。',
+  revokeBudget: 'revokeBudget 只由画布 UI 发起。',
+};
+
 function stringList(value: unknown): string[] | null {
   if (!Array.isArray(value)) return null;
   const list = value.filter((item): item is string => typeof item === 'string' && item.length > 0);
@@ -30,9 +67,24 @@ function stringList(value: unknown): string[] | null {
 }
 
 export function buildCanvasCommand(args: CanvasToolArgs): Record<string, unknown> | string {
-  // 逃生舱优先：给了完整指令就照原样下发（并带上 action 便于排查）
+  // 逃生舱：给了完整指令就校验后照原样下发（不再看外层的 action 名）
   if (args.command && typeof args.command === 'object' && !Array.isArray(args.command)) {
-    return { ...(args.command as Record<string, unknown>) };
+    const raw = args.command as Record<string, unknown>;
+    const action = typeof raw.action === 'string' ? raw.action : '';
+    if (!action) {
+      return 'command 需要 action 字段（完整 CanvasControl 指令，例如 {action:"media",operation:"frames",nodeId,times:[1.5]}）。';
+    }
+    const refused = REFUSED_COMMAND_ACTIONS[action];
+    if (refused) return refused;
+    if (!AGENT_COMMAND_ACTIONS.has(action)) {
+      return `command 不接受 action:"${action}"；可用的是 ${[...AGENT_COMMAND_ACTIONS].join(' / ')}。`;
+    }
+    return { ...raw };
+  }
+
+  if (args.action === 'command') {
+    return 'action:"command" 要同时给 command:{action:..., ...}（完整画布指令）。' +
+      '例如 {action:"command", command:{action:"media", operation:"frames", nodeId:"…", times:[1.5, 8]}}。';
   }
 
   switch (args.action) {
@@ -115,13 +167,9 @@ export function buildCanvasCommand(args: CanvasToolArgs): Record<string, unknown
       return { action: 'prepareGeneration', revision, nodeIds };
     }
 
-    case 'runGeneration':
-    case 'media':
-    case 'workflow':
-    case 'product':
-      return `action:"${args.action}" 的参数较多且需要授权流程，请用 command 参数直接给出完整指令（见 canvasControlProtocol 的 CanvasControl）。`;
-
+    // media / workflow / product 等「参数多、用得少」的动作不再做成平坦参数（v1.70），
+    // 统一走 action:"command"；runGeneration 则连逃生舱也不放行。
     default:
-      return `未知动作：${args.action}。`;
+      return `未知动作：${args.action}。参数较多或很少用的动作（media / workflow / product）用 action:"command" + command:{...} 下发。`;
   }
 }
