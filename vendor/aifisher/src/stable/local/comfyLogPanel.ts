@@ -211,7 +211,7 @@ export function createComfyLogPanel(client: LocalRuntimeClient) {
         nextPhase === 'idle'
           ? 'DSH 版不托管 ComfyUI 进程：请用绘世启动器启动它，这里显示它的运行状态与队列。'
           : nextPhase === 'external'
-            ? '这个 ComfyUI 由你自己启动，AIFISHER 不会停止它。'
+            ? '这个 ComfyUI 由你自己启动，渡雨鸣泽不会停止它。'
             : nextPhase === 'failed'
               ? message || '本机 ComfyUI 启动失败，请查看日志后停止并重试。'
               : nextPhase === 'error'

@@ -469,6 +469,68 @@ const STACK_URLS = STACK_COLORS.map((item) => `/api/aifisher/canvas/media/${stac
 }
 
 /**
+ * 视频生成历史场景（v1.64，?xvideo=1）的种子项目。
+ *
+ * 用户原话（2026-10-23）：「仿照图像生成历史记录，做视频生成历史记录功能」。
+ *
+ * 三条**浏览器能真解码**的小 mp4（`scripts/fixtures/video-history-*.mp4`：各 1.8KB，
+ * 320×180 / 1 秒 / 纯红·纯绿·纯蓝）。用真视频而不是假 URL 有两个原因：
+ *   ① 「设为主视频」换没换片，截图里一眼看得出来（颜色跟着走）；
+ *   ② `videoWidth` 能读到 320 —— 顺手证明节点上的是真能播的视频，不是一张黑占位。
+ */
+const videoHistoryProjectId = 'browser-video-history-proj';
+const VIDEO_HISTORY_FILES = ['video-history-red.mp4', 'video-history-green.mp4', 'video-history-blue.mp4'];
+const VIDEO_HISTORY_URLS = VIDEO_HISTORY_FILES.map(
+  (file) => `/api/aifisher/canvas/media/${videoHistoryProjectId}/videos/${file}`,
+);
+{
+  const mediaDir = join(fakeHome, 'storages', 'dsh-aifisher-canvas', 'media', videoHistoryProjectId, 'videos');
+  mkdirSync(mediaDir, { recursive: true });
+  for (const file of VIDEO_HISTORY_FILES) {
+    copyFileSync(join(ROOT, 'scripts', 'fixtures', file), join(mediaDir, file));
+  }
+  const saved = await dispatchApi(
+    'POST',
+    new URL('/api/aifisher/canvas/workflows', ORIGIN),
+    Buffer.from(
+      JSON.stringify({
+        id: videoHistoryProjectId,
+        revision: 0,
+        title: '视频生成历史真机验证',
+        nodes: [
+          {
+            id: 'video-history-host',
+            type: 'Video',
+            // 节点放低一点：扇形历史叠有一格是「往上摊」，贴顶时那一格会跑到视口外（量不到命中）
+            x: 320,
+            y: 300,
+            title: '视频生成历史',
+            prompt: '一条蓝色的小鱼游过珊瑚',
+            status: 'success',
+            model: 'Seedance 2.5 Standard · API',
+            videoModel: 'Seedance 2.5 Standard · API',
+            resultUrl: VIDEO_HISTORY_URLS[0],
+            resultUrls: VIDEO_HISTORY_URLS,
+            currentResultCount: 1,
+            resultAspectRatio: '320/180',
+            aspectRatio: '16:9',
+            duration: 1,
+            parentIds: [],
+            projectId: videoHistoryProjectId,
+            width: 384,
+            height: 216,
+          },
+        ],
+        groups: [],
+        viewport: { x: 0, y: 0, zoom: 1 },
+      }),
+      'utf8',
+    ),
+  );
+  console.log(`[browser] 预置视频生成历史项目 ${videoHistoryProjectId}（3 条 1.8KB mp4）→ ${saved.status}`);
+}
+
+/**
  * 扩图 / 尺寸两个场景（v1.38，?xoutpaint=1 / ?xresize=1）的种子项目。
  *
  * 都需要一张**浏览器能真解码**的图（jsdom 那边用的 1×1 data URL 在真机上量不出 320×240 /
@@ -775,6 +837,91 @@ const CHANNEL_FIXTURE = {
   );
   console.log(`[browser] 预置 OpenAI 通道「${CHANNEL_FIXTURE.label}」→ ${saved.status}`);
 }
+
+/**
+ * 视频节点「能接几张参考图」场景（v1.65，?xvideorefs=1）的种子项目。
+ *
+ * 用户原话（2026-10-23）：「视频生成图像参考只能拖入三张，修复一下，按 minimaxh3 的标准来」。
+ *
+ * 一个视频节点（模型 = 上面那条通道的视频模型，模式 = 多图参考）+ 10 张图排成 4 列 3 行。
+ * 这一场在真浏览器里从头拖 10 次线：jsdom 那边已经验过数据链路，这里补的是**真布局**下
+ * 「连接点真的点得到、拖到节点身上真的接上」——以及修复后的上限确实是 9（不是 3，也不是无限）。
+ */
+const videoRefsProjectId = 'browser-video-refs-proj';
+/** 视频节点在画布上的位置（放右边，别和参考图重叠）。 */
+const VIDEO_REFS_FRAME = { x: 1320, y: 60, width: 560, height: 420 };
+const videoRefsImageIds = Array.from({ length: 10 }, (_, index) => `video-ref-image-${index + 1}`);
+const VIDEO_REFS_IMAGE_URL = (index) =>
+  `/api/aifisher/canvas/media/${videoRefsProjectId}/images/ref-${index + 1}.png`;
+const VIDEO_REFS_MODEL_NAME = `${CHANNEL_FIXTURE.label} · ${CHANNEL_FIXTURE.plainModelId}`;
+{
+  const sourcePng = join(
+    fakeHome,
+    'storages',
+    'dsh-aifisher-canvas',
+    'media',
+    editProjectId,
+    'images',
+    'edit-seed.png',
+  );
+  const mediaDir = join(fakeHome, 'storages', 'dsh-aifisher-canvas', 'media', videoRefsProjectId, 'images');
+  mkdirSync(mediaDir, { recursive: true });
+  for (let index = 0; index < videoRefsImageIds.length; index += 1) {
+    copyFileSync(sourcePng, join(mediaDir, `ref-${index + 1}.png`));
+  }
+  const saved = await dispatchApi(
+    'POST',
+    new URL('/api/aifisher/canvas/workflows', ORIGIN),
+    Buffer.from(
+      JSON.stringify({
+        id: videoRefsProjectId,
+        revision: 0,
+        title: '视频参考图数量真机验证',
+        nodes: [
+          ...videoRefsImageIds.map((id, index) => ({
+            id,
+            type: 'Image',
+            x: 20 + (index % 4) * 300,
+            y: 20 + Math.floor(index / 4) * 280,
+            width: 280,
+            height: 240,
+            title: `参考图 ${index + 1}`,
+            prompt: `参考图 ${index + 1}`,
+            status: 'success',
+            model: 'Upload',
+            resultUrl: VIDEO_REFS_IMAGE_URL(index),
+            resultUrls: [VIDEO_REFS_IMAGE_URL(index)],
+            resultAspectRatio: '320/240',
+            aspectRatio: '4:3',
+            parentIds: [],
+            projectId: videoRefsProjectId,
+          })),
+          {
+            id: 'video-refs-host',
+            type: 'Video',
+            ...VIDEO_REFS_FRAME,
+            title: '参考图数量验证',
+            prompt: '雨滴打在窗上，镜头缓缓推近',
+            status: 'idle',
+            model: VIDEO_REFS_MODEL_NAME,
+            videoModel: VIDEO_REFS_MODEL_NAME,
+            videoMode: 'reference-video',
+            resolution: '480p',
+            aspectRatio: '16:9',
+            duration: 5,
+            parentIds: [],
+            projectId: videoRefsProjectId,
+          },
+        ],
+        groups: [],
+        viewport: { x: 0, y: 0, zoom: 1 },
+      }),
+      'utf8',
+    ),
+  );
+  console.log(`[browser] 预置视频参考图项目 ${videoRefsProjectId}（1 视频 + 10 张图）→ ${saved.status}`);
+}
+
 
 /**
  * 任务队列场景（?tasks=1）用的一条真通道：baseUrl 指向**本脚本自己**的 /tq-channel，
@@ -1384,6 +1531,10 @@ const HOST_PAGE = `<!doctype html>
         gridPan: gridPanSteps,
         /** v1.37：叠图「切换」按钮（?xstack=1 场景，见 buildStackScene） */
         stack: stackSteps,
+        /** v1.64：视频生成历史（?xvideo=1 场景，见 buildVideoHistoryScene） */
+        videoHistory: videoHistorySteps,
+        /** v1.65：视频节点能接几张参考图（?xvideorefs=1 场景，见 buildVideoRefsScene） */
+        videoRefs: videoRefsSteps,
         /** v1.38：扩图（?xoutpaint=1 场景，见 buildOutpaintScene） */
         outpaint: outpaintSteps,
         /** v1.38：尺寸对话框（?xresize=1 场景，见 buildResizeScene） */
@@ -2646,7 +2797,9 @@ const HOST_PAGE = `<!doctype html>
       setter.call(composer, '帮我在画布上建一个文本节点');
       composer.dispatchEvent(new Event('input', { bubbles: true }));
       await wait(400);
-      const send = panel.querySelector('[aria-label="发送给 AIFISHER Agent"]');
+      // 发送按钮的无障碍名带品牌前缀（上游是「发送给 AIFISHER Agent」，2026-10-25 起
+      // 是「发送给 渡雨鸣泽 Agent」），所以按前缀匹配，改品牌名不会再打断这条链路。
+      const send = panel.querySelector('[aria-label^="发送给"]');
       chatPanelState.sendEnabled = !!send && send.disabled === false;
       if (send && !send.disabled) {
         send.click();
@@ -3647,6 +3800,329 @@ const HOST_PAGE = `<!doctype html>
     };
 
     /**
+     * 视频生成历史（?xvideo=1，v1.64）。用户原话（2026-10-23）：
+     * 「仿照图像生成历史记录，做视频生成历史记录功能」。
+     *
+     * jsdom 已经验过「药丸 -> 摊开 -> 设为主视频 -> 存盘」的数据链路，真机这一场补三件
+     * 只有布局引擎才知道的事：
+     *   ① 头部那枚药丸画在节点上方、elementFromPoint 真的点得到（头部被画布底盘盖住那类 bug）；
+     *   ② 扇形历史格是摊到节点**外面**的：rect 在节点框外、中心点命中的是它自己
+     *      （外框以前是 overflow-hidden，会把它们整块剪掉，jsdom 量不出来）；
+     *   ③ 三条 mp4 在 Chrome 里真解码（videoWidth = 320），点「设为主视频」主片换成蓝的那条。
+     * 截图停在「主片是蓝的 + 旁边摊着绿/红两条历史」这一屏（交付图）。
+     */
+    const videoHistoryScene = new URLSearchParams(location.search).get('xvideo') === '1';
+    const videoHistorySteps = { done: false, initial: null, expanded: null, promoted: null, final: null };
+    const videoHistoryFrame = () => document.querySelector('[data-node-id="video-history-host"]');
+    const videoHistorySnapshot = () => {
+      const frame = videoHistoryFrame();
+      if (!frame) return null;
+      const indicator = frame.querySelector('[data-fisherai-video-history-indicator="true"]');
+      const main = frame.querySelector('[data-fisherai-video-streaming] video');
+      const frameBox = frame.getBoundingClientRect();
+      const items = [...frame.querySelectorAll('[data-fisherai-video-history]')].map((item) => {
+        const box = item.getBoundingClientRect();
+        const middle = document.elementFromPoint(
+          Math.round(box.left + box.width / 2),
+          Math.round(box.top + box.height / 2),
+        );
+        return {
+          src: String(item.querySelector('video')?.getAttribute('src') || ''),
+          left: Math.round(box.left),
+          top: Math.round(box.top),
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+          outside:
+            box.left >= frameBox.right - 1 ||
+            box.top >= frameBox.bottom - 1 ||
+            box.right <= frameBox.left + 1 ||
+            box.bottom <= frameBox.top + 1,
+          hitSelf: Boolean(middle && (middle === item || item.contains(middle))),
+        };
+      });
+      const pillBox = indicator ? indicator.getBoundingClientRect() : null;
+      const pillHit = pillBox
+        ? document.elementFromPoint(
+            Math.round(pillBox.left + pillBox.width / 2),
+            Math.round(pillBox.top + pillBox.height / 2),
+          )
+        : null;
+      return {
+        label: indicator ? String(indicator.textContent || '').replace(/\s+/g, '') : '',
+        ariaLabel: indicator ? String(indicator.getAttribute('aria-label') || '') : '',
+        expanded: indicator ? indicator.getAttribute('aria-expanded') : null,
+        mainSrc: main ? String(main.getAttribute('src') || '') : '',
+        mainWidth: main ? Number(main.videoWidth) : 0,
+        mainHeight: main ? Number(main.videoHeight) : 0,
+        frame: {
+          left: Math.round(frameBox.left),
+          top: Math.round(frameBox.top),
+          width: Math.round(frameBox.width),
+          height: Math.round(frameBox.height),
+        },
+        pill: pillBox
+          ? {
+              left: Math.round(pillBox.left),
+              top: Math.round(pillBox.top),
+              width: Math.round(pillBox.width),
+              height: Math.round(pillBox.height),
+              onTop: Boolean(pillHit && (pillHit === indicator || indicator.contains(pillHit))),
+            }
+          : null,
+        pillAboveNode: pillBox ? pillBox.bottom <= frameBox.top + 2 : false,
+        items,
+        nodeCount: document.querySelectorAll('[data-node-id]').length,
+      };
+    };
+    const buildVideoHistoryScene = async () => {
+      if (!videoHistoryScene) return;
+      try {
+        const frame = await until(() => videoHistoryFrame(), 20000);
+        if (!frame) {
+          videoHistorySteps.error = '视频节点没出现';
+          videoHistorySteps.done = true;
+          return;
+        }
+        // 首帧解码要一点时间：等主片量到 videoWidth 再记初始态（截图与读数才是一回事）
+        await until(() => Number(videoHistoryFrame()?.querySelector('video')?.videoWidth || 0) > 0, 8000);
+        await wait(400);
+        videoHistorySteps.initial = videoHistorySnapshot();
+        const indicator = frame.querySelector('[data-fisherai-video-history-indicator="true"]');
+        if (!indicator) {
+          videoHistorySteps.error = '「历史 N」药丸没出现';
+          videoHistorySteps.done = true;
+          return;
+        }
+        indicator.click();
+        await wait(700);
+        videoHistorySteps.expanded = videoHistorySnapshot();
+        const item = frame.querySelectorAll('[data-fisherai-video-history]')[1];
+        const promote = item
+          ? [...item.querySelectorAll('button')].find((button) =>
+              String(button.textContent || '').includes('设为主视频'),
+            )
+          : null;
+        if (!promote) {
+          videoHistorySteps.error = '「设为主视频」按钮没出现';
+          videoHistorySteps.done = true;
+          return;
+        }
+        promote.click();
+        await wait(900);
+        videoHistorySteps.promoted = videoHistorySnapshot();
+        // 交付图：再摊开一次 —— 主片已经换成蓝的，旁边是绿/红两条历史
+        const again = videoHistoryFrame()?.querySelector('[data-fisherai-video-history-indicator="true"]');
+        if (again) again.click();
+        await wait(900);
+        videoHistorySteps.final = videoHistorySnapshot();
+
+        // ---- v1.66：截帧入口（真布局里点得开；真取帧链路由 scripts/verify-video-frames.mjs 单独验）----
+        // 这里只做「虚拟时间安全」的断言：截帧要真解码视频再真上传，headless 的
+        // --virtual-time-budget 在解码期间会把虚拟时钟跑完（等待窗口会假超时），
+        // 所以真取帧放在 standalone 的 verify-video-frames（真时间、真 Chromium）里验。
+        const frameTrigger = videoHistoryFrame()?.querySelector('[data-fisherai-video-frame-trigger="true"]');
+        if (!frameTrigger) {
+          videoHistorySteps.framesError = '截帧入口（截取视频帧）没出现';
+        } else {
+          videoHistoryFrame()?.querySelector('video')?.dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true }));
+          await wait(300);
+          frameTrigger.click();
+          await wait(250);
+          videoHistorySteps.framesMenu = Boolean(
+            videoHistoryFrame()?.querySelector('[data-fisherai-video-frame-menu="true"]'),
+          );
+          videoHistorySteps.framesMenuItems = [
+            ...(videoHistoryFrame()?.querySelectorAll('[data-fisherai-video-frame-action]') || []),
+          ].map((button) => String(button.getAttribute('data-fisherai-video-frame-action') || ''));
+          // 收起菜单：交付图仍然停在「主片是蓝的 + 旁边摊着两条历史」
+          frameTrigger.click();
+          await wait(200);
+          videoHistorySteps.framesMenuClosed = !videoHistoryFrame()?.querySelector(
+            '[data-fisherai-video-frame-menu="true"]',
+          );
+        }
+      } catch (error) {
+        videoHistorySteps.error = String((error && error.stack) || error);
+      }
+      videoHistorySteps.done = true;
+    };
+
+    /**
+     * 视频节点能接几张参考图（?xvideorefs=1，v1.65）。
+     *
+     * 用户原话（2026-10-23）：「视频生成图像参考只能拖入三张，修复一下，按 minimaxh3 的标准来」。
+     *
+     * jsdom 已经验过「拖线 → 准入 → 存盘」的数据链路，真机这一场补的是**真布局**下才成立的几件事：
+     *   ① 10 张图的「连接输出」圆点在 DOM 里、rect 是真的（jsdom 里所有 rect 都是 0）；
+     *   ② 从圆点拖到视频节点身上真的接上（连线命中走 elementFromPoint + 圆心吸附，
+     *      jsdom 那两条都不可用，只能退回按节点矩形的公式）；
+     *   ③ 接上去的条数就是注册表说的那个上限：9 张全上、第 10 张被拒（不是 3，也不是无限）。
+     *
+     * ⚠️ 这段代码在外层模板字面量里：**不许写反斜杠**（用 indexOf / split 代替正则）。
+     */
+    const videoRefsScene = new URLSearchParams(location.search).get('xvideorefs') === '1';
+    const videoRefsSteps = { done: false };
+    const videoRefsFrame = () => document.querySelector('[data-node-id="video-refs-host"]');
+    const videoRefsIds = [
+      'video-ref-image-1',
+      'video-ref-image-2',
+      'video-ref-image-3',
+      'video-ref-image-4',
+      'video-ref-image-5',
+      'video-ref-image-6',
+      'video-ref-image-7',
+      'video-ref-image-8',
+      'video-ref-image-9',
+      'video-ref-image-10',
+    ];
+    const videoRefsPointer = (type, point) =>
+      new PointerEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clientX: point.x,
+        clientY: point.y,
+        button: 0,
+        buttons: type === 'pointerup' ? 0 : 1,
+        pointerId: 1,
+        pointerType: 'mouse',
+        isPrimary: true,
+      });
+    /** 存盘后的 parentIds（= 用户真接上的那些）。 */
+    const videoRefsParents = async () => {
+      const response = await fetch('/api/aifisher/canvas/workflows/${videoRefsProjectId}', {
+        cache: 'no-store',
+      });
+      if (!response.ok) return null;
+      const document_ = await response.json();
+      const node = (document_.nodes || []).find((item) => item.id === 'video-refs-host');
+      return node ? node.parentIds || [] : null;
+    };
+    const buildVideoRefsScene = async () => {
+      if (!videoRefsScene) return;
+      try {
+        const frame = await until(() => videoRefsFrame(), 20000);
+        if (!frame) {
+          videoRefsSteps.error = '视频节点没出现';
+          videoRefsSteps.done = true;
+          return;
+        }
+        const background = document.getElementById('canvas-background');
+        if (!background) {
+          videoRefsSteps.error = '画布底盘没出现';
+          videoRefsSteps.done = true;
+          return;
+        }
+        await wait(900);
+        // 落点 = 视频节点身上（偏上一点，避开底下那条 composer）
+        const frameBox = frame.getBoundingClientRect();
+        const target = {
+          x: Math.round(frameBox.left + frameBox.width / 2),
+          y: Math.round(frameBox.top + 40),
+        };
+        videoRefsSteps.target = {
+          x: target.x,
+          y: target.y,
+          frame: {
+            left: Math.round(frameBox.left),
+            top: Math.round(frameBox.top),
+            width: Math.round(frameBox.width),
+            height: Math.round(frameBox.height),
+          },
+        };
+        const dragged = [];
+        for (const id of videoRefsIds) {
+          const imageFrame = document.querySelector('[data-node-id="' + id + '"]');
+          if (!imageFrame) {
+            dragged.push({ id: id, ok: false, reason: 'no frame' });
+            continue;
+          }
+          /**
+           * 连接圆平时是 hidden（group-hover/node:flex），只有**选中或真实 hover** 时才占地方：
+           * 无头浏览器没有真指针，靠派发事件也点不出 CSS 的 :hover —— 所以先把这个节点点选上，
+           * 圆才会 display:flex 拿到真 rect。这也正是用户的路径：先点节点，再从圆上拖线。
+           */
+          const selectBox = imageFrame.getBoundingClientRect();
+          const selectPoint = {
+            x: Math.round(selectBox.left + selectBox.width / 2),
+            y: Math.round(selectBox.top + 18),
+          };
+          imageFrame.dispatchEvent(videoRefsPointer('pointerdown', selectPoint));
+          background.dispatchEvent(videoRefsPointer('pointerup', selectPoint));
+          await wait(120);
+          const button = imageFrame.querySelector('[data-fisherai-connector-side="right"]');
+          if (!button) {
+            dragged.push({ id: id, ok: false, reason: 'no connector' });
+            continue;
+          }
+          const box = button.getBoundingClientRect();
+          const start = {
+            x: Math.round(box.left + box.width / 2),
+            y: Math.round(box.top + box.height / 2),
+          };
+          button.dispatchEvent(videoRefsPointer('pointerdown', start));
+          background.dispatchEvent(videoRefsPointer('pointermove', target));
+          background.dispatchEvent(videoRefsPointer('pointerup', target));
+          dragged.push({
+            id: id,
+            ok: true,
+            width: Math.round(box.width),
+            height: Math.round(box.height),
+            selected: String(imageFrame.getAttribute('data-node-selected') || ''),
+          });
+          await wait(180);
+        }
+        videoRefsSteps.dragged = dragged;
+        // 存盘有防抖：轮询到 9 张都落盘（或超时）
+        let parents = null;
+        const end = Date.now() + 9000;
+        while (Date.now() < end) {
+          parents = await videoRefsParents();
+          if (parents && parents.length >= 9) break;
+          await wait(400);
+        }
+        const registry = globalThis.__FISHERAI_CHANNEL_MODELS__;
+        const entry =
+          registry && Array.isArray(registry.video)
+            ? registry.video.find((item) => item.name === '${VIDEO_REFS_MODEL_NAME}')
+            : null;
+        const mode =
+          entry && Array.isArray(entry.videoModes)
+            ? entry.videoModes.find((item) => item.value === 'reference-video')
+            : null;
+        videoRefsSteps.registry = {
+          found: Boolean(entry),
+          maxInputs: entry ? entry.maxInputs : null,
+          imageLimit: mode && mode.allowedInputs ? mode.allowedInputs.image : null,
+        };
+        videoRefsSteps.connected = {
+          parents: parents || [],
+          nodeCount: document.querySelectorAll('[data-node-id]').length,
+        };
+        /**
+         * 交付图：先按 Esc 清选中（选中态会在底部拉出 composer 浮层，盖住下面两排参考图；
+         * 用点空白来清会留一个框选虚线框，越界探针会把它当成画布压住了侧边栏），
+         * 再点视口控件里的「显示所有节点」把整条链缩进画面 —— 截图要能一眼看出
+         * 「9 条参考线接在视频节点上、第 10 张空着」。
+         */
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+        await wait(400);
+        const fit = document.querySelector('[aria-label="显示所有节点"]');
+        if (fit) {
+          fit.click();
+          await wait(900);
+        }
+        videoRefsSteps.fitted = Boolean(fit);
+        const layer = document.querySelector('#canvas-viewport-content');
+        videoRefsSteps.transform = layer ? String(layer.style.transform || '') : '';
+        await wait(600);
+      } catch (error) {
+        videoRefsSteps.error = String((error && error.stack) || error);
+      }
+      videoRefsSteps.done = true;
+    };
+
+    /**
      * 扩图场景（?xoutpaint=1，v1.38 起，v1.39 改成「先出画面再接节点」）。
      *
      * 用户原话（v1.38）：「把这个功能移除，替换成扩图功能；……点击生成后不直接生图，
@@ -4293,6 +4769,8 @@ const HOST_PAGE = `<!doctype html>
     void buildImageEditorScene();
     void buildGridPanScene();
     void buildStackScene();
+    void buildVideoHistoryScene();
+    void buildVideoRefsScene();
     void buildOutpaintScene();
     void buildResizeScene();
     void buildLastModelScene();
@@ -4679,6 +5157,13 @@ const SCENES = [
   // 叠图「切换」（v1.37）：一叠 3 张（红/绿/蓝三张 PNG），真点「切换」→ 卡上的图真的换、计数跟走、节点数不变
   ['stack', `${ORIGIN}/?resume=${stackProjectId}&xstack=1`, `?resume=${stackProjectId}&xstack=1`,
     (probe) => probe.stack?.done === true, 22000],
+  // 视频生成历史（v1.64）：药丸 → 摊开（在节点外面、不被剪）→ 设为主视频（主片换成蓝的那条）
+  // v1.66 同一场再加「截帧」：截尾帧（只 1 张、真解码）→ 首尾帧（共 3 张，落在视频右侧）
+  ['video-history', `${ORIGIN}/?resume=${videoHistoryProjectId}&xvideo=1`, `?resume=${videoHistoryProjectId}&xvideo=1`,
+    (probe) => probe.videoHistory?.done === true, 26000],
+  // 视频参考图数量（v1.65）：真拖 10 次线 → 9 张接上、第 10 张被拒（修复前只到 3 张）
+  ['video-references', `${ORIGIN}/?resume=${videoRefsProjectId}&xvideorefs=1`, `?resume=${videoRefsProjectId}&xvideorefs=1`,
+    (probe) => probe.videoRefs?.done === true, 32000],
   // 扩图（v1.38）：工具条「扩图」→ 面板 → 创建 → 画布上多一个**空**节点（提示词已填），一条生成请求都没发
   ['outpaint', `${ORIGIN}/?resume=${outpaintProjectId}&xoutpaint=1`, `?resume=${outpaintProjectId}&xoutpaint=1`,
     (probe) => probe.outpaint?.done === true, 26000],
@@ -5307,6 +5792,108 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
       String(steps.final?.src ?? '').endsWith('stack-b.png') &&
         String(steps.final?.counter ?? '').includes('2/3'),
       `${steps.final?.src} / ${steps.final?.counter}`);
+  }
+
+  /**
+   * 视频生成历史（?xvideo=1，v1.64）。用户原话「仿照图像生成历史记录，做视频生成历史记录功能」。
+   *
+   * 四条真机断言各守一个「jsdom 看不见」的失败模式：
+   *   ① 药丸画在节点上方、但 hit-test 打到了画布底盘 → 用户点不动；
+   *   ② 扇形历史格被节点外框的 overflow-hidden 剪掉 → rect 在框内、或中心点打不到它；
+   *   ③ mp4 在真 Chrome 里解不出来（假 URL / 编码不支持）→ videoWidth 为 0，界面是一块黑；
+   *   ④ 「设为主视频」只改了 React state、没真换片 → 主 video 的 src 不会变。
+   */
+  if (label === 'video-history') {
+    const steps = probe.videoHistory ?? {};
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const initial = steps.initial ?? {};
+    const expanded = steps.expanded ?? {};
+    const promoted = steps.promoted ?? {};
+    const final = steps.final ?? {};
+    report('视频节点渲染出来了，整条链路走完', steps.done === true && !steps.error,
+      String(steps.error || '').slice(0, 200) || JSON.stringify(initial).slice(0, 200));
+    report('节点头部有「历史 3」药丸（与图片节点同款）',
+      String(initial.label ?? '').includes('历史 3') && initial.pill !== null,
+      `${initial.label} pill=${JSON.stringify(initial.pill)}`);
+    report('药丸的可读标签是「本次 1 · 历史 3」',
+      String(initial.ariaLabel ?? '') === '本次 1 · 历史 3', String(initial.ariaLabel));
+    report('药丸画在节点上方，且真的点得到（elementFromPoint 命中它自己）',
+      initial.pillAboveNode === true && initial.pill?.onTop === true,
+      `above=${initial.pillAboveNode} onTop=${initial.pill?.onTop}`);
+    report('主视频在真 Chrome 里解码出来了（320×180，不是一块黑）',
+      initial.mainWidth === 320 && initial.mainHeight === 180,
+      `${initial.mainWidth}x${initial.mainHeight}`);
+    report('点药丸 → 摊出 2 条历史，每条都是真 <video>',
+      expanded.items?.length === 2 &&
+        expanded.items.every((item) => String(item.src).includes('/videos/video-history-')),
+      JSON.stringify((expanded.items ?? []).map((item) => item.src)));
+    report('历史格摊在节点**外面**（没被外框剪掉：rect 在框外 + 中心点打得到它自己）',
+      expanded.items?.length === 2 &&
+        expanded.items.every((item) => item.outside === true && item.hitSelf === true),
+      JSON.stringify(expanded.items));
+    report('点第 2 条历史的「设为主视频」→ 主片换成蓝的那条',
+      String(promoted.mainSrc ?? '').includes('video-history-blue.mp4'),
+      String(promoted.mainSrc).slice(-40));
+    report('换主视频不丢历史（药丸仍是历史 3）',
+      String(promoted.label ?? '').includes('历史 3') || String(promoted.ariaLabel ?? '').includes('历史 3'),
+      `${promoted.label} / ${promoted.ariaLabel}`);
+    report('换片不会摊开/复制节点（画布上始终只有 1 个节点）',
+      initial.nodeCount === 1 && expanded.nodeCount === 1 && promoted.nodeCount === 1,
+      `${initial.nodeCount} / ${expanded.nodeCount} / ${promoted.nodeCount}`);
+    // ---- v1.66：截帧入口（真布局）----
+    report('视频底栏有「截取视频帧」入口，点开是三项菜单（首帧 / 尾帧 / 首尾帧）',
+      steps.framesMenu === true &&
+        JSON.stringify(steps.framesMenuItems) === JSON.stringify(['first', 'last', 'both']),
+      `menu=${steps.framesMenu} items=${JSON.stringify(steps.framesMenuItems)} ${steps.framesError || ''}`);
+    report('菜单能再点一下收起来（不会一直浮在节点上）', steps.framesMenuClosed === true,
+      String(steps.framesMenuClosed));
+    report('截图停在「主片是蓝的 + 旁边摊着两条历史」（交付图取证）',
+      String(final.mainSrc ?? '').includes('video-history-blue.mp4') &&
+        final.items?.length === 2 &&
+        final.expanded === 'true',
+      `${String(final.mainSrc).slice(-32)} items=${final.items?.length}`);
+  }
+
+  /**
+   * 视频节点能接几张参考图（?xvideorefs=1，v1.65）。
+   * 用户原话：「视频生成图像参考只能拖入三张，修复一下，按 minimaxh3 的标准来」。
+   *
+   * 真机这一场守的是「真布局下拖得动 + 上限就是 9」：
+   *   ① 连接点在真布局里有 rect（jsdom 里全是 0，那半条只能靠公式兜底）；
+   *   ② 从图片节点的输出圆拖到视频节点身上，9 张全接上（修复前第 4 张就断）；
+   *   ③ 第 10 张被拒 —— 上限是 9，不是「干脆不设上限」；
+   *   ④ 注册表里的 maxInputs 与模式声明的 9 自洽（别又写回一个小数字）。
+   */
+  if (label === 'video-references') {
+    const steps = probe.videoRefs ?? {};
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const dragged = Array.isArray(steps.dragged) ? steps.dragged : [];
+    const parents = Array.isArray(steps.connected?.parents) ? steps.connected.parents : [];
+    report('拖线场景走完（10 次 pointerdown/move/up 都派发了）',
+      steps.done === true && !steps.error && dragged.length === 10,
+      String(steps.error || '').slice(0, 200) || `dragged=${dragged.length}`);
+    report('10 张图的「连接输出」在真布局里都有 rect（点得到才拖得动）',
+      dragged.every((item) => item.ok === true && Number(item.width) > 0),
+      JSON.stringify(dragged.map((item) => `${item.id}:${item.ok}:${item.width}`)));
+    report('9 张参考图全部接上（修复前只到 3 张）',
+      parents.length === 9,
+      `parentIds=${parents.length} ${JSON.stringify(parents)}`);
+    report('第 10 张被拒（上限 9，不是无穷）',
+      parents.includes('video-ref-image-9') && !parents.includes('video-ref-image-10'),
+      JSON.stringify(parents));
+    report('注册表：多图参考声明 9 张、总输入上限 ≥ 10',
+      steps.registry?.found === true &&
+        steps.registry?.imageLimit === 9 &&
+        Number(steps.registry?.maxInputs) >= 10,
+      JSON.stringify(steps.registry));
+    report('拖完线不会凭空多节点（画布上还是 11 个）',
+      steps.connected?.nodeCount === 11, String(steps.connected?.nodeCount));
   }
 
   /**

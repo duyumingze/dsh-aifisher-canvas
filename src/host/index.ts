@@ -42,6 +42,16 @@ import { collectPreviewFiles } from './canvas/preview';
 import { summarizeCanvasRead } from './canvas/readSummary';
 import { createProjectMemory, type ProjectMemoryBlock } from './canvas/projectMemory';
 import { createAssetLibrary } from './canvas/assetLibrary';
+import {
+  applyCameraToPrompt,
+  buildCameraClause,
+  cameraCatalog,
+  cameraSummary,
+  createCameraStore,
+  stripCameraClause,
+} from './canvas/camera';
+import { queryCanvas } from './canvas/query';
+import { createProgressStore, formatProgressForPrompt, nextPhase, PHASE_LABELS, PHASES } from './canvas/progress';
 import { compileIntent } from './canvas/intent';
 import { planPromptFixes, reviewCanvas } from './canvas/review';
 import { planCrew, receiveCrew } from './canvas/crew';
@@ -300,8 +310,12 @@ function installGenerationEventNotices(
  * 目标就是「新开一个会话不用重新交代画风」。所以注入点选在 `agent/pre-step`，
  * 只对**画布对话面板的会话**生效（主区域会话仍然靠 digest/工具读，不硬塞）。
  *
+ * v1.69 起这条通道还带**创作进度**：阶段、用户原话、已确认方案、定稿/参考节点。
+ * 两者共用一套防重复策略（文本变了才重插），所以推进一个阶段会自动补一条新进度，
+ * 不会每回合重复刷同一段。
+ *
  * 两条防重复：
- *   1. 同一会话、同一份记忆文本只插一次（记忆变了才重新插）；
+ *   1. 同一会话、同一份文本只插一次；
  *   2. 插在最后一条用户消息**前面**，与「画布助手上下文」同一个位置，
  *      不影响用户原话与 @ 节点快照的相对顺序。
  */
@@ -309,6 +323,7 @@ function installCanvasProjectMemory(
   ctx: Context,
   deps: {
     memory: ReturnType<typeof createProjectMemory>;
+    progress: ReturnType<typeof createProgressStore>;
     hub: ReturnType<typeof createCanvasChatHub>;
     store: ReturnType<typeof createCanvasStore>;
   },
@@ -336,9 +351,15 @@ function installCanvasProjectMemory(
         const projectId = deps.hub.projectForSession(sessionId);
         if (!projectId) return decision;
         const title = deps.store.getDocument(projectId)?.title;
-        const text = deps.memory.formatForPrompt(projectId, {
-          ...(typeof title === 'string' && title ? { title } : {}),
-        });
+        // v1.69：项目记忆 + 创作进度拼成一段（任一侧为空就只用另一侧）
+        const text = [
+          deps.memory.formatForPrompt(projectId, {
+            ...(typeof title === 'string' && title ? { title } : {}),
+          }),
+          formatProgressForPrompt(deps.progress.get(projectId)),
+        ]
+          .filter(Boolean)
+          .join('\n\n');
         if (!text || injected.get(sessionId) === text) return decision;
         injected.set(sessionId, text);
         if (injected.size > 200) injected.delete(injected.keys().next().value as string);
@@ -521,6 +542,10 @@ export function apply(ctx: Context) {
   const projectMemory = createProjectMemory({ filePath: join(dataDir, 'canvas-memory.json') });
   // 资产库（v1.63）：<数据目录>/canvas-assets.json（角色/场景/道具/画风的锁定串 + 定妆节点）
   const assetLibrary = createAssetLibrary({ filePath: join(dataDir, 'canvas-assets.json') });
+  // 摄影参数（v1.69）：<数据目录>/canvas-camera.json（机身/镜头/焦段/光圈，按项目一套）
+  const cameraStore = createCameraStore({ filePath: join(dataDir, 'canvas-camera.json') });
+  // 创作进度（v1.69）：<数据目录>/canvas-progress.json（阶段 + 已确认方案 + 定稿/参考节点）
+  const progressStore = createProgressStore({ filePath: join(dataDir, 'canvas-progress.json') });
   // 长任务通知：推不进会话就留着，下一回合由 pre-step 补给（与生成事件同一套护栏）
   const canvasNotices = createCanvasNoticeQueue({ ctx });
   /**
@@ -616,7 +641,12 @@ export function apply(ctx: Context) {
   // v1.57：生成事件推送的兜底入口（主动推送失败的批次在这里补给会话）
   installGenerationEventNotices(ctx, generationPush);
   // v1.59：画布对话每回合带上项目记忆（风格/角色/参数，跨会话不再重新交代）
-  installCanvasProjectMemory(ctx, { memory: projectMemory, hub: chatHub, store: canvasStore });
+  installCanvasProjectMemory(ctx, {
+    memory: projectMemory,
+    progress: progressStore,
+    hub: chatHub,
+    store: canvasStore,
+  });
   // v1.59：长任务通知的兜底入口（收口/自动重试没推出去时，下一回合补给会话）
   installCanvasNoticeNotices(ctx, canvasNotices);
 
@@ -659,6 +689,9 @@ export function apply(ctx: Context) {
         'Assets (v1.63): action:"assetlibrary" list/add/update/remove/link/import/use keeps per-project character/scene/prop/style cards with a verbatim lock string; op:"use" registers a card’s node as a reference anchor and locks it onto shots. intent weaves these lock strings automatically. ' +
         'Multi-agent (v1.63): action:"crew" {op:"plan", brief, shots?} returns assignments (role, task, deliverable JSON schema, boundary, compact context) that you can hand to DSH subagents; {op:"receive", role, deliverable, apply?} validates and normalizes their shots/locks — subagents never get canvas approve rights. ' +
         'job also accepts brief (v1.63): {op:"create", brief:"…", shotsCount?} runs the intent compiler first, so 「一句话做完整短片」 is one call; explicit shots still win. ' +
+        'Camera (v1.69): action:"camera" op:"list"|"set"|"apply"|"strip"|"reset" keeps a structured camera body / lens / focal length / aperture per project and appends a rewritten English optics clause to the end of node prompts. It is idempotent (re-apply replaces the old clause, never grows the prompt), only touches prompt text (never model/parameters), and generation still needs the human approval step. ' +
+        'Directed queries (v1.69): action:"query" {nodeId?, path:"self"|"upstream"|"downstream"|"connected", depth?:1-3, keyword?, type?, page?, pageSize?} returns only the matching nodes plus edges between them — prefer it over read when the canvas is large; excerpts are capped at 160 chars (read detail:"full" for the whole text). ' +
+        'Progress (v1.69): action:"progress" {op:"get"|"set"|"clear", phase, brief?, approvedPlan?, approvedNodeIds?, referenceNodeIds?, note?} persists the creation phase chain (intake→concept→script→breakdown→references→storyboard→video→audio→review→complete). It is injected into canvas chat turns next to project memory, so a later session knows exactly where you stopped and which plan the user already approved. ' +
         'Full contract and error codes: docs/canvas-agent-contract.md.',
       parameters: {
         action: {
@@ -672,6 +705,7 @@ export function apply(ctx: Context) {
             'skills', 'skillLoad', 'recipe', 'preview',
             'memory', 'consistency', 'copilot', 'job',
             'intent', 'review', 'assetlibrary', 'crew',
+            'camera', 'query', 'progress',
           ],
         },
         /** edit/undo 必须带上一轮 read 返回的 revision（乐观并发令牌）。 */
@@ -746,6 +780,28 @@ export function apply(ctx: Context) {
          *   { op:"receive", role, deliverable:{shots?/locks?/verdicts?}, apply?, importLocks? }
          */
         crew: { type: 'object', additionalProperties: true },
+        /**
+         * 摄影参数（action:"camera"，v1.69）：
+         *   { op:"list" } | { op:"reset" } | { op:"strip", nodeIds? }
+         *   | { op:"set", enabled?, body?, lens?, focalLength?, aperture? }
+         *   | { op:"apply", nodeIds? }（nodeIds 省略 = 所有有提示词的 Image/Video 节点）
+         * body/lens 取 list 返回的 id（也认中英文名）；focalLength 取 14…200，aperture 取 1.2…16。
+         */
+        camera: { type: 'object', additionalProperties: true },
+        /**
+         * 定向查询（action:"query"，v1.69）：
+         *   { nodeId, path:"self"|"upstream"|"downstream"|"connected", depth?:1-3 }
+         *   | { keyword?, type?, page?, pageSize? }
+         * 只回命中的节点 + 两端都在结果里的连线；提示词片段截到 160 字。
+         */
+        query: { type: 'object', additionalProperties: true },
+        /**
+         * 创作进度（action:"progress"，v1.69）：
+         *   { op:"get" } | { op:"clear" }
+         *   | { op:"set", phase, brief?, approvedPlan?, approvedNodeIds?, referenceNodeIds?, note? }
+         * phase 首次必填且必须是 intake/concept/script/breakdown/references/storyboard/video/audio/review/complete。
+         */
+        progress: { type: 'object', additionalProperties: true },
         /**
          * 逃生舱：直接给一条完整画布指令（canvasControlProtocol 的 CanvasControl），
          * 用于那些参数较多、暂时没有单独暴露的动作（prepareGeneration/media/workflow…）。
@@ -1080,6 +1136,249 @@ export function apply(ctx: Context) {
           } | null;
           return read && Array.isArray(read.nodes) ? read.nodes : [];
         };
+
+        // ----------------------------------------------------------
+        // v1.69（P3）：摄影参数 / 定向查询 / 创作进度
+        //
+        // 三者都在 host 侧完成：参数与进度是文件（刷新/换会话不丢），查询是对一次
+        // read 的纯函数过滤（只把命中的几条交给模型）。只有 camera 的 apply/strip
+        // 会改画布 —— 写的是提示词，走普通 edit，模型/参数一分不动。
+        // ----------------------------------------------------------
+        if (args.action === 'camera') {
+          const projectId = activeProjectId();
+          if (!projectId) {
+            return { ok: false, code: 'NO_PROJECT', message: '画布没有打开项目，无法读写摄影参数。' };
+          }
+          const input = ((args as { camera?: unknown }).camera ?? {}) as Record<string, unknown>;
+          const op = typeof input.op === 'string' ? input.op : 'list';
+          try {
+            if (op === 'list') {
+              const config = cameraStore.get(projectId);
+              return {
+                ok: true,
+                action: 'camera',
+                result: {
+                  config,
+                  summary: cameraSummary(config),
+                  clause: buildCameraClause(config),
+                  catalog: cameraCatalog() as unknown as ToolJson,
+                  hint:
+                    'body/lens 用 catalog 里的 id（也认中英文名）；set 只存参数，apply 才写进节点提示词。' +
+                    '提示词片段是英文光学描述，重复 apply 只替换不叠加。',
+                } as unknown as ToolJson,
+              };
+            }
+            if (op === 'set') {
+              const saved = await cameraStore.set(projectId, input);
+              if ('error' in saved) {
+                return { ok: false, code: 'INVALID', action: 'camera', message: saved.error };
+              }
+              return {
+                ok: true,
+                action: 'camera',
+                result: {
+                  config: saved.config,
+                  summary: cameraSummary(saved.config),
+                  clause: buildCameraClause(saved.config),
+                  hint: '参数已存进项目（刷新/换会话不丢）；要写进节点提示词，再调 op:"apply"。',
+                } as unknown as ToolJson,
+              };
+            }
+            if (op === 'reset') {
+              const config = await cameraStore.reset(projectId);
+              return {
+                ok: true,
+                action: 'camera',
+                result: { config, summary: cameraSummary(config) } as unknown as ToolJson,
+              };
+            }
+            if (op === 'apply' || op === 'strip') {
+              const config = cameraStore.get(projectId);
+              if (op === 'apply' && !config.enabled) {
+                return {
+                  ok: false,
+                  code: 'CAMERA_DISABLED',
+                  action: 'camera',
+                  message: '这个项目的摄影参数处于关闭状态：先 op:"set" enabled:true 再 apply。',
+                };
+              }
+              const read = (await bridge.request({ action: 'read' }, { sessionId })) as {
+                revision?: unknown;
+                nodes?: unknown;
+              } | null;
+              const revision = typeof read?.revision === 'string' ? read.revision : '';
+              if (!revision) {
+                return { ok: false, code: 'NEED_REVISION', message: '画布没有返回 revision。' };
+              }
+              const nodes = Array.isArray(read?.nodes) ? read.nodes : [];
+              const wanted = Array.isArray((args as { nodeIds?: unknown }).nodeIds)
+                ? (args as { nodeIds: unknown[] }).nodeIds.filter(
+                    (value): value is string => typeof value === 'string' && value.length > 0,
+                  )
+                : [];
+              const wantedSet = wanted.length > 0 ? new Set(wanted) : null;
+              const operations: Array<Record<string, unknown>> = [];
+              const applied: Array<{ nodeId: string; title: string }> = [];
+              const skipped: Array<{ nodeId: string; title: string; reason: string }> = [];
+              const unchanged: string[] = [];
+              for (const raw of nodes) {
+                if (!raw || typeof raw !== 'object') continue;
+                const node = raw as Record<string, unknown>;
+                const id = typeof node.id === 'string' ? node.id : '';
+                if (!id) continue;
+                if (wantedSet && !wantedSet.has(id)) continue;
+                const type = String(node.type ?? '').toLowerCase();
+                // 不带 nodeIds 时只找「有提示词的生成节点」：Text/Group/Config 不该被写摄影参数
+                if (!wantedSet && !['image', 'video'].includes(type)) continue;
+                const title = typeof node.title === 'string' && node.title ? node.title : id;
+                const prompt = typeof node.prompt === 'string' ? node.prompt : '';
+                if (!prompt.trim()) {
+                  skipped.push({ nodeId: id, title, reason: '提示词为空，先写提示词再套摄影参数' });
+                  continue;
+                }
+                const next =
+                  op === 'apply' ? applyCameraToPrompt(prompt, config) : stripCameraClause(prompt);
+                if (next === prompt) {
+                  unchanged.push(id);
+                  continue;
+                }
+                operations.push({ kind: 'update', nodeId: id, patch: { prompt: next } });
+                applied.push({ nodeId: id, title });
+              }
+              if (operations.length === 0) {
+                return {
+                  ok: true,
+                  action: 'camera',
+                  result: {
+                    op,
+                    applied: 0,
+                    unchanged,
+                    skipped,
+                    summary: cameraSummary(config),
+                    hint:
+                      op === 'apply'
+                        ? '没有节点需要改写：要么提示词里已经是这一段，要么目标节点没有提示词。'
+                        : '没有节点带着相机片段，无需剥离。',
+                  } as unknown as ToolJson,
+                };
+              }
+              const editResult = (await bridge.request(
+                { action: 'edit', revision, operations },
+                { sessionId },
+              )) as Record<string, unknown> | null;
+              if (editResult && editResult.ok === false) {
+                return {
+                  ok: false,
+                  code: typeof editResult.code === 'string' ? editResult.code : 'CANVAS_REJECTED',
+                  action: 'camera',
+                  message:
+                    '画布拒绝了提示词改写操作（update 只接受 title/prompt/text/x/y；节点在生成中时也会被拒）。',
+                };
+              }
+              const saved = await flushCanvasSave(sessionId, editResult?.revision);
+              return {
+                ok: true,
+                action: 'camera',
+                result: {
+                  op,
+                  applied: applied.length,
+                  nodes: applied as unknown as ToolJson,
+                  skipped: skipped as unknown as ToolJson,
+                  unchanged: unchanged as unknown as ToolJson,
+                  summary: cameraSummary(config),
+                  saved,
+                  hint:
+                    op === 'apply'
+                      ? '摄影参数已写进这些节点的提示词末尾；生成仍需在画布上点确认（费用授权归用户）。'
+                      : '相机片段已从这些提示词里剥掉，其余文字没动。',
+                } as unknown as ToolJson,
+              };
+            }
+            return {
+              ok: false,
+              code: 'INVALID',
+              message: `未知 op：${op}（list/set/apply/strip/reset）。`,
+            };
+          } catch (error) {
+            const code = (error as { code?: string }).code ?? 'CAMERA_FAILED';
+            return {
+              ok: false,
+              code,
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+
+        if (args.action === 'query') {
+          try {
+            const nodes = await readLiveNodes();
+            const outcome = queryCanvas(nodes, (args as { query?: unknown }).query);
+            if ('error' in outcome) {
+              return { ok: false, code: outcome.code, action: 'query', message: outcome.error };
+            }
+            return { ok: true, action: 'query', result: outcome as unknown as ToolJson };
+          } catch (error) {
+            const code = (error as { code?: string }).code ?? 'CANVAS_BRIDGE_FAILED';
+            return {
+              ok: false,
+              code,
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
+
+        if (args.action === 'progress') {
+          const projectId = activeProjectId();
+          if (!projectId) {
+            return { ok: false, code: 'NO_PROJECT', message: '画布没有打开项目，无法读写创作进度。' };
+          }
+          const input = ((args as { progress?: unknown }).progress ?? {}) as Record<string, unknown>;
+          const op = typeof input.op === 'string' ? input.op : 'get';
+          try {
+            if (op === 'get') {
+              const progress = progressStore.get(projectId);
+              return {
+                ok: true,
+                action: 'progress',
+                result: {
+                  progress,
+                  prompt: formatProgressForPrompt(progress),
+                  phases: PHASES.map((phase) => ({ phase, label: PHASE_LABELS[phase] })),
+                  ...(progress ? {} : { hint: '这个项目还没记进度：op:"set" 给 phase（intake…complete）开始。' }),
+                } as unknown as ToolJson,
+              };
+            }
+            if (op === 'clear') {
+              const cleared = await progressStore.clear(projectId);
+              return { ok: true, action: 'progress', result: { cleared } as unknown as ToolJson };
+            }
+            if (op === 'set') {
+              const saved = await progressStore.set(projectId, input);
+              if ('error' in saved) {
+                return { ok: false, code: 'INVALID', action: 'progress', message: saved.error };
+              }
+              const next = nextPhase(saved.progress.phase);
+              return {
+                ok: true,
+                action: 'progress',
+                result: {
+                  progress: saved.progress,
+                  changed: saved.changed,
+                  next: next ? { phase: next, label: PHASE_LABELS[next] } : null,
+                  prompt: formatProgressForPrompt(saved.progress),
+                  hint: '进度会在画布对话的下一回合跟项目记忆一起注入（同一份只注入一次）。',
+                } as unknown as ToolJson,
+              };
+            }
+            return { ok: false, code: 'INVALID', message: `未知 op：${op}（get/set/clear）。` };
+          } catch (error) {
+            return {
+              ok: false,
+              code: 'PROGRESS_FAILED',
+              message: error instanceof Error ? error.message : String(error),
+            };
+          }
+        }
 
         if (args.action === 'memory') {
           const projectId = activeProjectId();
@@ -1922,6 +2221,10 @@ export function apply(ctx: Context) {
               const anchors: AnchorInput[] = projectId ? anchorList(projectId) : [];
               const coverage = coverageReport(nodes, anchors);
               const suggestions = buildCopilotSuggestions({ nodes, memory });
+              // v1.69：摄影参数与创作进度也进摘要 —— 规划时最需要知道的「现在什么状态」
+              const cameraConfig = projectId ? cameraStore.get(projectId) : null;
+              const progress = projectId ? progressStore.get(projectId) : null;
+              const next = progress ? nextPhase(progress.phase) : null;
               digestExtra = {
                 projectId: projectId || null,
                 memory: {
@@ -1930,6 +2233,24 @@ export function apply(ctx: Context) {
                   hint: '风格/角色/参数用 action:"memory" 写入，下次会话自动注入。',
                 },
                 assets: projectId ? assetLibrary.summary(projectId) : { entries: 0, byKind: {}, linked: 0 },
+                camera: cameraConfig
+                  ? {
+                      enabled: cameraConfig.enabled,
+                      summary: cameraSummary(cameraConfig),
+                      hint: '整套参数用 action:"camera" op:"apply" 写进镜头提示词（幂等）。',
+                    }
+                  : null,
+                progress: progress
+                  ? {
+                      phase: progress.phase,
+                      label: PHASE_LABELS[progress.phase],
+                      next: next ?? null,
+                      approvedPlanChars: progress.approvedPlan.length,
+                      approvedNodes: progress.approvedNodeIds.length,
+                      referenceNodes: progress.referenceNodeIds.length,
+                      hint: '进度与已确认方案用 action:"progress" 读写，画布会话每回合自动带上。',
+                    }
+                  : null,
                 consistency: {
                   shots: coverage.shots,
                   covered: coverage.covered,
@@ -1998,3 +2319,20 @@ export type { CopilotSuggestion } from './canvas/copilot';
 export { compileIntent, splitBrief, distributeBeats } from './canvas/intent';
 export { planPromptFixes, probeImageFile, reviewCanvas } from './canvas/review';
 export { planCrew, receiveCrew } from './canvas/crew';
+// v1.69（P3）：摄影参数 / 定向查询 / 创作进度的纯函数出口（回归直接 import 产物）
+export {
+  APERTURES,
+  CAMERA_BODIES,
+  CINEMA_LENSES,
+  FOCAL_LENGTHS,
+  applyCameraToPrompt,
+  buildCameraClause,
+  cameraCatalog,
+  cameraSummary,
+  describeAperture,
+  describeFocalLength,
+  normalizeCameraInput,
+  stripCameraClause,
+} from './canvas/camera';
+export { queryCanvas } from './canvas/query';
+export { PHASE_LABELS, PHASES, formatProgressForPrompt, nextPhase } from './canvas/progress';

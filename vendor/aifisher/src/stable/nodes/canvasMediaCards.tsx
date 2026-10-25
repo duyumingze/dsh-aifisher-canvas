@@ -109,6 +109,11 @@ function MediaCard(
   const previewProps =
     kind === 'Video'
       ? {
+          // dsh-aifisher-canvas v1.64：视频卡也把「历史 N」放进节点头部（与图片一致）；
+          // 扇形叠与「设为主视频」在 scripts/patches/aifisher/.../canvasVideoPlayer.tsx。
+          renderHeader: (historyControl: ReactTypes.ReactNode) => (
+            <Header {...headerProps(props)}>{historyControl}</Header>
+          ),
           inputUrl: props.inputUrl,
           onSnapshot: props.onVideoSnapshot
             ? (data: string) => props.onVideoSnapshot?.(node.id, data)
@@ -118,10 +123,17 @@ function MediaCard(
                 props.onVideoFirstLastSnapshot?.(node.id, first, last)
             : undefined,
         }
-      : { onUpload: props.onUpload };
+      : {
+          renderHeader: (historyControl: ReactTypes.ReactNode) => (
+            <Header {...headerProps(props)}>{historyControl}</Header>
+          ),
+          onUpload: props.onUpload,
+        };
   return (
     <Frame {...frameProps(props)} width={kind === 'Video' ? '385px' : '365px'} controls={controls}>
-      {(kind !== 'Image' || !(props.isVisible ?? true)) && <Header {...headerProps(props)} />}
+      {/* 可见时头部由 Preview 自己画（它还要塞「历史 N」那枚药丸；v1.64 起视频也一样）；
+          不可见（被折叠进叠图之类）才在这里补一条。 */}
+      {!(props.isVisible ?? true) && <Header {...headerProps(props)} />}
       <Toolbar
         {...toolbarProps(props)}
         fileInputRef={fileInput}
@@ -152,13 +164,6 @@ function MediaCard(
           data={node}
           selected={props.selected}
           onUpdate={props.onUpdate}
-          {...(kind === 'Image'
-            ? {
-                renderHeader: (historyControl: ReactTypes.ReactNode) => (
-                  <Header {...headerProps(props)}>{historyControl}</Header>
-                ),
-              }
-            : {})}
           {...previewProps}
         />
       )}

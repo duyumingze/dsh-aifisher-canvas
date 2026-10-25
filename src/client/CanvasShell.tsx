@@ -30,6 +30,7 @@ import * as React from 'react';
 
 import { CanvasPanel } from './CanvasPanel';
 import { CANVAS_CHAT_SLOT } from './CanvasChatDock';
+import type { CanvasSessionActions } from './CanvasChatDock';
 
 /** 右侧会话栏的宽度偏好键。 */
 const WIDTH_KEY = 'dsh-aifisher-canvas.chatDock.width';
@@ -95,6 +96,11 @@ function writeStorage(key: string, value: string): void {
 export interface CanvasShellProps {
   /** 退出面板（回 DSH 对话）；由 apply.ts 接 ctx.layout.selectPanel(null)。 */
   onExit?: () => void;
+  /**
+   * 会话切换动作（v1.62）：新建 / 切换会话但留在画布。
+   * 由 apply.ts 注入 —— 只有这里（画布外壳）能把它转给会话子槽位。
+   */
+  sessionActions?: CanvasSessionActions;
   /**
    * 子槽位渲染器：apply.ts 在注册 `main` 条目时声明了 children，
    * 宿主于是会把 `renderSlot` 放进标准 props（宿主没给时右栏退化成提示）。
@@ -187,7 +193,7 @@ function CollapsedRail({ onOpen }: { onOpen: () => void }) {
   );
 }
 
-export function CanvasShell({ onExit, renderSlot }: CanvasShellProps = {}) {
+export function CanvasShell({ onExit, renderSlot, sessionActions }: CanvasShellProps = {}) {
   const [open, setOpen] = React.useState<boolean>(() => readStoredOpen());
   const [width, setWidth] = React.useState<number>(() => readStoredWidth());
   // 拖拽起点（指针捕获期间的基准）：用 ref 存，避免 pointermove 里读到旧 state。
@@ -253,7 +259,7 @@ export function CanvasShell({ onExit, renderSlot }: CanvasShellProps = {}) {
               'data-dsh-aifisher-canvas': 'chat-column',
               style: { ...DOCK_COLUMN_STYLE, width },
             },
-            renderSlot(CANVAS_CHAT_SLOT, { onClose: () => setOpenPersisted(false) }),
+            renderSlot(CANVAS_CHAT_SLOT, { onClose: () => setOpenPersisted(false), sessionActions }),
           ),
         )
       : null;

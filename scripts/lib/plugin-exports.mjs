@@ -13,4 +13,16 @@ export {
   shotNumberFromTitle,
   buildCopilotSuggestions,
   copilotSummary,
+  // v1.69（P3）：摄影参数 / 定向查询 / 创作进度
+  applyCameraToPrompt,
+  buildCameraClause,
+  cameraSummary,
+  describeAperture,
+  describeFocalLength,
+  normalizeCameraInput,
+  stripCameraClause,
+  queryCanvas,
+  formatProgressForPrompt,
+  nextPhase,
+  PHASES,
 } from '../../lib/index.js';

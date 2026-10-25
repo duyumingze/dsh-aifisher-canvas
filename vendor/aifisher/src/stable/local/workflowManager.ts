@@ -1011,7 +1011,7 @@ export function createWorkflowManager(
         ? '正在使用自定义封面'
         : record.automaticCover
           ? '正在使用最近一次成功输出'
-          : '暂无输出画面，将显示 AIFISHER 占位图',
+          : '暂无输出画面，将显示 渡雨鸣泽占位图',
     );
     const coverActions = element('div', 'fwm-actions');
     const uploadCover = button('上传自定义封面');
@@ -1047,7 +1047,7 @@ export function createWorkflowManager(
       coverInput.value = '';
       coverState.textContent = record.automaticCover
         ? '保存后使用最近一次成功输出'
-        : '保存后使用 AIFISHER 占位图';
+        : '保存后使用 渡雨鸣泽占位图';
       previewCopy.firstElementChild!.textContent = 'LATEST OUTPUT';
       drawPreview(record.automaticCover);
     });

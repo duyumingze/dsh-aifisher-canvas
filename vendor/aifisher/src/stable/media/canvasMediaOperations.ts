@@ -229,20 +229,47 @@ export function createCanvasMedia(binding: MediaBinding, api: MediaRuntime = run
         true,
       );
     },
-    async snapshot(sourceId: string, frames: { data: string; title: string; offset: number }[]) {
+    async snapshot(
+      sourceId: string,
+      frames: { data: string; title: string; offset: number; focus?: boolean }[],
+    ) {
       if (!active()) return;
       const source = binding.getNodes().find((node) => node.id === sourceId);
       if (!source) return;
-      const pending = frames.map((frame) => {
+      // dsh-aifisher-canvas v1.66：只截一帧时另一帧传空串 —— 空帧直接跳过，不造空节点
+      const wanted = frames.filter(
+        (frame) => typeof frame.data === 'string' && frame.data.length > 0,
+      );
+      if (!wanted.length) return;
+      // 落位问桥（贴视频右侧 / 首上尾下 / 避开已有节点）；桥不在才退回上游的固定 +400
+      const frameLayout = (
+        window as unknown as {
+          __FISHERAI_FRAME_LAYOUT__?: {
+            place(
+              source: unknown,
+              items: unknown[],
+              nodes: unknown[],
+            ): Array<{ x: number; y: number }>;
+          };
+        }
+      ).__FISHERAI_FRAME_LAYOUT__;
+      const spots =
+        frameLayout?.place(
+          source,
+          wanted.map((frame) => ({ title: frame.title, offset: frame.offset })),
+          binding.getNodes(),
+        ) ?? wanted.map((frame) => ({ x: source.x + 400, y: source.y + frame.offset }));
+      const pending = wanted.map((frame, index) => {
         const id = api.createId(),
           job = start(id);
         const node: CanvasNode = {
           id,
           type: 'Upload Image',
-          x: source.x + 400,
-          y: source.y + frame.offset,
+          x: spots[index]?.x ?? source.x + 400,
+          y: spots[index]?.y ?? source.y + frame.offset,
           title: frame.title,
-          prompt: frame.title,
+          // v1.66：截帧节点的 prompt 留空 —— 「视频首帧」这种标题会被当成提示词拼给下游
+          prompt: '',
           status: 'loading',
           parentIds: [sourceId],
           model: 'Snapshot',
@@ -253,6 +280,13 @@ export function createCanvasMedia(binding: MediaBinding, api: MediaRuntime = run
         return { node, job, frame };
       });
       binding.select?.(pending.map(({ node }) => node.id));
+      // dsh-aifisher-canvas v1.66：带 focus 的截帧把「视频 + 新帧」一起收进视口，
+      // 否则节点落在视口外时用户看到的就是「点了没反应」（v1.64 的视频历史同理，但那边是就地摊开）。
+      if (pending.some(({ frame }) => frame.focus)) {
+        (
+          window as unknown as { __FISHERAI_FOCUS_NODES__?: (ids: readonly string[]) => void }
+        ).__FISHERAI_FOCUS_NODES__?.([sourceId, ...pending.map(({ node }) => node.id)]);
+      }
       await Promise.all(
         pending.map(({ node, job, frame }) =>
           complete(node, job, 'image', () =>
@@ -682,9 +716,10 @@ export function useCanvasSnapshots(hooks: Hooks, options: MediaOptions) {
     handleVideoSnapshot: (id: string, data: string) =>
       owner.current?.snapshot(id, [{ data, title: '视频截图', offset: 0 }]),
     handleVideoFirstLastSnapshot: (id: string, first: string, last: string) =>
+      // dsh-aifisher-canvas v1.66：任一侧传空串 = 只要另一侧的帧（播放器菜单里的「截取首帧 / 尾帧」）
       owner.current?.snapshot(id, [
-        { data: first, title: '视频首帧', offset: -150 },
-        { data: last, title: '视频尾帧', offset: 150 },
+        { data: first, title: '视频首帧', offset: -150, focus: true },
+        { data: last, title: '视频尾帧', offset: 150, focus: true },
       ]),
   };
 }

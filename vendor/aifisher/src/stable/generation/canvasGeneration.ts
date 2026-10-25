@@ -305,7 +305,21 @@ export function createCanvasGeneration(
             };
           } else if (node.type === 'Video') {
             const metadata = await runtime.inspectVideo(urls[0]).catch(() => ({}));
-            patch = { resultUrl: urls[0], resultUrls: urls, lastFrame: undefined,
+            // dsh-aifisher-canvas v1.64：视频也留生成历史（与图片同一套口径）。
+            // 合并算法在 src/canvas-ui/canvas/CanvasVideoHistory.ts，这里只走装配层的桥；
+            // 桥不在（例如单测直接挂组件）时退回「只记这一批」，不至于把生成链路带崩。
+            const current = binding.getNodes().find((candidate) => candidate.id === id)!;
+            const mergeVideoHistory = (
+              window as unknown as {
+                __FISHERAI_VIDEO_RESULT_HISTORY__?: {
+                  merge(node: unknown, urls: readonly unknown[]): Record<string, unknown>;
+                };
+              }
+            ).__FISHERAI_VIDEO_RESULT_HISTORY__?.merge;
+            const history = mergeVideoHistory
+              ? mergeVideoHistory(current, urls)
+              : { resultUrl: urls[0], resultUrls: urls, currentResultCount: urls.length };
+            patch = { ...history, lastFrame: undefined,
               resultAspectRatio: undefined, naturalWidth: undefined, naturalHeight: undefined, ...metadata };
           } else patch = { resultUrl: urls[0], resultUrls: urls };
         }

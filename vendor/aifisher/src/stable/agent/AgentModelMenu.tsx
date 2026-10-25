@@ -212,7 +212,7 @@ export function AgentModelMenu(props: Props) {
                     </p>
                   )}
                   <p className="mt-2 text-[var(--af-text-secondary)]">
-                    缺少新模型时也请更新。安装或更新后重启 AIFISHER，再回到这里检测。
+                    缺少新模型时也请更新。安装或更新后重启画布，再回到这里检测。
                   </p>
                 </details>
                 <button

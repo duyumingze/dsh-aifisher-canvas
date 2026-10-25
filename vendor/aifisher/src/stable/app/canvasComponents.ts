@@ -374,6 +374,10 @@ export const ImagePreview = bind(Dialogs.CanvasImagePreview)(() => [
 ]);
 export const VideoPlayer = bind(Dialogs.CanvasVideoPlayer)(() => [
   {
+    // dsh-aifisher-canvas v1.64：视频生成历史（头部「历史 N」+ 扇形叠）要用下载图标与节点尺寸
+    DownloadIcon: Icons.Download,
+    nodeWidth: nodeWidth,
+    nodeHeight: nodeHeight,
     MuteIcon: Icons.VolumeX,
     VolumeIcon: Icons.Volume2,
     PlayIcon: Icons.Play,

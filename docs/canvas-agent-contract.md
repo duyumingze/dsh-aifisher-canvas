@@ -16,6 +16,7 @@ edit  →  （看返回里的 snapshot）
 2. 成功时返回 `{ok, revision, operationId, created, snapshot}`：`snapshot` 是精简后的节点列表，**不需要再 read 验证**。
 3. 需要读全文时才 `read detail:"full"`；默认 `read` 会把节点正文截断到约 240 字（带 `textTruncated` 与 `readSummary.hint`）。
 4. **先看全貌再动手**：`read view:"digest"` 返回项目摘要 —— 节点/分组/连线统计、按状态计数、`hints`（如「2 个生成节点还没有提示词」「有 1 个节点是孤立节点」），**不含正文**；规划多步任务时先来这一下，再按需 `read view:"nodes" detail:"full"` 取细节。
+5. **别用 read 找节点**（v1.69）：已知 id 想看上下游用 `action:"query"`（`path:"upstream"/"downstream"/"connected"`），按标题/提示词找节点用 `query` 带 `keyword`；镜头语言（焦段/光圈/机身）用 `action:"camera"` 一次写进提示词；接手别人的项目先 `action:"progress"` 看做到第几步、哪版方案用户已经确认。
 
 以前是 `read → edit → read` 三次；v1.52 把「读+改」合并成一次调用，并省掉了验证用的那次 read。
 如果发现自己正在 grep 源码找字段名，说明契约没覆盖到你的场景 —— 请给 `src/host/index.ts` 的工具描述提 PR。
@@ -213,6 +214,56 @@ HTTP 面（界面同源调用）：`GET /api/aifisher/canvas/copilot?projectId=`
 - **receive**：逐条校验交付（空 prompt 等逐条 `rejected` 并给原因），合格 `shots` 归一后 `apply:true` 走 recipe 展开；`locks` 默认批量登记进资产库（`importLocks:false` 可关）；
 - host **不替你起子代理**：把 assignments 交给 DSH 的 subagent 机制即可，审批权永远不随任务包下发。
 
+### 摄影参数：焦段 / 光圈写进提示词（v1.69）
+
+```jsonc
+{ "action": "camera", "camera": { "op": "list" } }
+{ "action": "camera", "camera": { "op": "set", "body": "arri-alexa-mini-lf", "lens": "cooke-s7i", "focalLength": 85, "aperture": 1.8 } }
+{ "action": "camera", "camera": { "op": "apply" } }                       // 全部有提示词的 Image/Video
+{ "action": "camera", "camera": { "op": "apply" }, "nodeIds": ["镜头3"] } // 只改指定节点
+{ "action": "camera", "camera": { "op": "strip" } }                       // 把片段剥掉
+{ "action": "camera", "camera": { "op": "reset" } }                       // 回到默认参数
+```
+
+- **存哪**：`<数据目录>/canvas-camera.json`，按项目一套（机身 / 镜头 / 焦段 / 光圈 / enabled），刷新和换会话都不丢；没设过的项目回默认（ARRI Mini LF · 大师定焦 · 50mm · f/2.8）。
+- **写进哪**：只写节点 `prompt` 的末尾，**不碰 model / parameters**（所以不会撞第 3 节的 declare 约束）；写的是英文光学描述（机身色彩科学 + 镜头虚化性格 + 焦段透视 + 光圈景深 + 一句「不要把相机画进画面」的护栏），末尾带 `[camera: ARRI Mini LF / 85mm / f/1.8]` 摘要行。
+- **幂等**：重复 `apply` 只会**替换**已有那一整段（按句首 `camera direction only —` 定位），提示词不会越跑越长；`strip` 只剥这一段，其余文字一字不动。用户在我们写入之后又往后接了自己的话时，宁可不动也不误删。
+- **校验**：`body` / `lens` 用 `list` 返回的 id（也认中英文名），`focalLength` ∈ `14/18/24/35/40/50/65/85/100/135/200`，`aperture` ∈ `1.2/1.4/1.8/2/2.8/4/5.6/8/11/16`。给不在档位里的值直接 `INVALID`，**不会静默取默认值**（静默兜底会让你以为 85mm 生效了，其实拍的是 50mm）。
+- **费用边界不变**：`apply` 只改提示词，提交生成仍要 `prepareGeneration` + 用户在画布上按确认。
+
+### 定向查询：只取那一小块（v1.69）
+
+```jsonc
+{ "action": "query", "query": { "nodeId": "镜头3", "path": "upstream", "depth": 2 } }   // 上游邻域
+{ "action": "query", "query": { "nodeId": "剧本节点", "path": "downstream" } }            // 下游邻域
+{ "action": "query", "query": { "keyword": "雨棚", "type": "Image", "page": 1, "pageSize": 20 } }
+```
+
+- 画布节点多的时候**优先用它**：一次 `read` 拿全量（毫秒级、不经过模型），再由 host 只回命中的几条 + 两端都在结果里的连线；不用为了找一个 id 把整张画布的正文塞进上下文。
+- `path`：`self`（默认）/ `upstream` / `downstream` / `connected`；`depth` 1–3（默认 1）。返回里每条带 `role`（root/upstream/downstream/related）与 `depth`。
+- 不传 `nodeId` 就按 `keyword`（标题 / 提示词 / 正文 / id 都参与匹配）和 `type` 过滤；`page` / `pageSize`（默认 20、上限 50），越界会带 `truncated: true` 和「还有 N 条」。
+- 提示词/正文只回前 160 字（`excerpt`），要全文用 `read detail:"full"`。返回里的 `promptChars`/`textChars` 帮你判断要不要去读全文。
+
+### 创作进度：换会话不丢「做到第几步」（v1.69）
+
+```jsonc
+{ "action": "progress", "progress": { "op": "get" } }
+{ "action": "progress", "progress": {
+    "op": "set", "phase": "storyboard",
+    "brief": "雨夜追车，6 个镜头，16:9",
+    "approvedPlan": "用户确认的第二版：镜头 4 改成车内视角",
+    "approvedNodeIds": ["镜头1", "镜头2"],
+    "referenceNodeIds": ["定妆节点"],
+    "note": "镜头 5 还没出图" } }
+{ "action": "progress", "progress": { "op": "clear" } }
+```
+
+- 阶段线（顺序即推进方向）：`intake` 接单 → `concept` 概念 → `script` 剧本 → `breakdown` 拆解 → `references` 参考 → `storyboard` 分镜 → `video` 视频 → `audio` 音频 → `review` 审片 → `complete` 完成。`get` 会回完整阶段表与下一步。
+- 存哪：`<数据目录>/canvas-progress.json`，按项目一条；**阶段变了才记 history**（同阶段反复改方案不刷屏），history 保留最近 20 条。
+- **与记忆的分工**：记忆（`action:"memory"`）是「风格/角色/参数偏好」，进度是「做到第几步 + 用户确认了哪一版」。`approvedPlan` 是**用户点过头的版本**，用户改主意就覆盖它，别留着旧版误导下一个会话。
+- 注入：画布对话每回合会把进度跟项目记忆拼成一段注入（内容变了才重插），所以新会话接手时不用从头问。
+- 注意：`phase` 第一次必须给；之后可以只更新 `approvedPlan` / 节点清单 / `note`。
+
 ---
 
 ## 3. configure 的四条硬约束
@@ -255,6 +306,12 @@ prepareGeneration(revision, nodeIds)
 - 准备动作最后要 `POST /api/aifisher/canvas/agent/plans` 落一条批次记录（v1.57 起 host 自己实现，内存态）——
   缺了它整条准备链会 `UNAVAILABLE`（v1.57 之前就是这个状态）。记录里的 `sessionId` + `items[].nodeId`
   同时就是「这批跑完推给谁」的绑定信息。
+
+> **明确不做（2026-10-25 用户决定）：不加「Agent 自动生成」开关。**
+> 外部同类项目有一个用户级开关（默认关＝只建节点，打开＝Agent 直接提交任务），我们评估后不做：
+> 一旦存在「打开就自动花钱」的选项，这条红线就会被人读成「默认红线」，出事时也说不清是谁授权的。
+> 所以 `canvas_control` 永远只有 `prepareGeneration`，`approve` 永远只在画布 UI。
+> 别把「Agent 跑不通生成」当成待修的缺陷，也别为它加开关、加参数、加环境变量。
 
 ### 自配云端通道（v1.52 已补）
 

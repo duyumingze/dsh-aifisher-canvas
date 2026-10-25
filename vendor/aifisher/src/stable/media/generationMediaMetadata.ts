@@ -79,13 +79,20 @@ export function inspectVideo(
     const capture = () => {
       try {
         if (video.videoWidth > 0 && video.videoHeight > 0) {
+          /**
+           * 尾帧只当缩略图用，不能按原尺寸存 PNG：
+           * 1080p 一帧 PNG 约 4–5MB，八条视频就把项目文档顶到 33MB，
+           * 超过保存接口上限后浏览器直接 Failed to fetch（保存/自动保存/导出全挂）。
+           * 这里缩到最长边 640、存 JPEG，单张约 40–80KB。
+           */
+          const scale = Math.min(1, 640 / Math.max(video.videoWidth, video.videoHeight));
           const canvas = document.createElement('canvas');
-          canvas.width = video.videoWidth;
-          canvas.height = video.videoHeight;
+          canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
+          canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
           const context = canvas.getContext('2d');
           if (context) {
-            context.drawImage(video, 0, 0);
-            metadata.lastFrame = canvas.toDataURL('image/png');
+            context.drawImage(video, 0, 0, canvas.width, canvas.height);
+            metadata.lastFrame = canvas.toDataURL('image/jpeg', 0.65);
           }
         }
       } catch {

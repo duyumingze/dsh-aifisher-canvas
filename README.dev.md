@@ -15,6 +15,8 @@
 > 面板补上目标比例 / 原图位置九宫格 / 延展内容 / 预览）、
 > v1.40 让**新建节点默认用上一次生成任务的那个模型**（在节点上换过模型、或真发过一次生成，
 > 下一个新节点就不必再调一次下拉；按图片/视频/音频/文本分桶记，模型若已不在目录里就回落目录第一个）。
+> **v1.64 给视频补上生成历史**：视频节点以前每生成一次就覆盖上一条，现在与图片同一套 ——
+> 每次结果并进 `resultUrls`、节点头部一枚「历史 N」、摊开可预览/下载/设为主视频。
 > （原来那份是逐版本累加的长文）。要更细的过程与踩坑记录，
 > 看 `docs/` 与本仓库的会话记录；要改代码，先读下面「关键约束」和对应文件顶部的注释。
 
@@ -70,6 +72,9 @@ vendor/aifisher/            上游源码（构建时由 scripts/vendor-aifisher.
 | 「工作流节点」面板（配置好的工作流按图卡片陈列，点卡片放上画布） | ➕ 新增（v1.28） | `CanvasWorkflowLibrary.tsx` + `CanvasWorkflowLibraryStore.ts` |
 | 工作流自定义配图（每份工作流一张封面图，卡片与节点共用） | ➕ 新增（v1.28） | `src/host/comfyui/workflowCovers.ts` + `src/host/canvas/workflowCoversRouter.ts` |
 | 云端生图/生视频（方舟直连 + OpenAI 兼容通道，多通道多模型） | ➕ 新增（v1.4 / v1.11） | `src/host/generation/**`, `CloudChannelPanel.ts` |
+| **视频生成历史**（每次生成并进 `resultUrls`，节点头部「历史 N」，摊开可悬停预览 / 下载 / 设为主视频） | ➕ 新增（v1.64） | `src/canvas-ui/canvas/CanvasVideoHistory.ts`, `scripts/patches/aifisher/.../canvasVideoPlayer.tsx`, `scripts/vendor-aifisher.mjs`（3.8w） |
+| **视频参考图数量**（自配通道的视频条目：总输入上限按各模式 `allowedInputs` 之和算，多图参考 = MiniMax H3 的 9 个图片槽；修「只能拖入三张」） | ➕ 修复（v1.65） | `src/canvas-ui/canvas/CloudChannelModels.ts` |
+| **视频截帧**（底部工具条三项菜单：截取首帧 / 截取尾帧 / 首尾帧各一张；单截不造多余节点、尾帧空白自动后退、输出 ≤2048、贴右避让落位、截完聚焦） | ➕ 新增（v1.66） | `src/canvas-ui/canvas/CanvasVideoFrames.ts`, `src/canvas-ui/canvas/CanvasFrameLayout.ts`, `scripts/patches/aifisher/.../canvasVideoPlayer.tsx`, `scripts/vendor-aifisher.mjs`（3.8x） |
 | 魔搭（ModelScope）API-Inference 图像接口（image_url 方言 + 一键预设） | ➕ 新增（v1.29） | `src/host/generation/cloudChannels.ts`（方言）, `CloudChannelPanel.ts` |
 | FisherAI（api.work-fisher.com）图像接口（`workfisher` 方言 + 异步任务 + 参考图直链上传） | ➕ 新增（v1.30；**v1.35 上传被掐断会自动重试 + 直链缓存**） | `src/host/generation/cloudChannels.ts`（方言/上传/轮询）, `cloudGenerationRouter.ts`, `CloudChannelPanel.ts` |
 | 画布右侧 DSH 原生会话栏（聊天框控制画布） | ➕ 新增（v1.9 / v1.14） | `src/host/canvas/{agentChatRouter,canvasChatHub,agentChatStore}.ts`, `src/client/CanvasChatDock.tsx` |
@@ -1156,13 +1161,199 @@ curl https://api.work-fisher.com/v1/image/generations \
      `test-canvas-copilot` 加了两条断言（不带 live 必须 <500ms 回、带 live 不能挂死）。
 - ⚠️ 改了 host 半：**要重启 DSH**；画布侧刷新页面即生效。
 
+### v1.63.1：「退出画布」压住「副驾」胶囊
+
+用户 2026-10-23 截图报障（只写「这两个重叠了」）：画布右下角黄色星星的「副驾 N」胶囊
+被 DSH 层的「← 退出画布」按钮压掉右半截。
+
+- **根因是两个浮层抢同一个右下角**，而它们分属两层：
+  - 退出按钮在 DSH 层（`PanelExitButton`，画布面板内的 absolute）：`right: 20`，宽 98 → 占距右缘 20..118；
+  - 副驾胶囊在画布层（`CanvasCopilot.PILL_STYLE`）：`right: 56`，宽 ~81 → 占距右缘 56..137。
+  两者都贴底（bottom 20 / 24），水平交叠 62px，**宽窗口下也必然重叠**（不是窄屏问题）。
+  之前 v1.60 只抬高了助手启动球（`bottom-20`），没管这个更晚加的胶囊。
+- **修法：右下角整块留给退出按钮**（它属于 DSH 层，必须始终可点），画布自己的浮层往中间让：
+  胶囊改成 `right: calc(50% + 54px)`，右缘贴在画布中线外 54px —— 分镜板居中、半宽约 46.5，
+  两者间距 8px，底部连成一条工具带。副驾面板也从「贴右缘」改成从胶囊正上方居中展开
+  （`left:50% / translateX(-50%)`），顺手避开窄窗口下压住按钮的风险。
+- **回归**：`test:copilot` 20→21（新增「胶囊靠中线定位、不贴右缘」断言，防它被改回固定 right 数字）；
+  真机实测 1662×954 下 胶囊 623..704 / 分镜板 712..805 / 退出按钮 1118..1216，三者两两不相交。
+- ⚠️ 只改画布产物 + client 半：**刷新页面即生效**，不用重启 DSH。
+
+### v1.64：视频生成历史（仿照图片那套）
+
+用户原话（2026-10-23）：「仿照图像生成历史记录，做视频生成历史记录功能」。
+
+- **参照物**：图片节点本来就有 —— 每次生成把新结果**并进** `resultUrls`（`resultUrl` 永远是最新那张），
+  节点头部一枚 `历史 N` 药丸，点开在节点周围扇形摊出前面那些（每张可下载 / 设为主图），
+  文案按 `currentResultCount` 在「本次 2 / 本次 2 · 历史 5 / 历史 5」之间切换。
+- **视频侧缺的三处**：
+  1. `generation/canvasGeneration.ts` 的 Video 分支直接 `resultUrls: urls` —— **覆盖**，上一条当场没了；
+  2. `generation/generationRecovery.ts` 只在 `result.type === 'image'` 时合并历史 ——
+     断线/刷新期间跑完的视频同样只剩最新一条；
+  3. `media/canvasVideoPlayer.tsx` 根本没有历史叠：`resultUrls` 就算有多条也看不见、点不到。
+- **改法（算法在插件，vendor 只留薄壳）**：
+  - **数据**：`src/canvas-ui/canvas/CanvasVideoHistory.ts` 提供纯函数
+    `mergeVideoResultHistory` / `promoteVideoResult` / `videoHistoryLabel` / `videoResultUrls`
+    （去重、上限 **12** 条 —— 比图片的 20 低，展开时每一格都是真的 `<video>`，摊 20 个会压出卡顿），
+    由装配层 `installVideoResultHistory()` 挂成 `__FISHERAI_VIDEO_RESULT_HISTORY__` 桥；
+  - **接线**：vendor 补丁 **3.8w**（9 处）让上面三处都走桥（桥不在时退回「只记这一批」，不阻断生成）；
+  - **界面**：`scripts/patches/aifisher/.../canvasVideoPlayer.tsx` 整文件覆盖 —— 头部药丸与图片同款，
+    摊开是带悬停预览的真视频格，角上「下载历史视频 N」/「设为主视频」；
+    外框的 `overflow-hidden` 挪进视频层（否则扇形会被节点边界剪掉）。
+- **「设为主视频」清三样跟着上一条片子走的字段**：`lastFrame`（首/尾帧预览、用最后一帧接着生成都读它）、
+  `resultAspectRatio / naturalWidth / naturalHeight`（新片 `loadedmetadata` 会重新量并写回）。
+- **不变的红线**：`canvas_control` 不新增任何动作；审批仍只有页面 UI 能按。历史是节点数据，
+  存在 `canvas.json` 的文档里，导出 `.fisherai` 一起带走。
+- **回归**：新增 `test:video-history` **41 项**（纯逻辑：合并去重 / 上限 12 / 换位 / 文案 / 老数据只有
+  `resultUrl`；真 DOM：药丸 → 摊开 2 条真 `<video>` → 点「设为主视频」→ 卡上换片、存盘后 `resultUrl`
+  与 `resultUrls` 顺序都在、`lastFrame` 已清；外加「图片那枚 `历史 N` 还在」）；全量 **47 套 2550 项**。
+  真浏览器新增 `video-history` 场景 **11 项**（节拍与证据见上面「真浏览器检查」）。
+- **素材**：`scripts/fixtures/video-history-{red,green,blue}.mp4` 三份 1.8KB 的 320×180 / 1 秒纯色片，
+  只给真浏览器检查用（Chrome 真解码，`videoWidth` 能读到 320）——不是运行时依赖。
+- ⚠️ 只改画布产物 + client 半：**刷新画布页即生效**，不用重启 DSH。
+
+### v1.65：视频节点的参考图能拖到 9 张（MiniMax H3 口径）
+
+用户原话（2026-10-23）：「视频生成图像参考只能拖入三张，修复一下，按 minimaxh3 的标准来」。
+
+- **现象**：自配通道里的视频模型（线上那条就是 FisherAI 的 `minimax-h3-ow-r2v`，画布上的名字
+  `通道名 · minimax-h3-ow-r2v`）在「多图参考」模式下，往节点上拖第 4 张图连不上 —— 没有报错，
+  线就是接不上。
+- **根因**：条目上的 `maxInputs: 3`（**总输入上限**）与模式声明打架。vendor 的
+  `canvasNodeRules.validateConnection` 有两道闸：
+  1. `parents.length >= model.maxInputs` —— 总闸，先拦；
+  2. 再按素材种类查该模式的 `allowedInputs`（多图参考一直写的是 `image: 9`）。
+  闸 1 写死 3，闸 2 声明的 9 张就永远用不到 —— 用户看到的就是「只能拖入三张」。
+- **改法**：`videoEntry` 的 `maxInputs` 不再手写，改为 `videoInputCap(videoModes)` ——
+  **取各模式 `allowedInputs` 之和的最大值**（文生视频 10 / 首帧 11 / 首尾帧 12 / 多图参考 19 /
+  视频参考 11 → 19）。参考图上限抽成常量 `VIDEO_REFERENCE_IMAGE_LIMIT = 9`，与
+  `vendor/.../media/minimaxH3.ts` 的 `SLOT_RANGES.referenceImage = [3, 11]`（9 个图片槽）同口径。
+  这样以后改模式上限不必再回来同步一个魔数，两条闸也不会再自相矛盾。
+- **不变的红线**：`maxInputs` 仍是「总闸」，`首帧 1 张 / 首尾帧 2 张 / 文生视频不接图」这些
+  单图模式的限制原样由 `allowedInputs` 把关；host 侧提交形状（`images[]` / `videos[]` /
+  `audios[]`）一个字没动，也不新增审批动作。
+- **回归**：新增 `test:video-references` **24 项**（纯逻辑：上限推导 / 9 张常量 / 至少为 1；
+  注册表：通道表 → 条目的 `maxInputs` 与 `allowedInputs` 自洽；**真 DOM 拖线**：10 张图依次拖到视频节点上
+  → 前 9 张连上、第 10 张被拒、节点的 `videoMode` 没被改掉 → 再接文本节点仍能进（总上限是 19 不是 9）；
+  外加源码级「别把 `maxInputs: 3` 写回去」与文档口径）。
+- ⚠️ 只改画布产物（`src/canvas-ui` + 装配层导出）：**刷新画布页即生效**，不用重启 DSH。
+
+### v1.66：视频截帧（首帧 / 尾帧 / 两张）
+
+用户原话（2026-10-23）：「完善视频截取首尾帧功能」。
+
+- **现状**（上游 `videoSnapshots.ts` + `canvasMediaOperations.snapshot()`）：一枚「截取首尾帧」
+  只能**两帧一起截**、原尺寸 PNG、节点固定落在 `source.x + 400`、截完只选中不聚焦。
+  真机实测（967×544 / 362s 的片子）：首尾帧都能取到、耗时 ~200–300ms，**取帧本身没坏**，
+  坏的是「只截一帧」「落在视口外像没反应」「4K 原图搬得很慢」这几件事。
+- **取帧算法**（`src/canvas-ui/canvas/CanvasVideoFrames.ts`，桥 `__FISHERAI_VIDEO_FRAMES__`）：
+  - `role` 驱动：`first` / `last` / 两个都要，**单帧不再配一个多余节点**；
+  - 尾帧从 `duration - 0.05` 起（与 `inspectVideo` 的 lastFrame 同口径），
+    用 4×4 像素**探空白帧**（alpha 全 0 = 没画上），空白就按 `TAIL_SEEK_OFFSETS`
+    （0.05 → 0.2 → 0.5 → 1.2s）往前退；
+  - 输出最长边压到 `FRAME_MAX_EDGE = 2048`（PNG 无损），4K 帧不再原尺寸搬；
+  - 每步错误文案分开（等首帧 / 读时长 / seek 超时 / 空白画面），不再只有一句「等待超时」。
+- **落位**（`src/canvas-ui/canvas/CanvasFrameLayout.ts`，桥 `__FISHERAI_FRAME_LAYOUT__`）：
+  贴视频右侧 60px，首帧在上、尾帧在下（以视频中线为基准，纵向间距 40），整列与画布上已有节点
+  相交就**整列右移**（最多 8 列，再不行贴画布最右）；节点宽高拿不到时按类型兜底（Video 385）。
+- **播放器**（整文件覆盖 `canvasVideoPlayer.tsx`）：原来那枚「截取首尾帧」按钮变成**三项菜单**
+  （截取首帧 / 截取尾帧 / 首尾帧各一张），另留「截图（当前画面）」；成功给一条 2.6s 的
+  「已截取尾帧」回执（以前只有失败提示），执行中按钮禁用。
+- **vendor 接线**（补丁 3.8x，4 处）：空帧跳过、坐标问落位桥、带 `focus` 的截帧把
+  「视频 + 新帧」交给 `__FISHERAI_FOCUS_NODES__` 收进视口、截帧节点 `prompt` 留空
+  （「视频首帧」这类标题不再被当成生成提示词）。
+- **回归**：新增 `test:video-frames`（纯逻辑：尺寸上限 / 尾帧候选序列 / 空白判定 / 贴右避让 /
+  兜底尺寸；真 DOM：菜单三项 → 首尾帧 2 个节点 → 单截尾帧只 1 个 → 列避让与存盘字段 →
+  回执 / 聚焦 / 桥）；全量套数与项数见下面 TOTAL。
+- ⚠️ 只改画布产物（`src/canvas-ui` + vendor 补丁 + 装配层导出）：**刷新画布页即生效**，不用重启 DSH。
+
+### v1.67：截帧加固（「截取视频首尾帧失败了」）
+
+用户报障原话（2026-10-23）：「截取视频首尾帧失败了」—— 截图里是视频节点上的一条
+「视频定位超时（拖到该时间点没等到画面），请稍后重试」。
+
+- **取证**（真 Chromium + 构建产物 + 那段片子本体：`967×544 / 362.04s / 56.7MB / 23fps /
+  28 个关键帧`）：`captureVideoFrames` 在干净页面里 220ms 出两帧、`seekable` 到 362.043；
+  接**活着的 DSH 媒体地址**（`/api/aifisher/canvas/media/...`，curl 确认 `206` + `Content-Range`
+  正常）同样 186–228ms。**算法和文件都没坏，坏的是"等它落位"的判定**。
+- **根因**：旧 `waitForVideo` 把判定挂在单个事件上 —— `seeked` 来的那一刻只要
+  `readyState` 还没到 2、或 `|currentTime - target|` 差几毫秒，条件**从此不再评估**，
+  于是白等满 15s 报超时；片尾 seek 还要现拉一个关键帧（本例关键帧间隔 ~13s），
+  在真页面里比空载慢一拍是常态。
+- **改法**（`src/canvas-ui/canvas/CanvasVideoFrames.ts`）：
+  - `waitUntil()`：**事件唤醒 + 40ms 轮询**（`seeked` / `timeupdate` / `canplay` / `progress`
+    都只当唤醒用），条件每 40ms 重算，事件丢了也能自己捡回来；`failed()` 一返回错误立刻失败；
+    `abort` 立刻退出；结束摘干净监听。
+  - `seekLanded()` + `SEEK_TOLERANCE_SEC = 0.5`：Chromium 会把手感位置吸到最近可解码帧，
+    原来 `< 0.02` 对 23fps 的片子过紧。
+  - `clampSeekTime()`：按 `seekable` 钳目标。远端素材走 `/proxy` 时只缓冲了一截，
+    硬拖到片尾**永远**等不到 `seeked`；现在退到能到的最后一刻。
+  - `waitForPaintedFrame()`：空白（alpha 全 0）先等最多 `PAINT_WAIT_MS = 800` 再判，
+    不再"一探空白就换下一档"。
+  - 尾帧单档预算 `TAIL_SEEK_TIMEOUT_MS = 8000`；整轮超时**换一个新 `<video>` 重试一次**
+    （`retryOnTimeout`，回归里可关）。
+  - 错误文案带现场：`视频定位超时（拖到 361.94s 没等到画面；readyState=2，仍在寻址，
+    落点 361.99s，时长 362.04s），请稍后重试`。
+- **host 配套**（`src/host/canvas/mediaRouter.ts`）：`/proxy` 透传 `Range`，206 与
+  `Content-Range` / `Accept-Ranges` 一并回给浏览器。以前固定 200 + 整段，浏览器据此把远端视频
+  当"不可寻址"（`seekable` 只有已缓冲那截）→ 拖进度条、截尾帧全卡死。
+- **回归**：`test-canvas-video-frames` 54 → **73 项**（新增：落点判定四态 / 钳制三态 / 现场描述 /
+  事件来早了仍通过 / 一个事件都不来也能通过 / `failed()` 立刻失败 / 超时文案带现场 /
+  超时摘监听 / abort 立刻退出 / host 代理透传 Range 源码级）；`verify-video-frames.mjs`
+  11 → **18 项**（新增：报障那段真片子必须 8s 内截出 967×544 首尾帧、尾帧落在 361.99s、
+  探针不透明、以及 `seekLanded` / `clampSeekTime` 在真浏览器里的口径）。
+- ⚠️ 画布侧改动**刷新页面即生效**；host 的 `/proxy` 改动要**重启 DSH**（只影响云端/跨域视频）。
+
+### v1.68：进度条整条轨道都能拖（「视频下方进度条拖到不了」）
+
+用户报障原话（2026-10-23）：「视频下方进度条拖到不了」。
+
+- **先取证，不照着字面猜**：把用户**本人那份 canvas.json**（只读拷贝）挂进真画布产物，
+  再用 CDP 真鼠标在他那个 `Upload Video` 节点（967×544 / 362.04s / 56.7MB，画布 zoom 1.3195）上拖：
+  - 暂停态 10% → 99% 落到 **362.04s**（片尾）、再拖回 20% 落到 66.85s；clicks 在轨道最右端也到片尾；
+  - 播放中拖 20% → 90% 每一跳的 `input.value` 都跟指针（333.13 = 92%），松手后继续播；
+  - dpr 1.25 再跑一遍同样过。
+  → **seek 链路没坏**（单次 seek 89–258ms、60Hz 连打也能落位）。坏的是那根细滑杆的交互本身。
+- **根因（交互层，三条叠在一起）**：
+  1. 原生 range 只有 16px 高、拇指 12px；画布缩到 70% 就只剩半个手指高，**没戳中拇指 = 什么都不发生**
+     （底栏那片 56px 渐变还会把这次按压吞掉，看着就是"拖不动"）；
+  2. 原生拖动的值映射带半个拇指的内缩（点 85% 只到 86.8%），想拖到片尾得把手移出轨道 ——
+     正好是「拖到不了（片尾）」的手感；
+  3. 拖动途中底栏的受控回写跟着播放时钟走，长片里拇指会被新的 `time` 拽回去一下。
+- **改法**（整文件覆盖 `canvasVideoPlayer.tsx`，vendor 侧不再依赖原生拖动）：
+  - 轨道自己吃指针：`data-fisherai-video-seek-track` 包一层 20px 高（+上下 2px 余量）、`touch-none`
+    的容器，**按下即按比例跳到落点**（`timeAtPointer`，点最右 = 片尾），`setPointerCapture` 后
+    指针移出轨道也继续跟；
+  - 拖动期间用本地 `scrubTime` 驱动拇指/读数（与播放时钟无关），松手才切回真实 `time`；
+  - seek 按 `SCRUB_SEEK_INTERVAL_MS = 120` 节流 + **始终留一发尾发**（松手时按松手位置再提交一次）；
+  - 松手后若真在寻址 → 时间旁显示「定位中…」（`data-fisherai-video-seek-pending`），落到位自己收掉；
+  - 底栏收起时 `pointer-events-none`（以前那片隐形渐变一直在吞视频底部的点击）；
+  - 原生 `<input type=range>` 保留（键盘/无障碍），但 `pointer-events-none`，拖完自动 focus 回去。
+- **回归**：新增 `test:video-seek`（**19 项**）：轨道契约 / range 仍可键盘 / 按下即跳 50%（100s）/
+  连续 5 次 pointermove 只打 ≤2 次 seek / 拖动中 `timeupdate` 回写不拽拇指 / 松手补最后一发到 199s /
+  「定位中」出现与自动收掉 / 底栏收起带 `pointer-events-none`、悬停后摘掉 / 补丁源与 vendor 一致。
+  全套 **50 套 2666 项**。
+- ⚠️ 只改画布产物（vendor 覆盖 + 装配层）：**刷新画布页即生效**，不用重启 DSH。
+
 ## 验证
 
-三套：类型门禁（`pnpm typecheck`，`src/` 零错误）+ jsdom 回归（44 套，`pnpm test`）+ 真浏览器检查（26 场景，`scripts/browser-check.mjs`，不在 `pnpm test` 里）。
+三套：类型门禁（`pnpm typecheck`，`src/` 零错误）+ jsdom 回归（50 套，`pnpm test`）+ 真浏览器检查（28 场景，`scripts/browser-check.mjs`，不在 `pnpm test` 里）。
 
 **0）类型门禁：`pnpm typecheck` 的 `src` 零错误**（2026-10-20 v1.61；`scripts/typecheck.mjs` 用 TS 编译器 API 只统计 `src/`，`vendor/` 上游自带的类型错误不进门禁）
 
-**1）jsdom 回归：44 套 2400 项全绿（2026-10-20 v1.61；下面分项是 v1.44–v1.57 的累加记录，最新总数以 `run-all-regressions` 的 TOTAL 行为准）**
+**1）jsdom 回归：50 套 2666 项全绿（2026-10-23 v1.68；下面分项是 v1.44–v1.57 的累加记录，最新总数以 `run-all-regressions` 的 TOTAL 行为准）**
+
+> v1.66 新增 `test-canvas-video-frames`（**54 项**）：纯逻辑（输出最长边 2048 / 尾帧候选
+> 9.95→8.8 / 空白帧判定 / 贴右避让学生成 / 兜底尺寸 385×216）+ 真 DOM（菜单三项 →
+> 首尾帧 2 个节点 → 单截尾帧只 1 个（空帧被跳过）→ 第一列被挡就整列右移 → 存盘字段
+> title/x/y/prompt/parentIds → 回执 2.6s 自消失 / 聚焦带视频 / 两个桥都挂上）+ 源码级接线。
+>
+> **v1.67 加到 73 项**：抓的是「截取视频首尾帧失败了」的真身 —— 等待判定不能挂在单次事件上。
+> 新增 19 项：`seekLanded` 四态（readyState/寻址中/0.3s 容差/0.9s 跑偏）、
+> `clampSeekTime` 三态（seekable 20s → 19.95 / 到片尾不动 / 读不到原样返回）、
+> 现场描述、**事件来得太早仍能通过（旧写法在这里卡满 15s）**、**一个事件都不来也能靠轮询通过**、
+> `failed()` 立刻失败、超时文案带现场、超时摘监听、`abort` 立刻退出、
+> host `/proxy` 透传 Range（源码级）。
 
 smoke 59 / **backend 81**（v1.44 加 15 项：画布侧技能目录 —— 用户层扫到 / bundled 层保留 / 同名以用户为准 /
 `user-invocable:false`·旧式 invocation 键·`SKILL.disabled.md` 三种过滤 / 正文 UTF-8 原样 / bundled 仍能取正文 /
@@ -1223,7 +1414,12 @@ $node = "$env:DSH_HOME\dsh-runtimes\dsh-primary-runtime\dependencies\node\bin\no
 & $node scripts/verify-live-channel-upload.mjs   # 真机且不花额度：参考素材 → /files/upload 换公网直链（假模型 ID 提交）
 ```
 
-**2）真浏览器检查：26 场景 336 条断言 fail=0**（2026-10-20 v1.61 全量复跑；其中 `grid-pan-hidpi` 用 `--force-device-scale-factor=1.25` 启动，守「网格不比节点快」；
+**2）真浏览器检查：28 场景 357 条断言 fail=0**（2026-10-23 v1.67 全量复跑；
+其中 `grid-pan-hidpi` 用 `--force-device-scale-factor=1.25` 启动，守「网格不比节点快」；
+v1.64 新增 `video-history` 场景（药丸真的点得到 / 扇形历史格摊在节点外且 `elementFromPoint` 打得到 / 三条 1.8KB mp4 在 Chrome 里真解码 320×180 / 设为主视频后主片换成蓝的那条），
+v1.66 在同一场加 2 条「截帧入口在真布局里点得开、菜单三项、再点收起」；
+v1.67 没动真布局里的入口，但把 `verify-video-frames.mjs` 扩到 18 项（含报障那段 56MB 真片子的首尾帧 + 等待判定），并全量复跑本套 357 条；
+v1.65 新增 `video-references` 场景（真布局里从 10 张图的「连接输出」圆依次拖到视频节点上：9 张全接上、第 10 张被拒，注册表的 `maxInputs` 与模式声明的 9 自洽）；
 v1.49 新增 `knife` 场景（Ctrl+右键真拖一刀：预览、只断被划过的那条、第二刀停在拖拽中当交付图）；
 v1.48 给 `grid-pan` / `grid-pan-hidpi` 两场加了**三层显隐**真机断言（真浏览器里量每层 wrapper 的 inline opacity：zoom 1 = 小+大、0.2 = 大+更大、0.05 = 只剩最大一层），
 并把 `canvas` 场景的截图像素上限按「大星交点叠墨」重新校准（p99 仍 ≤90，最亮交点 ≤170）；
@@ -1253,6 +1449,8 @@ v1.43 新增 `data-dir` 场景：设置 → 存储 → 「项目数据目录」�
 | `grid-pan` | **v1.33 网格跟随速度**：dpr=1 下画布平移 160px → 网格背景也移 160px（ratio 1.0000）、格子 24×zoom；**v1.48 三层嵌套显隐**：zoom 1 = minor+major、0.2 = major+super、0.05 = 只剩 super（真机量 inline opacity） |
 | `grid-pan-hidpi` | 同上，但用 `--force-device-scale-factor=1.25` 启动（本机 125% 缩放）：修复前量到 200px / 30px（= 1.25 倍），现在必须仍是 160px / 24px |
 | `stack` | **v1.37 叠图切换**：一叠 3 张（红/绿/蓝 PNG）。控制条在卡里且可见、`elementFromPoint` 命中「切换」按钮自己、真点一下换成第 2 张且计数 2/3、连点三下绕回第 1 张、画布节点数始终 1（截图停在「第二张 / 切换 2/3」） |
+| `video-history` | **v1.64 视频生成历史**：节点带 3 条历史（红/绿/蓝 1.8KB mp4，Chrome 真解码 320×180）。头部「历史 3」药丸在节点上方且 `elementFromPoint` 命中它自己；点开摊出 2 格，**rect 在节点框外 + 中心点打得到它自己**（守「外框 overflow-hidden 把扇形剪掉」）；点第 2 格的「设为主视频」→ 主片换成蓝的那条、历史仍是 3 条、画布节点数不变（截图停在「蓝主片 + 摊开的两条历史」）。**v1.66 加截帧入口断言**：底栏「截取视频帧」在真布局里点得开、菜单三项（first/last/both）、再点一下收起 |
+| `video-references` | **v1.65 视频参考图数量**：1 个视频节点（多图参考）+ 10 张图，真拖 10 次线 → **9 张接上、第 10 张被拒**（修复前第 4 张就断）；截图停在「9 条参考线入视频节点、第 10 张空着」 |
 | `outpaint` | **v1.38 扩图**：工具条 HD 没了 → 开面板 → 选四周 + 16:9 → 创建 → 画布多一个**空**节点（无结果图）、标题「扩图 · 四周 · 16:9」、composer 里提示词已填；**host 一整场收到 0 条 `/generate-*`** |
 | `outpaint-panel` | **v1.38 扩图面板**：只开面板不创建（交付图：方向 / 目标比例 / 模型 + 「你的通道」） |
 | `resize` | **v1.38 尺寸对话框**：真开 nova 卡片 → 320×240 → 点 2x → 640×480 → 保存 → 画布上那张新图的自然尺寸真是 640×480；同一时刻只有一个对话框（vendor 整屏浮层没一起渲染） |
@@ -1267,7 +1465,30 @@ $env:BROWSER_ONLY = "canvas,settings,effects"    # 只跑指定场景
 $env:BROWSER_CHECK_PORT = "4311"                 # 连跑要换端口（TIME_WAIT → EADDRINUSE）
 & $node scripts/browser-check.mjs                # 截图在 .dsh-tmp/shots/，交付图另存 docs/shots/
 & $node scripts/verify-live-workflow-library.mjs # 真机验收「工作流节点」面板 + 配图（需 DSH 在跑）
+& $node scripts/verify-video-frames.mjs          # **v1.66 真机取帧**：真 Chromium + 构建产物里的 captureVideoFrames
 ```
+
+**2.5）真机取帧取证：`scripts/verify-video-frames.mjs`（v1.66 起，v1.67 加真片子）**
+
+截帧要**真解码视频**（几百毫秒）再**真上传**，而 `browser-check` 是 `--virtual-time-budget`
+驱动退出的：解码期间虚拟时钟会被一路快进，`captureVideoFrames` 内部的等待窗口直接假超时
+（实测：点完 1.2s 后节点还没出现，`until(...)` 的 20s/15s 窗口在几毫秒虚拟时间里全被烧完，
+探针只回了一半，截图时还在「正在截取视频画面…」）。所以真取帧单独用一个**真时间**的
+headless Chrome 验：
+
+- 页面 `import('/canvas/canvas-app.js')`（就是画布加载的那份产物）→ 直接调
+  `captureVideoFrames(fixture, ['first','last'])` → 把返回的 data URL 画回 canvas 读像素；
+- 断言（**18 项**，全绿）：两帧都是 320×180、首帧像素 = 红色 fixture 的 `225,40,41`、
+  尾帧时间 = `duration - 0.05 = 0.95`、尾帧不透明、只要求 `last` 时只回一条、
+  蓝色 fixture 的尾帧是蓝的（不是旧帧）、`frameTargetSize(3840,2160) = 2048×1152`、
+  `tailTimes(10) = [9.95, 9.8, 9.5, 8.8]`、整轮 < 8s（实测 13ms）；
+- **v1.67 加报障真片子**：本机存在那段 `967×544 / 362.04s / 56.7MB` 的 mp4 时（路径可用
+  `FRAME_REAL_VIDEO` 覆盖，别的机器自动 SKIP），必须 **8s 内**截出首尾帧 —— 实测两帧都是
+  967×544、尾帧落在 `361.993s`、探针像素不透明、整轮 **569ms**；另外把
+  `seekLanded`（`readyState=1` 不算到位 / 差 0.25s 算到位）与 `clampSeekTime`（seekable 只到
+  20s 时把 361.99s 钳到 19.95s）在真浏览器里再过一遍。
+- 这条教训通用的：**任何「真媒体解码 / 真上传」的等待都不该放进 virtual-time 场景**，
+  jsdom 里只能测数据链路（本套件用桩替换 `__FISHERAI_VIDEO_FRAMES__`），真算法用这个脚本。
 
 ## 截图
 
@@ -1289,6 +1510,9 @@ $env:BROWSER_CHECK_PORT = "4311"                 # 连跑要换端口（TIME_WAI
 | ![项目归档](docs/shots/canvas-project-archive.png) | **v1.42**：画布头部「项目归档」面板 —— 上面是导出（`2 个节点 · 素材 2 个 · 归档约 3.1 KB`、导出目录、导出到目录/下载/打开目录），下面是导入（选文件 / 填绝对路径），底部那条就是「已导出 … .fisherai 到 …\downloads」的回执 |
 | ![项目数据目录](docs/shots/canvas-data-dir.png) | **v1.43**：设置 → 存储 里的「项目数据目录（缓存）」—— 当前目录 / 默认目录读数、绝对路径输入框、「应用 / 恢复默认 / 刷新」、以及「把现有数据复制到新目录（只复制，不删旧目录）」 |
 | ![切刀](docs/shots/canvas-knife.png) | **v1.49**：按住 Ctrl + 右键拖拽的切刀 —— 白色虚线是刀口、红色高亮是**会被切开**的那条连线（B→C）；松手就断开、Esc 取消（图里 A→C 已经切掉，只剩 B→C） |
+| ![视频生成历史](docs/shots/canvas-video-history.png) | **v1.64**：视频节点的「历史 N」摊开 —— 主片已经「设为主视频」成蓝的那条（头部 `320x180 历史 3`），上/右两格是同一节点以前生成的绿/红两条（悬停即循环播放，角上是下载 / 设为主视频） |
+| ![视频参考图数量](docs/shots/canvas-video-references.png) | **v1.65**：把那 10 张图依次拖到右边的视频节点上（多图参考）—— **9 条参考线接上了**，左下的第 10 张还空着（修复前第 4 张就拖不进去） |
+| ![视频截帧菜单](docs/shots/canvas-video-frames.png) | **v1.66**：视频底栏「截取视频帧」弹开的三项菜单 —— 截取首帧 / 截取尾帧 / 首尾帧各一张（悬停底栏才出现；截完的图落在节点右侧并自动避开已有节点） |
 | ![工作流配置](docs/shots/canvas-comfy-workflow-config.png) | ComfyUI 工作流配置（节点图 + 检查器） |
 | ![工作流节点](docs/shots/workflow-nodes.png) | 工作流节点面板：配置好的工作流按图卡片陈列（v1.28，可自定义配图） |
 | ![图片编辑](docs/shots/canvas-image-editor.png) | nova 版图片编辑工作台 |
@@ -1302,7 +1526,7 @@ scripts/
   vendor-aifisher.mjs     上游源码 vendor + 所有正则补丁（每条断言命中次数）
   build-canvas-css.mjs    Tailwind（theme+utilities，不含 preflight）→ vendor/aifisher/tailwind.generated.ts
   patches/aifisher/**     7 个整文件覆盖补丁（清单 / 节点 UI / 运行路径 / 接入口判定 / 图片工具条 / 角度草稿 / 图像工具主按钮）
-  browser-check.mjs       真 Chrome 26 场景（含 PNG 解码器做像素断言；`grid-pan-hidpi` 跑在 dpr=1.25）
+  browser-check.mjs       真 Chrome 28 场景（含 PNG 解码器做像素断言；`grid-pan-hidpi` 跑在 dpr=1.25）
   verify-live-modelscope.mjs 真机：走魔搭真出图，配对（红/绿参考图）证明参考图被用上（含 openai 方言对照）
   verify-live-workfisher.mjs 真机：走 FisherAI 真出图（异步任务 + 参考图先上传换直链），纯红参考图验颜色
   verify-live-canvas-bundle.mjs 真机：问正在跑的 DSH 要 canvas-app.js，跟磁盘构建产物比 sha256（证明「刷新即生效」）

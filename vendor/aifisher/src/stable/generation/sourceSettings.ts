@@ -382,7 +382,7 @@ function dreaminaCliVendor(client: SourceSettingsClient, scope: SettingsScope) {
   body.append(
     textElement(
       'p',
-      'AIFISHER 会从即梦官方源安装到当前账号的本机私有目录，无需 Git Bash，也不会申请管理员权限。',
+      '画布会从即梦官方源安装到当前账号的本机私有目录，无需 Git Bash，也不会申请管理员权限。',
       'text-sm leading-6 text-[var(--af-text-secondary)]',
     ),
   );
@@ -440,7 +440,7 @@ function dreaminaCliVendor(client: SourceSettingsClient, scope: SettingsScope) {
   loginDetails.setAttribute('data-fisherai-dreamina-login-details', 'true');
   const loginInstruction = textElement(
     'p',
-    '在即梦官方页面核对下方用户码，授权完成后 AIFISHER 会自动确认。',
+    '在即梦官方页面核对下方用户码，授权完成后画布会自动确认。',
     'text-xs leading-5 text-[var(--af-text-secondary)]',
   );
   const loginCode = textElement(
@@ -595,7 +595,7 @@ function dreaminaCliVendor(client: SourceSettingsClient, scope: SettingsScope) {
       install.textContent = '检查更新';
       login.textContent = status.loginRunning ? '登录进行中…' : '登录即梦';
       state.textContent =
-        `即梦 CLI ${status.version || ''} 已就绪。登录后即可在 AIFISHER 中使用。`.replace(
+        `即梦 CLI ${status.version || ''} 已就绪。登录后即可在画布中使用。`.replace(
           '  ',
           ' ',
         );

@@ -106,7 +106,7 @@ export function ProjectDashboardHeader(
         <div className={'flex items-center gap-2.5'} style={{ marginLeft: '-8px' }}>
           <img
             src={'/aifisher-mark-white.svg'}
-            alt={'AIFISHER 画布 Logo'}
+            alt={'渡雨鸣泽 画布 Logo'}
             className={'w-7 h-9 object-contain shrink-0'}
           />
           <div className={'flex flex-col justify-center'}>
@@ -115,7 +115,7 @@ export function ProjectDashboardHeader(
                 'text-[17px] font-semibold text-[var(--af-text)] tracking-[0.035em] leading-none whitespace-nowrap'
               }
             >
-              {'AIFISHER 画布'}
+              {'渡雨鸣泽 画布'}
             </h1>
             <span
               className={

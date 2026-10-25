@@ -38,7 +38,7 @@ const sections = [
   ['local-service', '开源服务'],
   ['models', '闭源服务'],
   ['storage', '存储'],
-  ['diagnostics', '关于 AIFISHER 画布'],
+  ['diagnostics', '关于 渡雨鸣泽 画布'],
 ] as const;
 type Section = (typeof sections)[number][0];
 
@@ -161,7 +161,7 @@ export function CanvasSettings(
         data-fisherai-settings-owned="true"
         data-fisherai-settings-domains="appearance models storage local-service network diagnostics"
         role="dialog"
-        aria-label="AIFISHER 画布设置"
+        aria-label="渡雨鸣泽 画布设置"
         aria-modal="true"
         className="bg-[var(--af-surface-raised)] border border-[var(--af-border)] rounded-lg shadow-2xl flex overflow-hidden w-full max-w-7xl h-[90vh]"
       >
@@ -225,7 +225,7 @@ export function CanvasSettings(
             data-fisherai-canvas-version={build.replace(/^v/, '')}
             className="p-6 text-xs text-[var(--af-text-muted)]"
           >
-            AIFISHER 画布 · {build}
+            渡雨鸣泽 画布 · {build}
           </div>
         </aside>
         <div

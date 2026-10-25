@@ -128,11 +128,11 @@ function renderUpdate(
     surface.setAttribute(SURFACE_ATTRIBUTE, 'true');
     surface.setAttribute('role', 'dialog');
     surface.setAttribute('aria-modal', 'true');
-    surface.setAttribute('aria-label', 'AIFISHER 安全更新');
+    surface.setAttribute('aria-label', '渡雨鸣泽安全更新');
     surface.innerHTML = `
       <div class="fisherai-update-card" style="position:relative">
         <button class="fisherai-update-close" type="button" aria-label="暂不更新">×</button>
-        <span class="fisherai-update-eyebrow">AIFISHER 安全更新</span>
+        <span class="fisherai-update-eyebrow">渡雨鸣泽安全更新</span>
         <h2></h2><p></p><ul></ul>
         <p class="fisherai-update-defer-copy"></p>
         <div class="fisherai-update-progress" role="progressbar" aria-label="更新进度" aria-valuemin="0" aria-valuemax="100"><span></span></div>

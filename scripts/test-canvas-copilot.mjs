@@ -175,9 +175,20 @@ const projectId = 'copilot-proj';
 
   const pill = window.document.querySelector('[data-fisherai-copilot-pill="true"]');
   check(
-    '有失败节点 → 左下角出现「副驾 N」胶囊',
+    '有失败节点 → 画布底部出现「副驾 N」胶囊',
     Boolean(pill) && String(pill.textContent).includes('副驾'),
     String(pill?.textContent ?? '(没有胶囊)').slice(0, 80),
+  );
+  /**
+   * 2026-10-23 用户报障（截图）：「退出画布」压在副驾胶囊上。
+   * 根因是两个浮层都贴画布右下角（退出按钮 right:20 宽 98；胶囊 right:56）。
+   * 现在胶囊改成相对画布中线定位（right: calc(50% + 54px)），紧邻分镜板左侧，
+   * 右下角整块留给退出按钮。这条断言防它再被改回贴右缘的数字。
+   */
+  check(
+    '副驾胶囊靠画布中线定位、不贴右缘（不压「退出画布」按钮）',
+    String(pill?.style.right ?? '').includes('calc(50%') && String(pill?.style.bottom) === '24px',
+    `right=${pill?.style.right} bottom=${pill?.style.bottom}`,
   );
 
   pill?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));

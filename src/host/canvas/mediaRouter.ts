@@ -111,8 +111,18 @@ function serveMediaFile(
   createReadStream(filePath).pipe(res);
 }
 
-/** 给跨域素材兜一层代理（画布的 readableMediaUrl 会用它）。 */
-async function proxyRemote(res: ServerResponse, rawUrl: string): Promise<void> {
+/**
+ * 给跨域素材兜一层代理（画布的 `readableMediaUrl` 会用它）。
+ *
+ * v1.67：**透传 Range**。以前这里固定 200 + 整段，浏览器拿不到 `Content-Range` 就不把
+ * 远端视频当成可寻址的（`seekable` 只有已缓冲那一截）→ 拖进度条、截尾帧全卡死。
+ * 现在原样把 `Range` 转给上游，206 与 `Content-Range` 一并回给浏览器。
+ */
+async function proxyRemote(
+  req: IncomingMessage,
+  res: ServerResponse,
+  rawUrl: string,
+): Promise<void> {
   let parsed: URL;
   try {
     parsed = new URL(rawUrl);
@@ -125,10 +135,14 @@ async function proxyRemote(res: ServerResponse, rawUrl: string): Promise<void> {
     return;
   }
   // 与上游 externalUrlPolicy 同向：不跟随跳转（跳转后的地址可能是内网/回环）
+  // v1.67：**透传 Range**。以前这里固定 200 + 整段，浏览器拿不到 `Content-Range` 就不把
+  // 远端视频当成可寻址的（`seekable` 只有已缓冲那一截）→ 拖进度条、截尾帧全卡死。
+  const range = typeof req.headers.range === 'string' ? req.headers.range.trim() : '';
   let response: Response;
   try {
     response = await fetch(parsed.href, {
       redirect: 'error',
+      ...(range ? { headers: { range } } : {}),
       signal: AbortSignal.timeout(60_000),
     });
   } catch (error) {
@@ -145,11 +159,12 @@ async function proxyRemote(res: ServerResponse, rawUrl: string): Promise<void> {
   const headers: Record<string, string> = {
     'cache-control': 'private, max-age=600',
   };
-  const contentType = response.headers.get('content-type');
-  if (contentType) headers['content-type'] = contentType;
-  const length = response.headers.get('content-length');
-  if (length) headers['content-length'] = length;
-  res.writeHead(200, headers);
+  for (const name of ['content-type', 'content-length', 'content-range', 'accept-ranges']) {
+    const value = response.headers.get(name);
+    if (value) headers[name] = value;
+  }
+  // 上游不认 Range 时会回 200 + 整段，这里如实转述（浏览器据此决定能不能 seek）
+  res.writeHead(response.status === 206 ? 206 : 200, headers);
   const reader = response.body.getReader();
   for (;;) {
     const { done, value } = await reader.read();
@@ -202,7 +217,7 @@ export async function handleMediaApi(input: {
       sendJson(res, 422, { error: 'url 必填。', code: 'INVALID_PROXY_URL' });
       return true;
     }
-    await proxyRemote(res, target);
+    await proxyRemote(req, res, target);
     return true;
   }
 

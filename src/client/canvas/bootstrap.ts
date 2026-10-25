@@ -120,6 +120,9 @@ import {
   type CanvasEffectKey,
 } from '../../canvas-ui/canvas/CanvasEffectsStore';
 import { rotateStackHost, stackReport, type StackNode } from '../../canvas-ui/canvas/CanvasStack';
+import { installVideoResultHistory } from '../../canvas-ui/canvas/CanvasVideoHistory';
+import { installVideoFrameCapture } from '../../canvas-ui/canvas/CanvasVideoFrames';
+import { installFrameLayout } from '../../canvas-ui/canvas/CanvasFrameLayout';
 import {
   canvasLastModelReport,
   pickCanvasModel,
@@ -659,6 +662,38 @@ function installProjectArchiveSupport(): { dispose: () => void } {
   };
 }
 
+/**
+ * v1.64：视频生成历史。
+ *
+ * 图片节点天生就留着一串历史结果（`resultUrls` + 头部「历史 N」），视频节点以前每生成一次
+ * 就把上一条覆盖掉。算法在 `src/canvas-ui/canvas/CanvasVideoHistory.ts`，这里只把那套纯函数
+ * 挂成全局桥 —— vendor 侧（`canvasGeneration.ts` / `generationRecovery.ts` /
+ * `canvasVideoPlayer.tsx`）是构建期从上游整树复制的，不能 import 插件实现，只能走桥。
+ */
+function installCanvasVideoHistorySupport(): { dispose: () => void } {
+  return installVideoResultHistory();
+}
+
+/**
+ * v1.66：视频截帧（首帧 / 尾帧 / 两张）+ 截帧结果落位。
+ *
+ * 取帧算法在 `src/canvas-ui/canvas/CanvasVideoFrames.ts`（尾帧兜底、尺寸上限、单帧），
+ * 落位在 `CanvasFrameLayout.ts`（贴视频右侧、避让已有节点）。vendor 侧只认这两个桥：
+ *   · `__FISHERAI_VIDEO_FRAMES__`  —— 播放器菜单点下去时取帧；
+ *   · `__FISHERAI_FRAME_LAYOUT__`  —— `canvasMediaOperations.snapshot()` 问新节点该放哪儿。
+ * 桥不在时两处都退回上游行为（一次性首尾帧 / 固定 +400），不影响老路径。
+ */
+function installCanvasVideoFrameSupport(): { dispose: () => void } {
+  const frames = installVideoFrameCapture();
+  const layout = installFrameLayout();
+  return {
+    dispose() {
+      layout.dispose();
+      frames.dispose();
+    },
+  };
+}
+
 /** 顺序按上游 main.ts 的先后关系保留（外观/会话要早于画布组件读取它们）。 */const INSTALLERS: Installer[] = [
   { name: 'installStableCanvasNavigation', install: installStableCanvasNavigation },
   { name: 'installStableCanvasClipboard', install: installStableCanvasClipboard },
@@ -681,6 +716,12 @@ function installProjectArchiveSupport(): { dispose: () => void } {
   { name: 'installVideoModeAdapter', install: installVideoModeAdapter },
   { name: 'installMidjourneyReferenceAdapter', install: installMidjourneyReferenceAdapter },
   { name: 'installImageResultHistory', install: installImageResultHistory },
+  // ---- v1.64：视频生成历史（合并 / 「设为主视频」换位 / 头部「历史 N」文案）----
+  //     纯函数在 src/canvas-ui/canvas/CanvasVideoHistory.ts，这里只挂桥
+  { name: 'installVideoResultHistory', install: installCanvasVideoHistorySupport },
+  // ---- v1.66：视频截帧（首帧 / 尾帧 / 两张）与截帧落位 ----
+  //     取帧在 CanvasVideoFrames.ts、落位在 CanvasFrameLayout.ts，这里挂两个桥
+  { name: 'installVideoFrameCapture', install: installCanvasVideoFrameSupport },
   { name: 'installGenerationScheduler', install: installGenerationScheduler },
   { name: 'installStableVideoPlayback', install: installStableVideoPlayback },
   { name: 'installMediaEditing', install: installMediaEditing },

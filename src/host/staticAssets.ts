@@ -67,6 +67,10 @@ export function attachStaticAssets(webServer: WebServerLike): void {
    *
    * 不挂的话画布左上角那个「项目菜单」按钮是一张裂图（菜单本身还能点，但看起来像坏了），
    * 而「保存退出 / 退出项目」就在那个菜单里。
+   *
+   * ⚠️ 这两个文件名里的**内容**已经是渡雨鸣泽的标识（2026-10-25 换的）：
+   * 文件名沿用上游是为了不动 vendor / 回归脚本里写死的 URL，映射关系见
+   * public/brand/README.md。要换回别的版本就覆盖 public/brand/ 里同名文件。
    */
   for (const file of ['aifisher-mark-white.svg', 'aifisher-mark-black.svg']) {
     webServer.register({

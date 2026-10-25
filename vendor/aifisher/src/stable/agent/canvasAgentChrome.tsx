@@ -102,8 +102,8 @@ export function CanvasAgentLauncher(
   return isOpen ? null : (
     <button
       type="button"
-      aria-label="打开 AIFISHER Agent"
-      title="AIFISHER Agent"
+      aria-label="打开 渡雨鸣泽 Agent"
+      title="渡雨鸣泽 Agent"
       onClick={onClick}
       data-fisherai-agent-launcher="true"
       className="absolute bottom-20 right-6 rounded-full flex items-center justify-center z-50 transition-all hover:scale-105"

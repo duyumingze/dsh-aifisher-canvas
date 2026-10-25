@@ -1,3 +1,15 @@
+/**
+ * dsh-aifisher-canvas 覆盖（v1.62，用户原话 2026-10-21「帮我配置一个视频参考通道」）：
+ * 本机上传的视频**也能连进视频节点**，只要目标模型是自配云端通道（provider = OpenAICompatibleProvider）。
+ *
+ * 原因：host 的通道链路（cloudGenerationRouter → uploadChannelReferences）本来就会把
+ * `body.videos` 里的本站素材先 `POST /files/upload` 换成公网直链，再按方言放进
+ * `metadata.video_url`（证据：scripts/test-cloud-channels.mjs「视频通道」那组断言）——
+ * 本机视频对自配通道是**可达**的。上游这一行却一律要求 `source.networkUrl`（公网素材），
+ * 于是画布上把「上传视频」拖到视频节点会被判 INVALID，这条能力等于不存在。
+ *
+ * 方舟（DoubaoVideoProvider）保持上游口径：它只收公网直链，本机素材仍要被拦住并给说明。
+ */
 import type { CanvasNode } from './canvasNodeOperations';
 import { adaptiveMediaNodeSize, videoDisplayAspectRatio } from '../media/mediaNodeSizing';
 
@@ -240,6 +252,8 @@ interface Mode {
 }
 interface Model {
   name: string;
+  /** 本插件追加：自配云端通道的条目带这个标记（见 src/canvas-ui/canvas/CloudChannelModels.ts）。 */
+  provider?: string;
   maxInputs?: number;
   imageModes?: Mode[];
   videoModes?: Mode[];
@@ -352,7 +366,14 @@ export function validateConnection(
     }).length >= allowed
   )
     return false;
-  return kind !== 'video' || allowed <= 0 || !!source.networkUrl;
+  // dsh-aifisher-canvas 覆盖：自配云端通道会先把本机视频上传成公网直链（host 侧 /files/upload），
+  // 所以不再要求 source.networkUrl；方舟（DoubaoVideoProvider）仍只收公网直链，保持上游那条要求。
+  return (
+    kind !== 'video' ||
+    allowed <= 0 ||
+    !!source.networkUrl ||
+    targetConfig.model.provider === 'OpenAICompatibleProvider'
+  );
 }
 export function chooseConnectionMode(
   source: CanvasNode,

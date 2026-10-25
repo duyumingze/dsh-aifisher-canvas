@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 画布本地后端路由（host 半）。
  *
  * 挂在 `/api/aifisher/canvas` 前缀下 —— 这个命名空间是刻意选的：
@@ -397,7 +397,7 @@ export async function handleCanvasApi(
     }
     // POST /workflows —— 保存（整份文档）
     if (parts.length === 1 && method === 'POST') {
-      const body = (await readJsonBody(req, 32 * 1024 * 1024)) as Record<string, unknown> | null;
+      const body = (await readJsonBody(req, 96 * 1024 * 1024)) as Record<string, unknown> | null;
       if (!body || !Array.isArray(body.nodes) || !Array.isArray(body.groups)) {
         sendJson(res, 422, { error: '项目数据格式无效。', code: 'INVALID' });
         return;
@@ -488,7 +488,7 @@ export async function handleCanvasApi(
       }
       // PUT /workflows/:id —— 上游用 POST /workflows 保存，这里兼容一下直传
       if (parts.length === 2 && (method === 'PUT' || method === 'PATCH')) {
-        const body = (await readJsonBody(req, 32 * 1024 * 1024)) as Record<string, unknown> | null;
+        const body = (await readJsonBody(req, 96 * 1024 * 1024)) as Record<string, unknown> | null;
         if (!body) {
           sendJson(res, 422, { error: '项目数据格式无效。', code: 'INVALID' });
           return;

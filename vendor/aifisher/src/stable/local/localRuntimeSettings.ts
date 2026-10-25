@@ -157,7 +157,7 @@ function comfyNodeIdExtensionControls(client: LocalRuntimeClient, scope: Setting
           120_000,
         );
         message.textContent = result.restartRequired
-          ? '安装完成。请在当前任务结束后重启 ComfyUI；AIFISHER 不会自动中断队列。'
+          ? '安装完成。请在当前任务结束后重启 ComfyUI；渡雨鸣泽不会自动中断队列。'
           : result.changed
             ? '安装完成，下次启动 ComfyUI 时自动生效。'
             : '已经是最新版。';
@@ -354,8 +354,8 @@ function comfyProcessControls(
   const starting = !running && state.owned;
   const label = running
     ? state.owned
-      ? '运行中 · 由 AIFISHER 画布启动'
-      : '已检测到外部 ComfyUI 服务 · 非 AIFISHER 启动'
+      ? '运行中 · 由渡雨鸣泽画布启动'
+      : '已检测到外部 ComfyUI 服务 · 非渡雨鸣泽启动'
     : starting
       ? '启动中 · 正在等待本机网页端'
       : '未运行';
@@ -581,7 +581,7 @@ function renderStatus(
     );
   }
   if (status.models.total > 0) {
-    list.append(runtimeItem('AIFISHER 内置模型', `${status.models.total} 个模型`, status.models));
+    list.append(runtimeItem('渡雨鸣泽内置模型', `${status.models.total} 个模型`, status.models));
   } else if (!comfyConnected) {
     list.append(runtimeItem('本地模型', '未检测到', status.models));
   }

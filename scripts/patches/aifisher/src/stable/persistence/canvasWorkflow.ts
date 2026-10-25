@@ -75,6 +75,34 @@ function content(document: WorkflowRecord) {
 function stale(): Error {
   return Object.assign(new Error('画布已切换，忽略旧保存结果。'), { code: 'STALE_WORKFLOW' });
 }
+
+/**
+ * 保存前瘦身（补丁 D）：把节点上残留的大块内联数据（`lastFrame` 里按原尺寸
+ * 存的 PNG 之类，单张 4–5MB）剔掉，只保留媒体文件 URL。
+ *
+ * 为什么必须做：项目文档一旦超过保存接口 32MiB 上限，POST 会被服务端直接掐断，
+ * 浏览器只看到 `TypeError: Failed to fetch` —— 保存、自动保存、导出全部失败，
+ * 界面上还看不出真正原因。历史项目里已经存进去的旧数据也靠这里兜住。
+ */
+const INLINE_DATA_LIMIT = 300_000;
+function slimDocument(document: WorkflowRecord): WorkflowRecord {
+  const nodes = Array.isArray(document.nodes) ? document.nodes : [];
+  let dropped = 0;
+  const slimNodes = nodes.map((node) => {
+    if (!node || typeof node !== 'object') return node;
+    let copy: Record<string, unknown> | null = null;
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      if (typeof value !== 'string' || value.length < INLINE_DATA_LIMIT || !value.startsWith('data:')) continue;
+      copy ??= { ...(node as Record<string, unknown>) };
+      delete copy[key];
+      dropped += value.length;
+    }
+    return (copy ?? node) as WorkflowRecord;
+  });
+  if (!dropped) return document;
+  console.warn(`[aifisher-canvas] 保存前剔除了 ${(dropped / 1048576).toFixed(1)}MB 内联数据（尾帧缩略图等）`);
+  return { ...document, nodes: slimNodes };
+}
 function validateDocument(value: unknown, id?: string): WorkflowRecord {
   if (!value || typeof value !== 'object' || Array.isArray(value))
     throw new Error('项目数据格式无效。');
@@ -355,7 +383,8 @@ export function useCanvasWorkflow(hooks: Hooks, props: CanvasWorkflowProps) {
             request('/api/aifisher/canvas/workflows', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(document),
+              // 瘦身只作用于本次请求体：大块内联尾帧不进文档，避免顶爆接口体积上限。
+              body: JSON.stringify(slimDocument(document)),
             });
           let result: WorkflowRecord;
           let rescued = false;

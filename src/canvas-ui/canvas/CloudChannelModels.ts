@@ -46,6 +46,12 @@ export interface ChannelModelLike {
 export interface ChannelLike {
   id: string;
   label: string;
+  /**
+   * host 判定的**实际生效**方言（`publicChannel()` 里的 `dialectDetected`）。
+   * 只有 `workfisher`（FisherAI）那条链路会**把本机素材上传成公网直链**再提交，
+   * 所以只有它给小视频节点挂「视频参考」模式（见 videoEntry 的第三个参数）。
+   */
+  dialectDetected?: string;
   models: ChannelModelLike[];
 }
 
@@ -86,23 +92,75 @@ function imageEntry(name: string, channelLabel: string) {
   };
 }
 
-function videoEntry(name: string, channelLabel: string) {
+/**
+ * 视频「多图参考」能接几张图：**9 张**，与 MiniMax H3 参考模式同口径
+ * （vendor `media/minimaxH3.ts` 的 `SLOT_RANGES.referenceImage = [3, 11]`，正好 9 个图片槽）。
+ *
+ * 用户原话（2026-10-23）：「视频生成图像参考只能拖入三张，修复一下，按 minimaxh3 的标准来」。
+ */
+export const VIDEO_REFERENCE_IMAGE_LIMIT = 9;
+
+/** 一个模式声明的输入上限（`allowedInputs` 的键就是 text / image / video / audio）。 */
+export interface VideoModeInputs {
+  value?: string;
+  label?: string;
+  allowedInputs?: Partial<Record<string, number>>;
+}
+
+/**
+ * 视频条目的「总输入上限」（`maxInputs`）该怎么算。
+ *
+ * `maxInputs` 只是粗糙兜底 —— 真正按模式准入的是每个模式的 `allowedInputs`
+ * （vendor `canvasNodeRules.validateConnection` 两道都判：先 `parents.length >= maxInputs`，
+ * 再按素材种类查 `allowedInputs`）。以前这里写死 3，于是「多图参考」明明声明了 9 张图，
+ * 拖到第 4 张就先撞上总上限 —— 用户看到的就是「只能拖入三张」，且没有任何提示说明是哪个上限。
+ *
+ * 所以按**各模式 allowedInputs 之和的最大值**算：声明的准入范围与实际能连的数量永远一致，
+ * 改模式上限时不必再回来同步这个数。
+ */
+export function videoInputCap(modes: readonly VideoModeInputs[]): number {
+  let cap = 1;
+  for (const mode of modes) {
+    const total = Object.values(mode.allowedInputs ?? {}).reduce<number>((sum, value) => {
+      const count = Number(value);
+      return sum + (Number.isFinite(count) ? Math.max(0, Math.trunc(count)) : 0);
+    }, 0);
+    if (total > cap) cap = total;
+  }
+  return cap;
+}
+
+function videoEntry(name: string, channelLabel: string, videoReference = false) {
+  // ★ 必需，且值必须落在 vendor videoMode.ts 的词表里（image-to-video 之类不在词表里）
+  const videoModes: VideoModeInputs[] = [
+    { label: '文生视频', value: 'text-to-video', allowedInputs: { text: 10 } },
+    { label: '首帧', value: 'first-frame', allowedInputs: { text: 10, image: 1 } },
+    { label: '首尾帧', value: 'i2v-first-last-frame', allowedInputs: { text: 10, image: 2 } },
+    {
+      label: '多图参考',
+      value: 'reference-video',
+      allowedInputs: { text: 10, image: VIDEO_REFERENCE_IMAGE_LIMIT },
+    },
+  ];
+  // 视频参考（v1.62，用户原话「帮我配置一个视频参考通道」）：
+  // FisherAI（workfisher 方言）的 host 链路会把画布上的本机视频当成 `body.videos`，
+  // 先 POST /files/upload 换成公网直链，再放进 metadata.video_url 提交；
+  // 所以只有这类通道才多这一档，别的方言收到视频会**静默丢掉**（不如不给这一档）。
+  // 值用 video-edit：vendor 的 resolveVideoGenerationMode 在「连了视频」时优先挑它。
+  if (videoReference) {
+    videoModes.push({ label: '视频参考', value: 'video-edit', allowedInputs: { text: 10, video: 1 } });
+  }
   return {
     ...baseEntry(name, channelLabel),
     timeEstimate: '5min',
-    maxInputs: 3,
+    // 见 videoInputCap：跟各模式的 allowedInputs 走，别再写死一个小数字把参考图挡在外面
+    maxInputs: videoInputCap(videoModes),
     supportedReferenceTypes: ['text', 'image'],
     supportedImageFormats: SUPPORTED_IMAGE_FORMATS,
     maxImageSizeMb: 20,
     resolutions: ['480p', '720p', '1080p'],
     aspectRatios: ['16:9', '9:16', '1:1'],
-    // ★ 必需，且值必须落在 vendor videoMode.ts 的词表里（image-to-video 之类不在词表里）
-    videoModes: [
-      { label: '文生视频', value: 'text-to-video', allowedInputs: { text: 10 } },
-      { label: '首帧', value: 'first-frame', allowedInputs: { text: 10, image: 1 } },
-      { label: '首尾帧', value: 'i2v-first-last-frame', allowedInputs: { text: 10, image: 2 } },
-      { label: '多图参考', value: 'reference-video', allowedInputs: { text: 10, image: 9 } },
-    ],
+    videoModes,
     advancedParams: [
       { key: 'duration', label: '生成时长', type: 'slider', default: 5, min: 2, max: 10, unit: 's' },
       { key: 'generateCount', label: '生成数量', type: 'number', default: 1, min: 1, step: 1 },
@@ -190,8 +248,14 @@ export function buildChannelModelEntries(
             : kind === 'audio'
               ? audioEntry
               : textEntry;
+      // 视频模型的「视频参考」模式只给 workfisher（FisherAI）通道：只有那条链路会把本机视频
+      // 上传成公网直链（host 侧 /files/upload），别的方言收到 videos 是静默忽略。
+      const entry =
+        kind === 'video'
+          ? (builder as typeof videoEntry)(name, channel.label, channel.dialectDetected === 'workfisher')
+          : builder(name, channel.label);
       result[kind].push({
-        ...builder(name, channel.label),
+        ...entry,
         cloudChannelId: channel.id,
         cloudModelId: model.id,
       });

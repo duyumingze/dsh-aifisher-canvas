@@ -291,7 +291,9 @@ export function CanvasHeader(react: Runtime, props: Props, icons: HeaderIcons) {
           buttonVariants({ variant: 'ghost', size: 'icon-sm' }),
           'shrink-0 [&_img]:size-6 [&_img]:object-contain',
         ),
-        children: h('img', { src: '/aifisher-mark-white.svg', alt: 'AIFISHER 画布 Logo' }),
+        // 图形标识 = 渡雨鸣泽（见 public/brand/README.md）。文件名沿用上游写死的
+        // 根路径 URL：vendor 里十几个 <img> 都指向它，换内容比换路径安全。
+        children: h('img', { src: '/aifisher-mark-white.svg', alt: '渡雨鸣泽 画布 Logo' }),
       }),
       h(
         DropdownMenuContent,

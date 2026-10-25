@@ -879,7 +879,7 @@ function enhanceSettings(root: ParentNode): string[] {
   if (panel) {
     panel.dataset.fisheraiSettings = 'true';
     panel.setAttribute('role', panel.getAttribute('role') ?? 'dialog');
-    panel.setAttribute('aria-label', 'AIFISHER 画布设置');
+    panel.setAttribute('aria-label', '渡雨鸣泽 画布设置');
     panel.setAttribute('aria-modal', 'true');
     const sidebar = panel.querySelector('nav')?.parentElement;
     if (sidebar) sidebar.dataset.fisheraiSettingsSidebar = 'true';
@@ -919,7 +919,7 @@ function enhanceSettings(root: ParentNode): string[] {
     本机服务: 'local-service',
     开源配置: 'local-service',
     开源服务: 'local-service',
-    '关于 AIFISHER 画布': 'diagnostics',
+    '关于 渡雨鸣泽 画布': 'diagnostics',
   };
   const found: string[] = [];
   root.querySelectorAll<HTMLButtonElement>('button').forEach((button) => {
@@ -945,7 +945,7 @@ function enhanceSettings(root: ParentNode): string[] {
       settingsSidebar.append(version);
     }
     version.dataset.fisheraiCanvasVersion = productVersion;
-    const versionLabel = `AIFISHER 画布 · ${build}`;
+    const versionLabel = `渡雨鸣泽 画布 · ${build}`;
     if (version.textContent !== versionLabel) version.textContent = versionLabel;
   }
   const contentDomains = new Map<string, string>([
@@ -971,7 +971,7 @@ function enhanceStableShell(root: ParentNode = document): StableDesignReport {
   const documentRoot = root instanceof Document ? root : (root.ownerDocument ?? document);
   if (documentRoot.body) documentRoot.body.dataset.fisheraiShell = shell;
   const main = root.querySelector('main');
-  if (main && shell === 'projects') main.setAttribute('aria-label', 'AIFISHER 项目');
+  if (main && shell === 'projects') main.setAttribute('aria-label', '渡雨鸣泽 项目');
   const settingsSections = enhanceSettings(root);
   return { shell, labelledButtons: labelIconButtons(root), settingsSections };
 }

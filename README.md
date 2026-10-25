@@ -2,7 +2,9 @@
 
 > 把专业级 AI 创作无限画布带进 DeepSeek Harness：**不是插件内置一个聊天框，而是让 DSH 原生 AI Agent 直接接管整个画布**——本地 ComfyUI、多云端生成、节点编排、素材整理，全靠你在右侧说一句话完成。
 
-**Version**: v1.61 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
+**Version**: v1.69 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
+
+> **界面标识**：画布里露出的图形标识、画布名（渡雨鸣泽 画布）与助手名（渡雨鸣泽 Agent）都是**渡雨鸣泽**的视觉标识 v1.0，上游 AIFISHER 的图形标识已不在界面上出现（文件名沿用上游的兼容壳见 [`public/brand/README.md`](public/brand/README.md)）。`docs/shots/` 里的截图仍是旧标识，重新截图前以下文的文字说明为准。
 
 ---
 
@@ -41,6 +43,10 @@
 - 🎬 **长任务编排**：一句话提交「做完这组镜头」——host 端按既定流水线建节点、锁参考、准备批次，然后等你在确认卡上按一次；某个镜头失败会**自动再准备一批重试**（仍然要你确认，不自动花钱）
 - 🗂️ **分镜板**：画布底部一条缩略图带，按镜头号排好、点一张聚焦过去、按播放自动翻页——只看顺序，不塞完整导演台
 - 🧭 **主动副驾**：发现失败节点、空提示词、没锁的镜头时，在左下角安静冒一个小胶囊，点开才看建议；没有建议时不出现，点「不再提示」彻底关掉
+- 🔁 **在画布里换会话，不被打断**：右侧栏标题本身就是会话列表（可搜、标出当前、滤掉归档与子代理会话），点一条即切；头部「＋」在当前工作区新建（或复用空白）会话。两个动作都在画布内完成——不会再被 DSH 侧边栏那条「先切回对话区」的导航把你带出画布
+- 🎥 **镜头语言可复用**：机身 / 镜头 / 焦段 / 光圈四件事按项目存一套（`camera`），一次 `apply` 就把「85mm、f/1.8、库克 S7/i 的暖调虚化 + 别把摄影机画进画面」这段英文光学描述写进每个镜头提示词的末尾。重复 apply **只替换不叠加**，换参数重跑也不会越跑越长；只动提示词，不碰模型与参数
+- 🎯 **只取那一小块**：节点一多，Agent 不再整张画布 `read` 一遍——`query` 支持按节点看上游/下游/双向邻域（深度 1–3）、按标题/提示词/正文关键词找、按类型过滤、分页返回，只回命中的几条和它们之间的连线
+- 🧾 **进度可续跑**：`progress` 把「做到第几步 + 用户确认了哪一版方案 + 哪些节点已定稿」写进项目文件（十个阶段：接单→概念→剧本→拆解→参考→分镜→视频→音频→审片→完成）。它和项目记忆一起注入画布对话，换个会话接手也知道停在哪，不用从头问
 
 > 传统 AI 画布是"你手动摆节点 + 点按钮生成单张图"，这个插件是"你跟 AI 说你要做什么，AI 自己在无限画布上帮你搭整个创作流水线"。
 
@@ -64,7 +70,9 @@
 | FisherAI | 异步任务轮询，自动上传参考图公网直链 |
 
 - 新建节点自动沿用上一次你选过的模型，不用每次重新下拉
+- 视频节点的参考图按模式给：**多图参考最多 9 张参考图**（与 MiniMax H3 参考模式同口径），首帧 1 张、首尾帧 2 张
 - 多通道多模型并行管理，任务队列里统一看进度、取消、清空
+- **生成历史不覆盖**：同一个图片 / 视频节点重复生成时，旧结果留在头部的「历史 N」里，点开可预览、下载、设为主图 / 主视频（图片留 20 条、视频留 12 条）
 
 ### 无限画布原生体验
 - 节点连线、编组、框选复制粘贴、历史回退全套基础能力完整保留
@@ -171,11 +179,34 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
 - 后端：Node.js 原生 HTTP 服务，所有接口统一 `/api/aifisher/*` 命名空间
 - 双 bundle 架构：host 半进程内加载，client 半浏览器独立运行，跨 bundle 通过全局桥通信
 - 与 DSH 宿主的边界：画布会把「从系统拖进来的文件」事件止步在自己的容器上（`src/client/canvas/mount.tsx` 的 `containFileDrags`）。原因是宿主把「拖入即可添加附件」的全屏提示层挂在 `document` 的 dragenter/dragleave 计数上，而画布的 `onDrop` 会 `stopPropagation` —— 放进去的话宿主永远收不到那次 drop，计数停在 1，整屏遮罩再也退不掉（真机踩过）。同理，任何一次鼠标点击都会补一次 dragleave，把已经卡住的遮罩解开。
-- 测试覆盖：类型门禁（`pnpm typecheck`，`src/` 零错误）+ jsdom 契约测试 + 真机浏览器视觉校验，累计 2200+ 回归用例守住画布几何、交互、响应逻辑
+- 生成历史（v1.64）：图片节点本来就有的「历史 N」现在视频节点也有 —— 合并/换位/文案的纯函数在 `src/canvas-ui/canvas/CanvasVideoHistory.ts`（去重、视频上限 12 条），经装配层挂成 `__FISHERAI_VIDEO_RESULT_HISTORY__` 桥；`canvasGeneration.ts`（生成成功）、`generationRecovery.ts`（断线/刷新回收）两处都走它，播放器（整文件覆盖 `canvasVideoPlayer.tsx`）负责头部药丸、扇形历史叠与「设为主视频」。换主视频会清掉 `lastFrame` 与旧比例，首尾帧/比例按新片重算；历史是节点数据，随 `.fisherai` 一起导出。
+- 视频截帧（v1.66）：视频底栏那枚按钮变成三项菜单 —— **截取首帧 / 截取尾帧 / 首尾帧各一张**，单截一帧不会多掉一个要删的节点。取帧在 `src/canvas-ui/canvas/CanvasVideoFrames.ts`（输出最长边 2048、尾帧从 `duration - 0.05` 起试、探到空白画面自动往前退），落位在 `CanvasFrameLayout.ts`（贴视频右侧 60px、首上尾下、避开已有节点，截完把「视频 + 新帧」一起聚焦进视口），vendor 侧只做接线（补丁 3.8x）；截帧节点的提示词留空，不会被当成生成提示词。
+- 截帧加固（v1.67，2026-10-23 报障「截取视频首尾帧失败了」）：等待判定从「单次 `seeked` 快照」改成**事件唤醒 + 40ms 轮询**（事件来早了、干脆不来都不会再白等 15s 报「视频定位超时」）；落点容差 0.5s（Chromium 会吸到最近可解码帧）；按 `seekable` 钳制目标（远端素材只缓冲了一截时不硬拖片尾）；空白帧先等最多 800ms 再判；超时**换一个新解码器重试一次**；错误文案带现场（`readyState` / 是否仍在寻址 / 落点 / 时长）。同时 host 的 `/api/aifisher/canvas/proxy` **开始透传 Range**（206 + `Content-Range`）——以前远端视频经代理后浏览器当它是「不可寻址」，拖进度条和截尾帧都会卡死。
+- 进度条拖拽（v1.68，2026-10-23 报障「视频下方进度条拖到不了」）：底栏那根 16px 的原生滑杆换成**自己吃指针的轨道** —— 整条轨道（20px + 上下余量）按下即跳到落点，不再要求戳中 12px 的拇指；拖动期间读数/拇指 1:1 跟指针（本地 scrub 状态，播放时钟的回写不会再把拇指拽回去）；seek 按 120ms 节流、松手补最后一发（长片里 60Hz 连打会打乱解码器）；松手后真在寻址时显示「定位中…」；底栏收起时 `pointer-events-none`，不再吞掉视频底部的点击。实现在整文件覆盖 `canvasVideoPlayer.tsx`，回归 `test:video-seek`（19 项）。
+- 镜头语言 / 精准查询 / 创作进度（v1.69，2026-10-25）：
+  - `camera`（`src/host/canvas/camera.ts`）：8 机身 × 8 镜头 × 11 焦段 × 10 光圈；`describeFocalLength`/`describeAperture` 把数字翻成英文光学描述，片段约 250 字符（SD 系 CLIP 77 token、`read` 240 字截断，太长会跟用户提示词抢预算）。片段以 `camera direction only —` 开头、以 `[cam: …]` 结尾，重复 apply 按句首定位**整段替换**；用户在我们写入后又往后接了字，宁可不动也不误删。存 `<数据目录>/canvas-camera.json`（按项目一套）。只写 `prompt`，不碰 model/parameters，所以不会撞 configure 的声明约束。
+  - `query`（`src/host/canvas/query.ts`）：纯函数跑在一次 `read` 之上，回命中节点 + 两端都在结果里的边；提示词只回前 160 字（`read detail:"full"` 取全文），越界带 `truncated` 与「还有 N 条」。
+  - `progress`（`src/host/canvas/progress.ts`）：十阶段线 + brief/approvedPlan/定稿与参考节点，存 `<数据目录>/canvas-progress.json`；阶段变了才记 history（最近 20 条），非法 phase 直接 `INVALID`（不静默落回 intake）。注入走 v1.59 那条 `agent/pre-step` 通道，与项目记忆拼成一段、内容变了才重插。
+  - 回归 `test:tools`（63 项）：幂等/剥离/非法值、邻域与分页、阶段机与注入。
+- 测试覆盖：类型门禁（`pnpm typecheck`，`src/` 零错误）+ jsdom 契约测试 + 真机浏览器视觉校验，累计 2500+ 回归用例守住画布几何、交互、响应逻辑
 - 保存链路（v1.58，见 `scripts/patches/aifisher/src/stable/persistence/canvasWorkflow.ts`）：上游的乐观并发是「撞 409 → 重读服务端 → 三向合并 → 重发」，但三向合并遇到**同一字段两边都改**会抛冲突，并把这份文档的保存**永久封锁**（只有重新打开项目才解），画布照常能编辑、实际一个字都存不进去。本插件改成「救援合并」：节点/分组按 id 取并集、同 id 以当前窗口为准、**一定落盘**，并提示用户核对；保存/读取请求另加 20s 超时，避免一次挂住的请求把保存队列永久占死。agent 的每次改动还会由 host 立刻追加一次保存，回执里用 `saved` 说明有没有真的写进 `canvas.json`。
 - 云端结果落盘（2026-10-20）：云端通道回的是**服务商临时链接**（如 `https://file*.aitohumanize.com/file/<hash>.png`），host 侧会先把字节下载进素材库，节点的 `resultUrl` 才是同源 `/api/aifisher/canvas/media/...`。图床在任务刚回报 SUCCESS 的头几秒常常还是 404（文件没落地），所以下载带 4 次退避重试；真要失败，节点会显示「图片链接已失效」并留痕到 `/api/aifisher/canvas/diagnostics`（`installImageLoadTelemetry` 收 img 的 error 事件），而不是静默留一块黑。
 - 火山方舟直连（v1.60）：一张卡片管两种媒体，只认 `ARK_API_KEY`。**图片**走 `POST /api/v3/images/generations`（`arkImageProvider.ts`：档位+比例 → `size`、参考图内联成 data URL、组图/图层拆分按模型能力分流）；**视频**（Seedance 2.0，`arkVideoProvider.ts`）走异步任务 —— `POST /api/v3/contents/generations/tasks` 提交 `content` 数组（`text` / `first_frame` / `last_frame` / `reference_image` / `reference_video` / `reference_audio`）再轮询 `GET …/tasks/{id}`，出片后立刻把 mp4 下载进素材库。参考图的字节内联（方舟访问不到 `127.0.0.1`），参考视频/音频只收公网直链；模型名逐字取自画布目录（`豆包视频2.0`），界面的「自定义模型 ID」可换成账号下的推理接入点（`ep-…`）。
 - Agent 契约：[docs/canvas-agent-contract.md](docs/canvas-agent-contract.md) —— `canvas_control` 每类 operation 的字段、`configure` 的四条硬约束（模型名逐字匹配 / 换模型会重置高级参数）、生成授权边界与错误码速查。**要让 AI 正确操作画布，先喂它这份文档。**
+
+### 服务端拼版（独立工具，2026-10-25）
+
+[`tools/contact-sheet/`](tools/contact-sheet/README.md)：把项目里**已出图**的节点按画布阅读顺序排成分镜 contact sheet，在 Node 里直接渲染 PNG，完全不走浏览器。
+
+- 为什么：画布自带的导出是 DOM 截图（`html-to-image`），撞三处天花板 —— `foreignObject` 重排慢、跨域素材会污染 canvas、单边 8192+ px 就画不下；服务端重画只受内存限制。
+- 怎么画：读 `canvas.json` → 用 LeaferJS（MIT）重建场景 → `@napi-rs/canvas`（Skia 原生绑定）出 PNG。
+- 边界：**独立 `package.json`，不参与 `pnpm build`、不进 `lib/`、不影响回归**；只拼图片节点，视频节点要求先截帧。
+
+```bash
+cd tools/contact-sheet
+pnpm install --config.node-linker=hoisted --config.enableGlobalVirtualStore=false
+node render.mjs --project 显影 --out sheet.png     # 默认 $DSH_HOME/storages/dsh-aifisher-canvas
+```
 
 ---
 
@@ -186,6 +217,8 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
 - `media/`：生成与上传的图片/视频/音频素材
 - `workflows/`：自定义 ComfyUI 工作流配置
 - `cloud-channels.json`：云端通道与密钥配置（密钥值不回传前端）
+- `canvas-memory.json` / `canvas-assets.json`：项目记忆（风格/角色/参数 + 参考锚点）、可复用资产卡片
+- `canvas-camera.json` / `canvas-progress.json`（v1.69）：按项目的摄影参数（机身/镜头/焦段/光圈）、创作进度（阶段 + 已确认方案 + 定稿/参考节点）
 
 ---
 

@@ -206,7 +206,7 @@ function createResourceLinks() {
   const nav = document.createElement('nav');
   nav.className = 'fisherai-resource-links';
   nav.dataset.fisheraiResourceLinks = 'true';
-  nav.setAttribute('aria-label', 'AIFISHER 资源入口');
+  nav.setAttribute('aria-label', '渡雨鸣泽 资源入口');
 
   for (const resource of resources) {
     const link = document.createElement('a');

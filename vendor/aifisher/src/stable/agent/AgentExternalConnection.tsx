@@ -2,7 +2,7 @@ import { useState, useSyncExternalStore } from 'react';
 import type { CanvasExternalClient } from './canvasExternalClient';
 
 function desktopInstructions(command: string) {
-  return `请将当前 AIFISHER 画布接入这个 Codex 桌面任务。请在本机 PowerShell 执行以下配对指令（两分钟内有效，仅限本机使用）：\n\n${command}\n\n配置成功后，告诉我到 Codex「设置 → 插件 → MCP」，找到 aifisher 并启用；如果已启用但工具未加载，关闭再开启其开关。返回此任务后，请用 aifisher 的 canvas_control 读取画布验证连接。若本任务仍未加载工具，请明确告知我新建任务再验证。只读取验证，不创建节点或调用付费生成。`;
+  return `请将当前渡雨鸣泽画布接入这个 Codex 桌面任务。请在本机 PowerShell 执行以下配对指令（两分钟内有效，仅限本机使用）：\n\n${command}\n\n配置成功后，告诉我到 Codex「设置 → 插件 → MCP」，找到 aifisher 并启用；如果已启用但工具未加载，关闭再开启其开关。返回此任务后，请用 aifisher 的 canvas_control 读取画布验证连接。若本任务仍未加载工具，请明确告知我新建任务再验证。只读取验证，不创建节点或调用付费生成。`;
 }
 
 export function AgentExternalConnection({ controller }: { controller: CanvasExternalClient }) {
@@ -36,7 +36,7 @@ export function AgentExternalConnection({ controller }: { controller: CanvasExte
       <ol className="list-decimal space-y-2 pl-5">
         <li>点击上方按钮，在两分钟内把指引粘贴到 Codex 桌面对话并发送，由 Codex 完成本机配置。</li>
         <li>配置完成后，打开 Codex 的<strong>设置 → 插件 → MCP</strong>，找到 <strong>aifisher</strong>，打开右侧开关。已经打开但未加载时，关闭再开启。</li>
-        <li>回到 Codex 对话，发送“读取当前 AIFISHER 画布”。能返回当前节点，才表示连接成功。</li>
+        <li>回到 Codex 对话，发送“读取当前渡雨鸣泽画布”。能返回当前节点，才表示连接成功。</li>
       </ol>
       <p role="status" className="my-2">{copied === 'desktop' ? '已复制连接指引，请粘贴到 Codex 桌面对话发送。' : ''}</p>
       {state.desktopCommand && <details className="my-2"><summary className="cursor-pointer">查看指引 / 手动复制</summary>
@@ -47,7 +47,7 @@ export function AgentExternalConnection({ controller }: { controller: CanvasExte
       </details>}
       <details className="my-3"><summary className="cursor-pointer">找不到 MCP 或连接失败？</summary>
         <p className="my-2">插件页面顶部要点击“MCP”标签，不是“插件”列表。没有 aifisher：先确认 Codex 已成功执行配置指令，再重新打开设置页面。</p>
-        <p className="my-2">启用后当前对话仍提示没有工具：新建一个 Codex 任务，再发送“读取当前 AIFISHER 画布”。开关开启只代表启用，实际读取成功才算接通。</p>
+        <p className="my-2">启用后当前对话仍提示没有工具：新建一个 Codex 任务，再发送“读取当前渡雨鸣泽画布”。开关开启只代表启用，实际读取成功才算接通。</p>
         <p className="my-2">配对码过期或已使用：重新点击上方按钮并发送新指引。连接最长一小时；授权过期、关闭项目或退出登录后，请在目标画布重新配对。</p>
       </details>
       <details className="my-3"><summary className="cursor-pointer">备用：连接 Codex CLI（终端）</summary>

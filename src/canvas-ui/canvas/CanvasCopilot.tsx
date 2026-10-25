@@ -146,9 +146,15 @@ export function copilotReport(): Record<string, unknown> {
   };
 }
 
+/**
+ * 面板从胶囊**正上方**展开（与 PILL_STYLE 同一条竖线），不再贴右缘：
+ * 贴右缘会和退出按钮处在同一列，虽然底边（64）刚好在按钮上沿（50）之上，
+ * 但窗口一矮就会压上去；居中展开与胶囊位置一致，用户视线不用横跳。
+ */
 const PANEL_STYLE: ReactTypes.CSSProperties = {
   position: 'absolute',
-  right: 56,
+  left: '50%',
+  transform: 'translateX(-50%)',
   bottom: 64,
   zIndex: 46,
   width: 330,
@@ -157,9 +163,23 @@ const PANEL_STYLE: ReactTypes.CSSProperties = {
   pointerEvents: 'auto',
 };
 
+/**
+ * 副驾胶囊的位置：**底部中间、紧挨分镜板左侧**。
+ *
+ * 2026-10-23 用户报障（截图）：「退出画布」按钮压在副驾胶囊上，两个重叠。
+ * 原因是这两个浮层抢同一个右下角：
+ *   - DSH 层（画布外）的退出按钮：`right: 20`，宽 98 → 占距右缘 20..118；
+ *   - 副驾胶囊原来 `right: 56`，宽 ~81 → 占距右缘 56..137。
+ * 两个都贴底（bottom 24 / 20），水平区间交叠 62px，必然重叠。
+ *
+ * 右下角是**退出按钮**的地盘（它属于 DSH 层，必须始终可点、最靠外），所以让画布
+ * 自己的浮层往中间让：胶囊右缘固定在画布中线外 54px（分镜板居中、半宽约 46.5，
+ * 间隙 8px）。宽画布下副驾与分镜板连成一条底部工具带；窄画布下也只有胶囊左端
+ * 会碰到缩放条，不会压到退出按钮。
+ */
 const PILL_STYLE: ReactTypes.CSSProperties = {
   position: 'absolute',
-  right: 56,
+  right: 'calc(50% + 54px)',
   bottom: 24,
   zIndex: 46,
   pointerEvents: 'auto',

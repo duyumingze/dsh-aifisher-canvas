@@ -381,7 +381,7 @@ export function installSkillCommunity(client: AgentSkillClient) {
           name.textContent = skill.name;
           const description = document.createElement('span');
           description.className = 'fisher-skill-description';
-          description.textContent = skill.description || '点击后在 AIFISHER Agent 中使用';
+          description.textContent = skill.description || '点击后在 渡雨鸣泽 Agent 中使用';
           const meta = document.createElement('span');
           meta.className = 'fisher-skill-meta';
           meta.textContent = `${skill.source === 'official' ? `官方推荐${skill.version ? ` · v${skill.version}` : ''} · ` : '本机导入 · '}${skill.fileCount} 个文件 · 在 Agent 中使用`;

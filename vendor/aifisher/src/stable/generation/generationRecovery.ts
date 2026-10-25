@@ -2,6 +2,30 @@ import { isWorkflowRecoveryRequest } from './workflowRecoveryBoundary';
 import { generateImage, generateVideo } from './generationClient';
 import { mergeImageResultHistory, type ImageResultHistoryNode } from './imageResultHistory';
 
+/**
+ * dsh-aifisher-canvas v1.64：视频也留生成历史（与图片同一套口径）。
+ *
+ * 断线/刷新期间跑完的结果以前只给视频写 resultUrl/resultUrls，上一条就没了；
+ * 现在走装配层挂的桥（src/canvas-ui/canvas/CanvasVideoHistory.ts）。
+ * 桥没装好时退回「只记这一批」，结果回收照旧。
+ */
+type VideoResultHistoryBridge = {
+  merge(node: ImageResultHistoryNode, urls: readonly unknown[]): Record<string, unknown>;
+};
+function mergeResultHistory(
+  node: ImageResultHistoryNode,
+  type: string | undefined,
+  urls: readonly unknown[],
+): Record<string, unknown> {
+  if (type !== 'video') return mergeImageResultHistory(node, urls);
+  const bridge = (window as unknown as { __FISHERAI_VIDEO_RESULT_HISTORY__?: VideoResultHistoryBridge })
+    .__FISHERAI_VIDEO_RESULT_HISTORY__;
+  const merged = bridge?.merge(node, urls);
+  if (merged) return merged;
+  const list = urls.filter((url): url is string => typeof url === 'string' && Boolean(url.trim()));
+  return { resultUrl: list[0], resultUrls: list, currentResultCount: list.length };
+}
+
 export interface RecoverableNode extends ImageResultHistoryNode {
   id: string;
   type: string;
@@ -111,10 +135,10 @@ function terminalPatch(
     return {
       ...diagnostics,
       ...(result.code === 'GENERATION_PARTIAL_RESULTS' &&
-      result.type === 'image' &&
+      (result.type === 'image' || result.type === 'video') &&
       result.resultUrls?.length
         ? {
-            ...mergeImageResultHistory(node, result.resultUrls),
+            ...mergeResultHistory(node, result.type, result.resultUrls),
           }
         : {}),
       status: 'error',
@@ -141,8 +165,8 @@ function terminalPatch(
     status: 'success',
     errorMessage: undefined,
     resultUrl: result.type === 'text' ? undefined : resultUrl,
-    ...(result.type === 'image'
-      ? mergeImageResultHistory(node, resultUrls?.length ? resultUrls : [resultUrl])
+    ...(result.type === 'image' || result.type === 'video'
+      ? mergeResultHistory(node, result.type, resultUrls?.length ? resultUrls : [resultUrl])
       : {}),
     textContent: result.type === 'text' ? result.text : node.textContent,
     aspectRatio: result.aspectRatio || node.aspectRatio,

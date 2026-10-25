@@ -14,6 +14,8 @@
 import * as React from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
+import { version as PLUGIN_VERSION } from '../../../package.json';
+
 import { setCanvasPortalTarget } from '../../canvas-ui/lib/portal';
 import { useCanvasReact } from '../../canvas-ui/lib/react';
 import { canvasNodeSearchReport } from '../../canvas-ui/canvas/CanvasNodeSearchStore';
@@ -251,6 +253,97 @@ export type {
   KnifeReport,
 } from './knife';
 
+/**
+ * 排查用 / 回归用：视频生成历史的纯逻辑（v1.64）。
+ *
+ * 用户原话（2026-10-23）：「仿照图像生成历史记录，做视频生成历史记录功能」。
+ * 与叠图切换、扩图、上次模型同一条理由 —— 回归在**构建产物**上直接验
+ * 「合并去重 / 上限 / 主视频换位时把上一帧与旧比例清掉 / 药丸文案」，
+ * 不必先在 jsdom 里真跑一次出片；真点击那条路由 test-canvas-video-history 的 DOM 段守着。
+ */
+export {
+  installVideoResultHistory,
+  mergeVideoResultHistory,
+  promoteVideoResult,
+  VIDEO_RESULT_HISTORY_LIMIT,
+  videoCurrentResultCount,
+  videoHistoryItems,
+  videoHistoryLabel,
+  videoHistoryReport,
+  videoResultUrls,
+} from '../../canvas-ui/canvas/CanvasVideoHistory';
+export type {
+  VideoHistoryItem,
+  VideoHistoryNode,
+  VideoHistoryUpdate,
+  VideoResultHistoryAdapter,
+} from '../../canvas-ui/canvas/CanvasVideoHistory';
+
+/**
+ * 排查用 / 回归用：视频截帧与截帧落位的纯逻辑（v1.66，v1.67 加等待判定）。
+ *
+ * 用户原话（2026-10-23）：「完善视频截取首尾帧功能」；同晚报障「截取视频首尾帧失败了」。
+ * 与视频历史同一条理由 —— 回归在**构建产物**上直接验「输出尺寸上限 / 尾帧候选序列 /
+ * 空白帧判定 / 贴右避让 / seek 等待不靠单次事件」，真点菜单那条路由
+ * test-canvas-video-frames 的 DOM 段守着。
+ */
+export {
+  captureVideoFrames,
+  clampSeekTime,
+  FRAME_MAX_EDGE,
+  FRAME_TIMEOUT_MS,
+  frameTargetSize,
+  installVideoFrameCapture,
+  isBlankFrameSamples,
+  mediaStateText,
+  PAINT_WAIT_MS,
+  SEEK_TOLERANCE_SEC,
+  seekLanded,
+  TAIL_SEEK_OFFSETS,
+  TAIL_SEEK_TIMEOUT_MS,
+  tailTimes,
+  waitUntil,
+} from '../../canvas-ui/canvas/CanvasVideoFrames';
+export type {
+  CapturedVideoFrame,
+  FrameCaptureOptions,
+  FrameVideoLike,
+  VideoFrameCaptureAdapter,
+  VideoFrameRole,
+  WaitOptions,
+} from '../../canvas-ui/canvas/CanvasVideoFrames';
+export {
+  estimateNodeSize,
+  frameAspectRatio,
+  frameRectsOverlap,
+  FRAME_LAYOUT_GAP,
+  FRAME_LAYOUT_MAX_COLUMNS,
+  FRAME_LAYOUT_VERTICAL_GAP,
+  FRAME_LAYOUT_WIDTH,
+  installFrameLayout,
+  placeFrameNodes,
+} from '../../canvas-ui/canvas/CanvasFrameLayout';
+export type {
+  FrameLayoutAdapter,
+  FrameLayoutItem,
+  FrameLayoutNode,
+  FrameLayoutOptions,
+  FrameRect,
+} from '../../canvas-ui/canvas/CanvasFrameLayout';
+
+/**
+ * 排查用 / 回归用：自配通道视频条目的「输入上限」纯逻辑（v1.65）。
+ *
+ * 用户原话（2026-10-23）：「视频生成图像参考只能拖入三张，修复一下，按 minimaxh3 的标准来」。
+ * 与上面几组同一条理由 —— 回归在**构建产物**上直接验「按模式声明算总上限 / 参考图上限是 9」，
+ * 真拖线那半条路由 test-canvas-video-references 的 DOM 段守着。
+ */
+export {
+  VIDEO_REFERENCE_IMAGE_LIMIT,
+  videoInputCap,
+} from '../../canvas-ui/canvas/CloudChannelModels';
+export type { VideoModeInputs } from '../../canvas-ui/canvas/CloudChannelModels';
+
 /** 主题镜像：画布容器跟着 `html[data-af-theme]` 走，浮层才拿得到同一套 shadcn token。 */
 function mirrorCanvasTheme(container: HTMLElement): () => void {
   const root = document.documentElement;
@@ -354,10 +447,25 @@ function installDropOverlayHealer(): () => void {
 }
 
 /**
+ * 画布 UI 上显示的版本号来自 `html[data-fisherai-build]`：
+ * 看板左上角「vX.Y.Z」（`versionInfo.version`，读的是 vendor/package.json，
+ * 由 scripts/vendor-aifisher.mjs 对齐成插件版本）和设置页左下角版本行
+ * （`designSystem` 读这个 dataset 属性）都靠它。
+ *
+ * 上游在自己 `main.ts` 里写这个属性，我们不走它的入口，所以在这里补一次。
+ * 格式必须是 `vX.Y.Z` —— designSystem 用 /^v\d+\.\d+\.\d+/ 校验后才写版本行。
+ */
+function stampCanvasBuild(): void {
+  if (typeof document === 'undefined') return;
+  document.documentElement.dataset.fisheraiBuild = `v${PLUGIN_VERSION}`;
+}
+
+/**
  * 在 container 里挂载 AIFISHER 画布。
  * 返回的 handle 必须在组件卸载时 dispose，否则会留下全局定时器/监听器。
  */
 export function mountCanvas(container: HTMLElement): CanvasHandle {
+  stampCanvasBuild();
   const releaseDiagnostics = installCanvasDiagnostics();
   // 图片加载失败留痕（2026-10-20）：云端结果回落到服务商临时链接后，链接过期就是「节点成功但一块黑」。
   // 见 diagnostics.ts 的 installImageLoadTelemetry。

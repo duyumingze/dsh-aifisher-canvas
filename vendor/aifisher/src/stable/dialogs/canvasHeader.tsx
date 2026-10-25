@@ -182,7 +182,7 @@ export function CanvasHeader(React: Runtime, props: Props, components: Component
               >
                 <img
                   src="/aifisher-mark-white.svg"
-                  alt="AIFISHER 画布 Logo"
+                  alt="渡雨鸣泽 画布 Logo"
                   className="w-8 h-8 rounded-md object-contain bg-[var(--af-surface)] transition-transform hover:scale-110"
                 />
               </button>

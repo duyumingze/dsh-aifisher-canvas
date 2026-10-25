@@ -3208,6 +3208,605 @@ const GENERATION_BATCHES_PATCHES = [
   console.log(`[vendor] 生成批次确认卡：${GENERATION_BATCHES_PATCHES.length} 处（控制器挂 window）`);
 }
 
+// ---------------------------------------------------------------- 3.8w) 视频生成历史（v1.64）
+
+/**
+ * 用户原话（2026-10-23）：「仿照图像生成历史记录，做视频生成历史记录功能」。
+ *
+ * 参照物是图片节点：每次生成都把新结果**并进** `resultUrls`，节点头部一枚「历史 N」，
+ * 点开摊出前面那些（下载 / 设为主图）。视频侧以前是**每次覆盖**：
+ *   · `generation/canvasGeneration.ts` 的 Video 分支直接 `resultUrls: urls`；
+ *   · `generation/generationRecovery.ts` 只在 `result.type === 'image'` 时合并历史。
+ * 于是一条几十秒、几毛钱的视频重跑一次，上一条就永远回不来了。
+ *
+ * 这里只做**接线**（三处一行改写 + 一个共用小函数），合并/换位/文案的算法全在
+ * `src/canvas-ui/canvas/CanvasVideoHistory.ts`（回归在构建产物上直接验），
+ * 经装配层挂的 `__FISHERAI_VIDEO_RESULT_HISTORY__` 桥调用；桥没装时退回旧行为，不阻断生成。
+ */
+const VIDEO_HISTORY_PATCHES = [
+  {
+    file: 'src/stable/generation/canvasGeneration.ts',
+    from: `          } else if (node.type === 'Video') {
+            const metadata = await runtime.inspectVideo(urls[0]).catch(() => ({}));
+            patch = { resultUrl: urls[0], resultUrls: urls, lastFrame: undefined,
+              resultAspectRatio: undefined, naturalWidth: undefined, naturalHeight: undefined, ...metadata };
+          } else patch = { resultUrl: urls[0], resultUrls: urls };`,
+    to: `          } else if (node.type === 'Video') {
+            const metadata = await runtime.inspectVideo(urls[0]).catch(() => ({}));
+            // dsh-aifisher-canvas v1.64：视频也留生成历史（与图片同一套口径）。
+            // 合并算法在 src/canvas-ui/canvas/CanvasVideoHistory.ts，这里只走装配层的桥；
+            // 桥不在（例如单测直接挂组件）时退回「只记这一批」，不至于把生成链路带崩。
+            const current = binding.getNodes().find((candidate) => candidate.id === id)!;
+            const mergeVideoHistory = (
+              window as unknown as {
+                __FISHERAI_VIDEO_RESULT_HISTORY__?: {
+                  merge(node: unknown, urls: readonly unknown[]): Record<string, unknown>;
+                };
+              }
+            ).__FISHERAI_VIDEO_RESULT_HISTORY__?.merge;
+            const history = mergeVideoHistory
+              ? mergeVideoHistory(current, urls)
+              : { resultUrl: urls[0], resultUrls: urls, currentResultCount: urls.length };
+            patch = { ...history, lastFrame: undefined,
+              resultAspectRatio: undefined, naturalWidth: undefined, naturalHeight: undefined, ...metadata };
+          } else patch = { resultUrl: urls[0], resultUrls: urls };`,
+    why: '视频成功结果要并进历史，而不是覆盖上一条',
+  },
+  {
+    file: 'src/stable/generation/generationRecovery.ts',
+    from: `import { mergeImageResultHistory, type ImageResultHistoryNode } from './imageResultHistory';`,
+    to: `import { mergeImageResultHistory, type ImageResultHistoryNode } from './imageResultHistory';
+
+/**
+ * dsh-aifisher-canvas v1.64：视频也留生成历史（与图片同一套口径）。
+ *
+ * 断线/刷新期间跑完的结果以前只给视频写 resultUrl/resultUrls，上一条就没了；
+ * 现在走装配层挂的桥（src/canvas-ui/canvas/CanvasVideoHistory.ts）。
+ * 桥没装好时退回「只记这一批」，结果回收照旧。
+ */
+type VideoResultHistoryBridge = {
+  merge(node: ImageResultHistoryNode, urls: readonly unknown[]): Record<string, unknown>;
+};
+function mergeResultHistory(
+  node: ImageResultHistoryNode,
+  type: string | undefined,
+  urls: readonly unknown[],
+): Record<string, unknown> {
+  if (type !== 'video') return mergeImageResultHistory(node, urls);
+  const bridge = (window as unknown as { __FISHERAI_VIDEO_RESULT_HISTORY__?: VideoResultHistoryBridge })
+    .__FISHERAI_VIDEO_RESULT_HISTORY__;
+  const merged = bridge?.merge(node, urls);
+  if (merged) return merged;
+  const list = urls.filter((url): url is string => typeof url === 'string' && Boolean(url.trim()));
+  return { resultUrl: list[0], resultUrls: list, currentResultCount: list.length };
+}`,
+    why: '视频结果回收也要走历史合并（先落一个共用函数）',
+  },
+  {
+    file: 'src/stable/generation/generationRecovery.ts',
+    from: `      ...(result.code === 'GENERATION_PARTIAL_RESULTS' &&
+      result.type === 'image' &&
+      result.resultUrls?.length
+        ? {
+            ...mergeImageResultHistory(node, result.resultUrls),
+          }
+        : {}),`,
+    to: `      ...(result.code === 'GENERATION_PARTIAL_RESULTS' &&
+      (result.type === 'image' || result.type === 'video') &&
+      result.resultUrls?.length
+        ? {
+            ...mergeResultHistory(node, result.type, result.resultUrls),
+          }
+        : {}),`,
+    why: '部分成功（视频只回了一条）时也要保留旧的历史',
+  },
+  {
+    file: 'src/stable/generation/generationRecovery.ts',
+    from: `    ...(result.type === 'image'
+      ? mergeImageResultHistory(node, resultUrls?.length ? resultUrls : [resultUrl])
+      : {}),`,
+    to: `    ...(result.type === 'image' || result.type === 'video'
+      ? mergeResultHistory(node, result.type, resultUrls?.length ? resultUrls : [resultUrl])
+      : {}),`,
+    why: '回收成功的视频要并进历史',
+  },
+  {
+    file: 'src/stable/nodes/canvasMediaCards.tsx',
+    from: `      {(kind !== 'Image' || !(props.isVisible ?? true)) && <Header {...headerProps(props)} />}`,
+    to: `      {/* 可见时头部由 Preview 自己画（它还要塞「历史 N」那枚药丸；v1.64 起视频也一样）；
+          不可见（被折叠进叠图之类）才在这里补一条。 */}
+      {!(props.isVisible ?? true) && <Header {...headerProps(props)} />}`,
+    why: '视频卡的头部改由播放器画（要带历史药丸）',
+  },
+  {
+    file: 'src/stable/nodes/canvasMediaCards.tsx',
+    from: `  const previewProps =
+    kind === 'Video'
+      ? {
+          inputUrl: props.inputUrl,`,
+    to: `  const previewProps =
+    kind === 'Video'
+      ? {
+          // dsh-aifisher-canvas v1.64：视频卡也把「历史 N」放进节点头部（与图片一致）；
+          // 扇形叠与「设为主视频」在 scripts/patches/aifisher/.../canvasVideoPlayer.tsx。
+          renderHeader: (historyControl: ReactTypes.ReactNode) => (
+            <Header {...headerProps(props)}>{historyControl}</Header>
+          ),
+          inputUrl: props.inputUrl,`,
+    why: '视频预览要能往头部塞历史药丸',
+  },
+  {
+    file: 'src/stable/nodes/canvasMediaCards.tsx',
+    from: `      : { onUpload: props.onUpload };`,
+    to: `      : {
+          renderHeader: (historyControl: ReactTypes.ReactNode) => (
+            <Header {...headerProps(props)}>{historyControl}</Header>
+          ),
+          onUpload: props.onUpload,
+        };`,
+    why: '图片那半的 renderHeader 挪进 previewProps（否则下面那条 spread 删不掉）',
+  },
+  {
+    file: 'src/stable/nodes/canvasMediaCards.tsx',
+    from: `          {...(kind === 'Image'
+            ? {
+                renderHeader: (historyControl: ReactTypes.ReactNode) => (
+                  <Header {...headerProps(props)}>{historyControl}</Header>
+                ),
+              }
+            : {})}
+`,
+    to: ``,
+    why: 'renderHeader 已在 previewProps 里给全，这里不再按 Image 分支单给',
+  },
+  {
+    file: 'src/stable/app/canvasComponents.ts',
+    from: `export const VideoPlayer = bind(Dialogs.CanvasVideoPlayer)(() => [
+  {
+    MuteIcon: Icons.VolumeX,`,
+    to: `export const VideoPlayer = bind(Dialogs.CanvasVideoPlayer)(() => [
+  {
+    // dsh-aifisher-canvas v1.64：视频生成历史（头部「历史 N」+ 扇形叠）要用下载图标与节点尺寸
+    DownloadIcon: Icons.Download,
+    nodeWidth: nodeWidth,
+    nodeHeight: nodeHeight,
+    MuteIcon: Icons.VolumeX,`,
+    why: '视频播放器要多拿下载图标与节点尺寸（画扇形历史叠用）',
+  },
+];
+
+{
+  const problems = [];
+  for (const patch of VIDEO_HISTORY_PATCHES) {
+    const target = path.join(VENDOR, patch.file);
+    if (!fs.existsSync(target)) {
+      problems.push(`${patch.file}（文件不存在）`);
+      continue;
+    }
+    const original = fs.readFileSync(target, 'utf8');
+    const hits = original.split(patch.from).length - 1;
+    if (hits !== 1) {
+      problems.push(`${patch.file}: ${patch.why} —— 锚点命中 ${hits} 次（预期 1 次）`);
+      continue;
+    }
+    fs.writeFileSync(target, original.split(patch.from).join(patch.to));
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `[vendor] 视频生成历史补丁没对齐（上游可能改了写法，请核对）：\n  - ${problems.join('\n  - ')}`,
+    );
+  }
+  console.log(`[vendor] 视频生成历史：${VIDEO_HISTORY_PATCHES.length} 处（生成/回收/卡片/注入）`);
+}
+
+// ---------------------------------------------------------------- 3.8x) 视频截帧（v1.66）
+
+/**
+ * 用户原话（2026-10-23）：「完善视频截取首尾帧功能」。
+ *
+ * 上游的 `canvasMediaOperations.snapshot()` 是整个截帧链路的**落地点**，它有三个问题：
+ *   1. 只接受「成对」的帧 —— 想只截尾帧也会多造一个首帧节点；
+ *   2. 位置写死 `source.x + 400` / `source.y + frame.offset`，不看视频实际宽度、不避让已有节点；
+ *   3. 截完只把新节点选中，不把视口带过去 —— 节点落在视口外时，用户看到的就是「点了没反应」。
+ *
+ * 算法留在插件：落位在 `src/canvas-ui/canvas/CanvasFrameLayout.ts`（挂成
+ * `__FISHERAI_FRAME_LAYOUT__`），取帧在 `CanvasVideoFrames.ts`（挂成 `__FISHERAI_VIDEO_FRAMES__`）。
+ * 这里只做接线：空帧跳过、坐标问桥、带 `focus` 的截帧把「视频 + 新帧」聚焦进视口。
+ */
+const VIDEO_FRAME_PATCHES = [
+  {
+    file: 'src/stable/media/canvasMediaOperations.ts',
+    from: `    async snapshot(sourceId: string, frames: { data: string; title: string; offset: number }[]) {
+      if (!active()) return;
+      const source = binding.getNodes().find((node) => node.id === sourceId);
+      if (!source) return;
+      const pending = frames.map((frame) => {
+        const id = api.createId(),
+          job = start(id);
+        const node: CanvasNode = {
+          id,
+          type: 'Upload Image',
+          x: source.x + 400,
+          y: source.y + frame.offset,`,
+    to: `    async snapshot(
+      sourceId: string,
+      frames: { data: string; title: string; offset: number; focus?: boolean }[],
+    ) {
+      if (!active()) return;
+      const source = binding.getNodes().find((node) => node.id === sourceId);
+      if (!source) return;
+      // dsh-aifisher-canvas v1.66：只截一帧时另一帧传空串 —— 空帧直接跳过，不造空节点
+      const wanted = frames.filter(
+        (frame) => typeof frame.data === 'string' && frame.data.length > 0,
+      );
+      if (!wanted.length) return;
+      // 落位问桥（贴视频右侧 / 首上尾下 / 避开已有节点）；桥不在才退回上游的固定 +400
+      const frameLayout = (
+        window as unknown as {
+          __FISHERAI_FRAME_LAYOUT__?: {
+            place(
+              source: unknown,
+              items: unknown[],
+              nodes: unknown[],
+            ): Array<{ x: number; y: number }>;
+          };
+        }
+      ).__FISHERAI_FRAME_LAYOUT__;
+      const spots =
+        frameLayout?.place(
+          source,
+          wanted.map((frame) => ({ title: frame.title, offset: frame.offset })),
+          binding.getNodes(),
+        ) ?? wanted.map((frame) => ({ x: source.x + 400, y: source.y + frame.offset }));
+      const pending = wanted.map((frame, index) => {
+        const id = api.createId(),
+          job = start(id);
+        const node: CanvasNode = {
+          id,
+          type: 'Upload Image',
+          x: spots[index]?.x ?? source.x + 400,
+          y: spots[index]?.y ?? source.y + frame.offset,`,
+    why: '截帧要支持单帧、按实际宽度落位并避开已有节点',
+  },
+  {
+    file: 'src/stable/media/canvasMediaOperations.ts',
+    from: `      binding.select?.(pending.map(({ node }) => node.id));
+      await Promise.all(`,
+    to: `      binding.select?.(pending.map(({ node }) => node.id));
+      // dsh-aifisher-canvas v1.66：带 focus 的截帧把「视频 + 新帧」一起收进视口，
+      // 否则节点落在视口外时用户看到的就是「点了没反应」（v1.64 的视频历史同理，但那边是就地摊开）。
+      if (pending.some(({ frame }) => frame.focus)) {
+        (
+          window as unknown as { __FISHERAI_FOCUS_NODES__?: (ids: readonly string[]) => void }
+        ).__FISHERAI_FOCUS_NODES__?.([sourceId, ...pending.map(({ node }) => node.id)]);
+      }
+      await Promise.all(`,
+    why: '截完把结果带进视口（否则在视口外 = 像没反应）',
+  },
+  {
+    file: 'src/stable/media/canvasMediaOperations.ts',
+    from: `    handleVideoFirstLastSnapshot: (id: string, first: string, last: string) =>
+      owner.current?.snapshot(id, [
+        { data: first, title: '视频首帧', offset: -150 },
+        { data: last, title: '视频尾帧', offset: 150 },
+      ]),`,
+    to: `    handleVideoFirstLastSnapshot: (id: string, first: string, last: string) =>
+      // dsh-aifisher-canvas v1.66：任一侧传空串 = 只要另一侧的帧（播放器菜单里的「截取首帧 / 尾帧」）
+      owner.current?.snapshot(id, [
+        { data: first, title: '视频首帧', offset: -150, focus: true },
+        { data: last, title: '视频尾帧', offset: 150, focus: true },
+      ]),`,
+    why: '首帧/尾帧可单独截取，且截完要聚焦',
+  },
+  {
+    file: 'src/stable/media/canvasMediaOperations.ts',
+    from: `          title: frame.title,
+          prompt: frame.title,`,
+    to: `          title: frame.title,
+          // v1.66：截帧节点的 prompt 留空 —— 「视频首帧」这种标题会被当成提示词拼给下游
+          prompt: '',`,
+    why: '截帧节点不要把标题写进提示词',
+  },
+];
+
+{
+  const problems = [];
+  for (const patch of VIDEO_FRAME_PATCHES) {
+    const target = path.join(VENDOR, patch.file);
+    if (!fs.existsSync(target)) {
+      problems.push(`${patch.file}（文件不存在）`);
+      continue;
+    }
+    const original = fs.readFileSync(target, 'utf8');
+    const hits = original.split(patch.from).length - 1;
+    if (hits !== 1) {
+      problems.push(`${patch.file}: ${patch.why} —— 锚点命中 ${hits} 次（预期 1 次）`);
+      continue;
+    }
+    fs.writeFileSync(target, original.split(patch.from).join(patch.to));
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `[vendor] 视频截帧补丁没对齐（上游可能改了写法，请核对）：\n  - ${problems.join('\n  - ')}`,
+    );
+  }
+  console.log(`[vendor] 视频截帧：${VIDEO_FRAME_PATCHES.length} 处（单帧/落位/聚焦）`);
+}
+
+// ---------------------------------------------------------------- 3.8z) 品牌文案（渡雨鸣泽）
+
+/**
+ * 把「这个应用 / 这个助手是谁」的文案换成渡雨鸣泽的标识（2026-10-25）。
+ *
+ * 边界（很重要，不要改成整仓 `AIFISHER → 渡雨鸣泽`）：
+ *   - `AIFISHER API` / `AIFISHER 账号` / `AIFISHER Agent 中转线路` / `AIFISHER 中转`
+ *     指的是上游那套**第三方中转服务**（api.work-fisher.com）与它的模型目录，
+ *     改了就等于在界面上撒谎。这些一律不动。
+ *   - 只改自称：画布名、画布内的 Agent、项目看板、设置页、ComfyUI/更新提示里
+ *     「我们」的那部分。
+ *
+ * 图形标识不在这里：`public/brand/aifisher-mark-white.svg` 等文件是上游写死的
+ * 根路径 URL（vendor 里十几个 `<img src="/aifisher-mark-white.svg">`），
+ * 我们直接换文件内容，见 public/brand/README.md。
+ *
+ * 每条的命中次数默认 1；上游改了写法就 build 报错，不会静默失效。
+ */
+const BRAND_NAME = '渡雨鸣泽';
+const BRANDING_PATCHES = [
+  // ---- 画布头部 / 项目看板
+  {
+    file: 'src/stable/dialogs/canvasHeader.tsx',
+    from: 'alt="AIFISHER 画布 Logo"',
+    to: `alt="${BRAND_NAME} 画布 Logo"`,
+    why: '画布头部 logo 的无障碍文案',
+  },
+  {
+    file: 'src/stable/navigation/projectDashboardHeader.tsx',
+    from: `alt={'AIFISHER 画布 Logo'}`,
+    to: `alt={'${BRAND_NAME} 画布 Logo'}`,
+    why: '项目看板 logo 的无障碍文案',
+  },
+  {
+    file: 'src/stable/navigation/projectDashboardHeader.tsx',
+    from: `{'AIFISHER 画布'}`,
+    to: `{'${BRAND_NAME} 画布'}`,
+    why: '项目看板标题（用户最常看到的那一行）',
+  },
+  {
+    file: 'src/stable/navigation/projectDashboardChrome.ts',
+    from: `'AIFISHER 资源入口'`,
+    to: `'${BRAND_NAME} 资源入口'`,
+    why: '看板资源入口的无障碍文案',
+  },
+  // ---- 画布内 Agent
+  {
+    file: 'src/stable/agent/canvasAgentChrome.tsx',
+    from: '打开 AIFISHER Agent',
+    to: `打开 ${BRAND_NAME} Agent`,
+    why: 'Agent 浮钮的 aria-label',
+  },
+  {
+    file: 'src/stable/agent/canvasAgentChrome.tsx',
+    from: 'title="AIFISHER Agent"',
+    to: `title="${BRAND_NAME} Agent"`,
+    why: 'Agent 浮钮的悬浮提示',
+  },
+  {
+    file: 'src/stable/agent/canvasAgentPanel.tsx',
+    from: '"调整 AIFISHER Agent 面板宽度"',
+    to: `"调整 ${BRAND_NAME} Agent 面板宽度"`,
+    why: 'Agent 面板拖拽分隔条的 aria-label',
+  },
+  {
+    file: 'src/stable/agent/canvasAgentPanel.tsx',
+    from: '拖拽调整 AIFISHER Agent 面板宽度',
+    to: `拖拽调整 ${BRAND_NAME} Agent 面板宽度`,
+    why: 'Agent 面板拖拽分隔条的 title',
+  },
+  {
+    file: 'src/stable/agent/canvasAgentPanel.tsx',
+    from: `? '新对话' : 'AIFISHER Agent'`,
+    to: `? '新对话' : '${BRAND_NAME} Agent'`,
+    why: 'Agent 面板标题（没有话题时的默认名）',
+  },
+  {
+    file: 'src/stable/agent/canvasAgentPanel.tsx',
+    from: '关闭 AIFISHER Agent',
+    to: `关闭 ${BRAND_NAME} Agent`,
+    why: 'Agent 面板关闭按钮的 aria-label',
+  },
+  {
+    file: 'src/stable/agent/canvasAgentPanel.tsx',
+    from: `{'AIFISHER AGENT · CANVAS INTELLIGENCE'}`,
+    to: `{'${BRAND_NAME} AGENT · CANVAS INTELLIGENCE'}`,
+    why: 'Agent 空态顶部的英文标语',
+  },
+  {
+    file: 'src/stable/agent/canvasAgentPanel.tsx',
+    from: 'AIFISHER Agent 在画布节点间组织创作素材',
+    to: `${BRAND_NAME} Agent 在画布节点间组织创作素材`,
+    why: 'Agent 空态配图的 alt',
+  },
+  {
+    file: 'src/stable/agent/canvasAgentPanel.tsx',
+    from: `{'AIFISHER Agent'}`,
+    to: `{'${BRAND_NAME} Agent'}`,
+    why: 'Agent 空态配图上的角标',
+  },
+  {
+    file: 'src/stable/agent/canvasAgentPanel.tsx',
+    from: 'AIFISHER Agent 当前只读取图片参考',
+    to: `${BRAND_NAME} Agent 当前只读取图片参考`,
+    why: 'Agent 空态说明正文',
+  },
+  {
+    file: 'src/stable/agent/canvasAgentPanel.tsx',
+    from: '发送给 AIFISHER Agent',
+    to: `发送给 ${BRAND_NAME} Agent`,
+    why: '发送按钮的 aria-label',
+  },
+  {
+    file: 'src/stable/agent/AgentModelMenu.tsx',
+    from: '安装或更新后重启 AIFISHER',
+    to: '安装或更新后重启画布',
+    why: '模型菜单里的重启提示',
+  },
+  {
+    file: 'src/stable/skills/skillCommunity.ts',
+    from: 'AIFISHER Agent 中使用',
+    to: `${BRAND_NAME} Agent 中使用`,
+    why: '技能卡片的说明文字',
+  },
+  // ---- 设置页（React 版与 DOM 版各一处，两套都要改）
+  {
+    file: 'src/stable/settings/canvasSettings.tsx',
+    from: `'关于 AIFISHER 画布'`,
+    to: `'关于 ${BRAND_NAME} 画布'`,
+    why: '设置页左侧「诊断」分类名',
+  },
+  {
+    file: 'src/stable/settings/canvasSettings.tsx',
+    from: '"AIFISHER 画布设置"',
+    to: `"${BRAND_NAME} 画布设置"`,
+    why: '设置弹窗的 aria-label',
+  },
+  {
+    file: 'src/stable/settings/canvasSettings.tsx',
+    from: 'AIFISHER 画布 · {build}',
+    to: `${BRAND_NAME} 画布 · {build}`,
+    why: '设置页左下角的版本行',
+  },
+  {
+    file: 'src/stable/design/designSystem.ts',
+    from: `'AIFISHER 画布设置'`,
+    to: `'${BRAND_NAME} 画布设置'`,
+    why: 'DOM 版设置弹窗的 aria-label',
+  },
+  {
+    file: 'src/stable/design/designSystem.ts',
+    from: `'关于 AIFISHER 画布'`,
+    to: `'关于 ${BRAND_NAME} 画布'`,
+    why: 'DOM 版设置页的分类名映射',
+  },
+  {
+    file: 'src/stable/design/designSystem.ts',
+    from: 'AIFISHER 画布 · ',
+    to: `${BRAND_NAME} 画布 · `,
+    why: 'DOM 版设置页左下角的版本行',
+  },
+  {
+    file: 'src/stable/design/designSystem.ts',
+    from: `'AIFISHER 项目'`,
+    to: `'${BRAND_NAME} 项目'`,
+    why: '项目看板主区的 aria-label',
+  },
+  // ---- 本机 ComfyUI / 下载占位 / 更新提示
+  {
+    file: 'src/stable/local/comfyLogPanel.ts',
+    from: 'AIFISHER 不会停止它',
+    to: '渡雨鸣泽不会停止它',
+    why: 'ComfyUI 状态胶囊里「不接管进程」的说明',
+  },
+  {
+    file: 'src/stable/local/localRuntimeSettings.ts',
+    from: '由 AIFISHER 画布启动',
+    to: '由渡雨鸣泽画布启动',
+    why: 'ComfyUI 运行状态：我们自己拉起的实例',
+  },
+  {
+    file: 'src/stable/local/localRuntimeSettings.ts',
+    from: '非 AIFISHER 启动',
+    to: '非渡雨鸣泽启动',
+    why: 'ComfyUI 运行状态：外部实例',
+  },
+  {
+    file: 'src/stable/local/localRuntimeSettings.ts',
+    from: 'AIFISHER 内置模型',
+    to: '渡雨鸣泽内置模型',
+    why: 'ComfyUI 内置模型分组标题',
+  },
+  {
+    file: 'src/stable/local/localRuntimeSettings.ts',
+    from: 'AIFISHER 不会自动中断队列',
+    to: '渡雨鸣泽不会自动中断队列',
+    why: 'ComfyUI 安装完成提示',
+  },
+  {
+    file: 'src/stable/local/workflowManager.ts',
+    from: 'AIFISHER 占位图',
+    to: '渡雨鸣泽占位图',
+    why: '工作流卡片没有封面时的占位图说明（两处）',
+    hits: 2,
+  },
+  {
+    file: 'src/stable/update/desktopUpdate.ts',
+    from: 'AIFISHER 安全更新',
+    to: '渡雨鸣泽安全更新',
+    why: '桌面版更新提示的标题（两处）',
+    hits: 2,
+  },
+  // ---- 本机服务（即梦 CLI）
+  {
+    file: 'src/stable/generation/sourceSettings.ts',
+    from: 'AIFISHER 会从即梦官方源安装',
+    to: '画布会从即梦官方源安装',
+    why: '即梦 CLI 安装说明的主语',
+  },
+  {
+    file: 'src/stable/generation/sourceSettings.ts',
+    from: '授权完成后 AIFISHER 会自动确认',
+    to: '授权完成后画布会自动确认',
+    why: '即梦 CLI 授权说明的主语',
+  },
+  {
+    file: 'src/stable/generation/sourceSettings.ts',
+    from: '登录后即可在 AIFISHER 中使用',
+    to: '登录后即可在画布中使用',
+    why: '即梦 CLI 登录完成提示',
+  },
+  // ---- Codex 外部连接引导（文案里提到画布自己；`aifisher` 这个 MCP 名不动）
+  {
+    file: 'src/stable/agent/AgentExternalConnection.tsx',
+    from: '请将当前 AIFISHER 画布接入',
+    to: '请将当前渡雨鸣泽画布接入',
+    why: 'Codex 配对指令的开头',
+  },
+  {
+    file: 'src/stable/agent/AgentExternalConnection.tsx',
+    from: '读取当前 AIFISHER 画布',
+    to: '读取当前渡雨鸣泽画布',
+    why: 'Codex 外部连接的验证提示（两处）',
+    hits: 2,
+  },
+];
+
+{
+  const problems = [];
+  for (const patch of BRANDING_PATCHES) {
+    const target = path.join(VENDOR, patch.file);
+    if (!fs.existsSync(target)) {
+      problems.push(`${patch.file}（文件不存在）`);
+      continue;
+    }
+    const original = fs.readFileSync(target, 'utf8');
+    const hits = original.split(patch.from).length - 1;
+    const expected = patch.hits ?? 1;
+    if (hits !== expected) {
+      problems.push(
+        `${patch.file}: ${patch.why} —— 锚点命中 ${hits} 次（预期 ${expected} 次）`,
+      );
+      continue;
+    }
+    fs.writeFileSync(target, original.split(patch.from).join(patch.to));
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `[vendor] 品牌文案补丁没对齐（上游可能改了文案，请核对）：\n  - ${problems.join('\n  - ')}`,
+    );
+  }
+  console.log(`[vendor] 品牌文案（${BRAND_NAME}）：${BRANDING_PATCHES.length} 处`);
+}
+
 // ---------------------------------------------------------------- 3.9) 整文件覆盖（scripts/patches/aifisher/**）
 
 /**
@@ -3317,6 +3916,29 @@ export const AIFISHER_CSS = ${JSON.stringify(parts.join('\n\n'))};
 
 fs.writeFileSync(path.join(VENDOR, 'styles.generated.ts'), stylesModule);
 
+// ---------------------------------------------------------------- 3.10) 版本号对齐
+
+/**
+ * 上游 `app/canvasComponents.ts` 写的是 `import { version } from '../../../package.json'`
+ * —— 从 vendor 里的相对路径解析出来是 **vendor/aifisher/package.json**，也就是上游自己的
+ * 版本（2.0.7）。画布看板左上角那个「v2.0.7」、以及任何读 `versionInfo.version` 的地方
+ * 都来自它。移植后这里应该显示本插件的版本，否则用户会以为装的是别的东西。
+ *
+ * 做法：每次 vendor 重建后，把 vendor/aifisher/package.json 的 version 写成本仓库
+ * package.json 的 version。上游源码一个字不用改，也不影响依赖解析（vendor 下没有
+ * node_modules，依赖全部走本仓库）。
+ */
+const OWN_PKG = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8'));
+const VENDOR_PKG_PATH = path.join(VENDOR, 'package.json');
+const vendorPkg = JSON.parse(fs.readFileSync(VENDOR_PKG_PATH, 'utf8'));
+const versionAligned = vendorPkg.version !== OWN_PKG.version;
+if (versionAligned) {
+  vendorPkg.version = OWN_PKG.version;
+  fs.writeFileSync(VENDOR_PKG_PATH, `${JSON.stringify(vendorPkg, null, 2)}\n`);
+}
+
+// ---------------------------------------------------------------- 4) 收尾
+
 console.log(
   [
     `[vendor] 源：${SRC_ROOT}`,
@@ -3328,5 +3950,6 @@ console.log(
     `[vendor] 摘掉 Tailwind 构建期指令：${strippedDirectives} 条`,
     `[vendor] /api/ 命名空间改写：${apiRewrites} 处（${apiFiles} 个文件）`,
     `[vendor] 整文件覆盖（scripts/patches/aifisher）：${overridden} 个`,
+    `[vendor] 版本号：vendor/package.json = ${OWN_PKG.version}（看板左上角显示的就是它${versionAligned ? '' : '，原本就对'}）`,
   ].join('\n'),
 );

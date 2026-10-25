@@ -509,7 +509,7 @@ export function CanvasAgentPanel(
       <div
         role="separator"
         tabIndex={0}
-        aria-label="调整 AIFISHER Agent 面板宽度"
+        aria-label="调整 渡雨鸣泽 Agent 面板宽度"
         aria-orientation="vertical"
         aria-valuemin={agentPanelWidthLimits(viewportWidth).min}
         aria-valuemax={agentPanelWidthLimits(viewportWidth).max}
@@ -531,7 +531,7 @@ export function CanvasAgentPanel(
             : displayedWidth + (event.key === 'ArrowLeft' ? 40 : -40);
           onResizeWidth?.(clampAgentPanelWidth(next, viewportWidth));
         }}
-        title={'拖拽调整 AIFISHER Agent 面板宽度'}
+        title={'拖拽调整 渡雨鸣泽 Agent 面板宽度'}
       />
       {dropHighlight && (
         <div
@@ -652,7 +652,7 @@ export function CanvasAgentPanel(
           />
           <div className={'min-w-0'}>
             <span className={'block font-semibold text-sm truncate max-w-[180px] text-[var(--af-text)]'}>
-              {topic || (hasMessages ? '新对话' : 'AIFISHER Agent')}
+              {topic || (hasMessages ? '新对话' : '渡雨鸣泽 Agent')}
             </span>
             {!topic && !hasMessages && (
               <span
@@ -709,7 +709,7 @@ export function CanvasAgentPanel(
           }
           <button
             type="button"
-            aria-label={'关闭 AIFISHER Agent'}
+            aria-label={'关闭 渡雨鸣泽 Agent'}
             onClick={onClose}
             className={
               'p-1.5 rounded-lg transition-colors hover:bg-[var(--af-surface)] text-[var(--af-text-secondary)] hover:text-[var(--af-text)]'
@@ -768,7 +768,7 @@ export function CanvasAgentPanel(
                 className={'text-[10px] font-semibold uppercase text-[var(--af-text-muted)] mb-3'}
                 style={{ letterSpacing: '.22em' }}
               >
-                {'AIFISHER AGENT · CANVAS INTELLIGENCE'}
+                {'渡雨鸣泽 AGENT · CANVAS INTELLIGENCE'}
               </div>
               <p className={'text-[var(--af-text-secondary)] text-sm mb-2 break-words'}>{userName.trim() ? `你好，${userName.trim()}` : '你好'}</p>
               <h1 className={'text-2xl font-bold mb-2 text-[var(--af-text)]'}>{'今天一起创作点什么？'}</h1>
@@ -783,7 +783,7 @@ export function CanvasAgentPanel(
                 >
                   <img
                     src={'/community-placeholder.svg'}
-                    alt={'AIFISHER Agent 在画布节点间组织创作素材'}
+                    alt={'渡雨鸣泽 Agent 在画布节点间组织创作素材'}
                     className={'w-full h-auto object-cover'}
                   />
                   <div
@@ -804,14 +804,14 @@ export function CanvasAgentPanel(
                       className={'text-[10px] font-semibold text-[var(--af-text)]'}
                       style={{ letterSpacing: '.14em' }}
                     >
-                      {'AIFISHER Agent'}
+                      {'渡雨鸣泽 Agent'}
                     </span>
                   </div>
                 </div>
                 <p className={'text-sm leading-relaxed mb-3 text-[var(--af-text-secondary)]'}>
                   {isCodex
                     ? '选中的节点会加入提示词参考。可以讨论创作思路，也可以检查并应用修改建议。当前 Codex 连接只读取节点文字。'
-                    : '依次点击画布图片即可累加参考，也可从本机上传图片。AIFISHER Agent 当前只读取图片参考与完成本次请求所需的画布信息。'}
+                    : '依次点击画布图片即可累加参考，也可从本机上传图片。渡雨鸣泽 Agent 当前只读取图片参考与完成本次请求所需的画布信息。'}
                 </p>
                 <div className={'flex justify-end'}>
                   <button
@@ -1191,7 +1191,7 @@ export function CanvasAgentPanel(
               ) : (
                 <button
                   type="button"
-                  aria-label={'发送给 AIFISHER Agent'}
+                  aria-label={'发送给 渡雨鸣泽 Agent'}
                   onClick={submit}
                   disabled={
                     isLoading ||
