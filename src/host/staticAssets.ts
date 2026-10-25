@@ -83,8 +83,13 @@ export function attachStaticAssets(webServer: WebServerLike): void {
   }
 
   // 画布应用（自己构建出来的浏览器 ESM，含按相对路径引用的 chunk）：
-  // 整目录挂在 /api/aifisher/canvas-app 下，靠 no-store 保证每次重新构建后
-  // 页面拿到的是新代码（开发期反复 pnpm build + 刷新）。
+  // 整目录挂在 /api/aifisher/canvas-app 下。
+  //
+  // 缓存策略（v1.70）：
+  //   - 带内容哈希的 chunk（`mjStyleCatalog-DzJCaPGy.js` 这种）→ immutable 长缓存，
+  //     重建后文件名会变，不存在拿旧代码的问题；
+  //   - 入口 `canvas-app.js` 文件名固定 → no-cache + ETag，每次打开只做一次 304 校验，
+  //     既不让浏览器吃旧代码（开发期 pnpm build + 刷新仍然立刻生效），也不再每次重下 2.8MB。
   const canvasAppDir = resolve(pkgRoot, 'lib', 'canvas');
   webServer.register({
     kind: 'prefix',
@@ -99,7 +104,16 @@ export function attachStaticAssets(webServer: WebServerLike): void {
         );
         return;
       }
-      serveStaticFile(canvasAppDir, rest, req, res, { 'cache-control': 'no-store' });
+      const hashedChunk = /-[A-Za-z0-9_-]{8}\.(?:js|css)$/.test(rest);
+      serveStaticFile(
+        canvasAppDir,
+        rest,
+        req,
+        res,
+        hashedChunk
+          ? { 'cache-control': 'public, max-age=31536000, immutable' }
+          : { 'cache-control': 'no-cache' },
+      );
     },
   });
 }

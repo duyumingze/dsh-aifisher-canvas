@@ -75,7 +75,9 @@ export default defineConfig([
     dts: true,
     // 清理由 scripts/clean.mjs 统一做：三入口并行构建时 clean 会互相删文件
     clean: false,
+    // 压缩（v1.70）：host 半在 DSH 启动时进程内加载，1.2MB 的解析成本是实打实的。
     sourcemap: false,
+    minify: true,
   },
   {
     // client 半：CJS + ModuleLoader 工厂包裹（react 走 DSH 模块表）
@@ -87,6 +89,8 @@ export default defineConfig([
     dts: false,
     clean: false,
     sourcemap: false,
+    // 压缩（v1.70）：这个产物以 `immediately: true` 加载，每个 DSH 页面都要解析它。
+    minify: true,
     external: ['react', 'react/jsx-runtime'],
     // tsdown 会把 tsconfig 的 jsxImportSource 透传给 rolldown，但 runtime 又留在 classic，
     // 于是 rolldown 直接报 "importSource cannot be set when runtime is classic"。

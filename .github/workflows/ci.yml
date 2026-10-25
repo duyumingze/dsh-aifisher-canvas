@@ -1,0 +1,50 @@
+name: ci
+
+# 公开 CI 只跑「不需要上游 AIFISHER 源码树」的那部分：
+#   - 类型门禁、契约三处对账、离线构建（用仓库里已提交的 vendor/）、产物契约、核心回归。
+#   - 完整回归（55 套 / 2600+ 项）与真机浏览器校验仍在本机跑：它们依赖上游源码、ffmpeg
+#     与真实 DSH 页面，不适合放进公开 runner。见 CONTRIBUTING.md「测试」一节。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4   # 版本取自 package.json 的 packageManager
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 类型门禁
+        run: node scripts/typecheck.mjs
+
+      - name: 契约三处对账（enum / 文档 / 逃生舱白名单 / 描述预算）
+        run: node scripts/check-contract-sync.mjs
+
+      - name: 离线构建（vendor/ 已提交，不需要上游源码树）
+        run: pnpm build:offline
+
+      - name: 产物契约（client 半能被 ModuleLoader 加载、面板出口还在）
+        run: node scripts/smoke-contract.mjs
+
+      - name: 核心回归（画布工具 / 记忆 / 摘要 / 引用）
+        run: |
+          node scripts/test-canvas-agent-tools.mjs
+          node scripts/test-canvas-memory.mjs
+          node scripts/test-canvas-digest.mjs
+          node scripts/test-canvas-references.mjs

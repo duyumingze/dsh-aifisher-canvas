@@ -187,8 +187,30 @@ export function serveStaticFile(
     return;
   }
   const type = MIME[filePath.slice(filePath.lastIndexOf('.'))] ?? 'application/octet-stream';
-  // 素材库图片/视频不做 no-store，允许浏览器缓存
-  res.writeHead(200, { 'content-type': type, ...extraHeaders });
+  // 素材库图片/视频不做 no-store，允许浏览器缓存。
+  // ETag（v1.70）：画布应用那几个大文件靠 304 省掉重复传输；内容变了（重建）etag 就变。
+  let etag = '';
+  try {
+    const fileStat = statSync(filePath);
+    etag = `W/"${fileStat.size.toString(16)}-${Math.round(fileStat.mtimeMs).toString(16)}"`;
+  } catch {
+    /* 拿不到 stat 就不带 etag，按普通 200 返回 */
+  }
+  const cacheable: Record<string, string> = etag ? { etag } : {};
+  for (const name of ['cache-control', 'content-type']) {
+    if (extraHeaders[name]) cacheable[name] = extraHeaders[name];
+  }
+  const ifNoneMatch = req.headers['if-none-match'];
+  if (
+    etag &&
+    typeof ifNoneMatch === 'string' &&
+    ifNoneMatch.split(',').some((value) => value.trim() === etag)
+  ) {
+    res.writeHead(304, cacheable);
+    res.end();
+    return;
+  }
+  res.writeHead(200, { 'content-type': type, ...cacheable, ...extraHeaders });
   if (req.method === 'HEAD') {
     res.end();
     return;

@@ -31,14 +31,14 @@ function check(name, condition, extra = '') {
 
 // ---------------------------------------------------------------- 假 req / res
 
-function makeReq(method, url, body) {
+function makeReq(method, url, body, headers = {}) {
   const stream = Readable.from(
     body === undefined ? [] : [Buffer.from(JSON.stringify(body), 'utf8')],
   );
   stream.method = method;
   stream.url = url;
   // 真实 IncomingMessage 一定有 headers；这里给空对象，保证同源围栏读到的是 undefined 而不是抛错
-  stream.headers = {};
+  stream.headers = { ...headers };
   return stream;
 }
 
@@ -581,13 +581,30 @@ async function comfyApi(method, path, body) {
   await appRoute.handler(makeReq('GET', '/api/aifisher/canvas-app/canvas-app.js'), res);
   await waitForFinish(res);
   check('画布应用 JS 可取到', res.statusCode === 200 && res.text().length > 1_000_000, `${res.statusCode} ${res.text().length}`);
-  check('画布应用 JS 带 no-store', res.headers['cache-control'] === 'no-store', String(res.headers['cache-control']));
+  // v1.70：入口文件改成 no-cache + ETag（命中就 304），不再每次重下 2.8MB
+  check('画布应用 JS 带 no-cache（可校验缓存）', res.headers['cache-control'] === 'no-cache', String(res.headers['cache-control']));
+  check('画布应用 JS 带 ETag', Boolean(res.headers.etag), String(res.headers.etag));
   check('画布应用 JS 的 MIME 是 javascript', String(res.headers['content-type']).includes('javascript'), String(res.headers['content-type']));
+
+  const revalidated = new FakeResponse();
+  await appRoute.handler(
+    makeReq('GET', '/api/aifisher/canvas-app/canvas-app.js', undefined, {
+      'if-none-match': String(res.headers.etag),
+    }),
+    revalidated,
+  );
+  await waitForFinish(revalidated);
+  check('带 If-None-Match 再取 → 304 且不带正文', revalidated.statusCode === 304 && revalidated.chunks.length === 0, `${revalidated.statusCode} ${revalidated.text().length}`);
 
   const chunk = new FakeResponse();
   await appRoute.handler(makeReq('GET', '/api/aifisher/canvas-app/mjStyleCatalog-DzJCaPGy.js'), chunk);
   await waitForFinish(chunk);
   check('画布应用的 chunk 也能取到', chunk.statusCode === 200 && chunk.text().length > 100_000, `${chunk.statusCode} ${chunk.text().length}`);
+  check(
+    '带内容哈希的 chunk → immutable 长缓存',
+    String(chunk.headers['cache-control']).includes('immutable'),
+    String(chunk.headers['cache-control']),
+  );
 
   const missing = new FakeResponse();
   await appRoute.handler(makeReq('GET', '/api/aifisher/canvas-app/not-exist.js'), missing);
