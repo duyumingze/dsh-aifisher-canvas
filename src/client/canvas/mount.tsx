@@ -14,8 +14,6 @@
 import * as React from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
-import { version as PLUGIN_VERSION } from '../../../package.json';
-
 import { setCanvasPortalTarget } from '../../canvas-ui/lib/portal';
 import { useCanvasReact } from '../../canvas-ui/lib/react';
 import { canvasNodeSearchReport } from '../../canvas-ui/canvas/CanvasNodeSearchStore';
@@ -161,6 +159,68 @@ export type { StoryboardShot } from '../../canvas-ui/canvas/CanvasStoryboard';
 export { canvasGridReport } from './canvasGrid';
 
 /**
+ * v1.70：调色节点合成器的纯逻辑（回归直接验，不必真开 WebGL / 真挂画布）。
+ * 图结构、求值顺序、输入口规则都在这一层，编辑器与 WebGL 引擎只消费它。
+ */
+export {
+  canInsertIntoEdge,
+  chooseApplyTargets,
+  connect,
+  createDefaultGraph,
+  disconnectEdge,
+  evaluationOrder,
+  insertNodeIntoEdge,
+  normalizeGraph,
+  outputPortCount,
+  paramsOf,
+  removeNode,
+  targetIsRawInput,
+} from './compositor/graph';
+export { buildCurveLut, curveValue, normalizeCurvePoints } from './compositor/curves';
+export {
+  SCOPE_MAX,
+  SKIN_TONE_ANGLE,
+  histogramOf,
+  paradeOf,
+  scopeSampleReport,
+  vectorscopeOf,
+  vectorscopeTargets,
+  waveformOf,
+} from './compositor/scopes';
+export { formatParam, toDisplay, toRaw } from './compositor/params';
+/**
+ * v1.75：四轮调色（暗部/中灰/亮部/偏移）的纯数学与显示口径。
+ * 色轮圆点 ↔ 三通道的换算在 jsdom 里直接验，不必真开 WebGL。
+ */
+export {
+  WHEEL_CHROMA,
+  WHEEL_RANGES,
+  wheelChannels,
+  wheelDotFromRgb,
+  wheelLevel,
+  wheelLevelFraction,
+  wheelRgbFromDot,
+} from './compositor/wheels';
+export { WHEEL_NODE_WIDTH, wheelNeutralLabels, wheelUiMetrics } from './compositor/wheels-ui';
+export {
+  compositorReport,
+  compositorTitlebarInset,
+  compositorTopbarInset,
+  isCompositorOpen,
+  openCompositorEditor,
+} from './compositor/editor';
+export type { OpenCompositorOptions, WindowControlsOverlayLike } from './compositor/editor';
+export {
+  INPUT_PORT_LABELS,
+  NODE_LAYOUT_GAP,
+  inputPortLabel,
+  resolveNodeOverlaps,
+} from './compositor/graph';
+export type { NodeLayoutSize } from './compositor/graph';
+export { creatableNodeCount, fuzzyScore, nodeMatchScore, searchNodeKinds } from './compositor/nodeSearch';
+export { openCompositorForNode, uploadCompositorDataUrl } from './compositor/bridge';
+
+/**
  * 排查用 / 回归用：叠图切换的纯逻辑（v1.37）。
  * 转出来是为了让 jsdom 回归能在**构建产物**上直接验算法（环形、壳字段不动、不丢图），
  * 不必先摆一屏幕节点再点 —— 真点击那条路由 test-canvas-stack 的另一半守着。
@@ -233,6 +293,9 @@ export type {
  */
 export {
   collectKnifeEdges,
+  canvasWorldPoint,
+  JUNCTION_HEIGHT,
+  JUNCTION_WIDTH,
   KNIFE_CURVE_STEPS,
   KNIFE_HIT_TOLERANCE,
   KNIFE_MIN_STROKE,
@@ -245,6 +308,7 @@ export {
   knifeStrokeHitsEdge,
   knifeViewportTransform,
   parseKnifePath,
+  rerouteGroupsFromHits,
 } from './knife';
 export type {
   KnifeEdgeIdentity,
@@ -447,25 +511,10 @@ function installDropOverlayHealer(): () => void {
 }
 
 /**
- * 画布 UI 上显示的版本号来自 `html[data-fisherai-build]`：
- * 看板左上角「vX.Y.Z」（`versionInfo.version`，读的是 vendor/package.json，
- * 由 scripts/vendor-aifisher.mjs 对齐成插件版本）和设置页左下角版本行
- * （`designSystem` 读这个 dataset 属性）都靠它。
- *
- * 上游在自己 `main.ts` 里写这个属性，我们不走它的入口，所以在这里补一次。
- * 格式必须是 `vX.Y.Z` —— designSystem 用 /^v\d+\.\d+\.\d+/ 校验后才写版本行。
- */
-function stampCanvasBuild(): void {
-  if (typeof document === 'undefined') return;
-  document.documentElement.dataset.fisheraiBuild = `v${PLUGIN_VERSION}`;
-}
-
-/**
  * 在 container 里挂载 AIFISHER 画布。
  * 返回的 handle 必须在组件卸载时 dispose，否则会留下全局定时器/监听器。
  */
 export function mountCanvas(container: HTMLElement): CanvasHandle {
-  stampCanvasBuild();
   const releaseDiagnostics = installCanvasDiagnostics();
   // 图片加载失败留痕（2026-10-20）：云端结果回落到服务商临时链接后，链接过期就是「节点成功但一块黑」。
   // 见 diagnostics.ts 的 installImageLoadTelemetry。

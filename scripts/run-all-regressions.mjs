@@ -53,6 +53,10 @@ const order = [
   // v1.68：进度条拖拽（整条轨道吃指针 / 1:1 跟手 / 节流 / 定位中）
   'test-canvas-video-seek.mjs',
   'test-canvas-knife.mjs',
+  // v1.70：调色节点（Color Grade）+ 全屏合成器
+  'test-canvas-compositor.mjs',
+  // v1.71：Shift+右键划选合并（同源线收进转接节点）
+  'test-canvas-reroute.mjs',
   'test-canvas-outpaint.mjs',
   'test-canvas-last-model.mjs',
   'test-project-archive.mjs',
@@ -63,8 +67,6 @@ const order = [
   'verify-canvas-ui.mjs',
   'test-canvas-p2.mjs',
   'test-canvas-crew.mjs',
-  // v1.69：摄影参数 / 定向查询 / 创作进度
-  'test-canvas-agent-tools.mjs',
 ];
 
 const present = new Set(readdirSync('scripts'));

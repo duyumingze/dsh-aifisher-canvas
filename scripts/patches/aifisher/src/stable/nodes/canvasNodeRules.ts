@@ -24,6 +24,8 @@ export const nodeTypes = {
   IMAGE_COMPARE: 'Image Compare',
   IMAGE_COMPOSITE: 'Image Composite',
   COMFYUI: 'ComfyUI',
+  COLOR_GRADE: 'Color Grade',
+  JUNCTION: 'Junction',
 };
 export const nodeStatuses = {
   IDLE: 'idle',
@@ -31,6 +33,8 @@ export const nodeStatuses = {
   SUCCESS: 'success',
   ERROR: 'error',
 };
+/** 转接节点（Junction）在画布上的直径：Blender Reroute 那种小圆点。 */
+export const JUNCTION_SIZE = 34;
 export const portHeight = 26,
   portGap = 8,
   legacyWorkflowWidth = 240;
@@ -173,6 +177,9 @@ export function legacyWorkflowHeight(node: CanvasNode) {
   );
 }
 export function nodeWidth(node: CanvasNode, parent?: CanvasNode): number {
+  // v1.71：转接节点是个小圆点（不是卡片），尺寸固定，不读 node.width ——
+  // 老数据里存过 160 的也一律按圆点显示。
+  if (node.type === 'Junction') return JUNCTION_SIZE;
   const media = adaptiveMediaNodeSize(node);
   if (media) return media.width;
   const stored = positive(node.width);
@@ -188,6 +195,7 @@ export function nodeWidth(node: CanvasNode, parent?: CanvasNode): number {
   return 252 * Math.max(1, nodeAspectRatio(node, parent));
 }
 export function nodeHeight(node: CanvasNode, parent?: CanvasNode): number {
+  if (node.type === 'Junction') return JUNCTION_SIZE;
   // Dynamic workflow measurement must supersede a height saved before its parameters changed.
   if (node.type === 'ComfyUI' && node.kind === 'workflow')
     return (
@@ -240,7 +248,18 @@ export function nodeMediaKind(value: CanvasNode | string): MediaKind {
     );
   const type = typeof value === 'string' ? value : value.type;
   if (type === 'Text') return 'text';
-  if (['Image', 'Upload Image', 'Image Compare', 'Image Composite', 'ComfyUI'].includes(type))
+  // v1.71：转接节点对下游就是个图像来源（自己不出图，取图时解析到上游，见 canvasSceneData 补丁）
+  if (
+    [
+      'Image',
+      'Upload Image',
+      'Image Compare',
+      'Image Composite',
+      'Color Grade',
+      'Junction',
+      'ComfyUI',
+    ].includes(type)
+  )
     return 'image';
   if (['Video', 'Upload Video'].includes(type)) return 'video';
   if (['Audio', 'Upload Audio'].includes(type)) return 'audio';
@@ -313,7 +332,7 @@ export function validateConnection(
     return false;
   const kind = nodeMediaKind(source);
   const parents = (target.parentIds || []).filter((id) => id !== source.id);
-  if (['Image Compare', 'Image Composite'].includes(target.type))
+  if (['Image Compare', 'Image Composite', 'Color Grade'].includes(target.type))
     return (
       kind === 'image' &&
       parents.filter(Boolean).length < (target.type === 'Image Compare' ? 2 : 10)

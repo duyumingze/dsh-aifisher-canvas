@@ -165,6 +165,8 @@ export const Node = React.memo(
       Audio: AudioNode,
       'Image Compare': CompareNode,
       'Image Composite': CompositeNode,
+  'Color Grade': ColorGradeNode,
+  'Junction': JunctionNode,
       Workflow: WorkflowGenerator,
       MiniMax: MiniMaxNode,
       LegacyWorkflow: LegacyWorkflowNode,
@@ -319,6 +321,12 @@ export const CompareNode = bind(Dialogs.CanvasCompareNode)(() => [
   { Frame: NodeFrame, Header: NodeHeader, Empty: Icons.Columns2 },
 ]);
 export const CompositeNode = bind(Dialogs.CanvasCompositeNode)(() => [
+  { Frame: NodeFrame, Header: NodeHeader, Empty: Icons.Layers },
+]);
+export const ColorGradeNode = bind(Dialogs.CanvasColorGradeNode)(() => [
+  { Frame: NodeFrame, Header: NodeHeader, Empty: Icons.Layers },
+]);
+export const JunctionNode = bind(Dialogs.CanvasJunctionNode)(() => [
   { Frame: NodeFrame, Header: NodeHeader, Empty: Icons.Layers },
 ]);
 export const WorkflowGenerator = bind(Workflow.CanvasWorkflowGenerator)(() => [NodeFrame]);

@@ -3807,7 +3807,7 @@ const BRANDING_PATCHES = [
   console.log(`[vendor] 品牌文案（${BRAND_NAME}）：${BRANDING_PATCHES.length} 处`);
 }
 
-// ---------------------------------------------------------------- 3.9) 整文件覆盖（scripts/patches/aifisher/**）
+// ---------------------------------------------------------------- // ---------------------------------------------------------------- 3.9) 整文件覆盖（scripts/patches/aifisher/**）
 
 /**
  * 正则改写只适合「一句话/一个属性」级别的补丁。当某个上游文件需要**换掉整份实现**
@@ -3847,6 +3847,615 @@ if (fs.existsSync(PATCH_ROOT)) {
       `[vendor] scripts/patches/aifisher 里的覆盖文件对不上 vendor（请核对路径）：\n  - ${problems.join('\n  - ')}`,
     );
   }
+}
+
+// ---------------------------------------------------------------- 3.10) 调色节点（Color Grade，v1.70）
+
+/**
+ * 调色节点 = 一个独立节点类型 + 节点卡上的「合成器」按钮。
+ *
+ * 为什么用锚点补丁 + 末尾追加，而不是整文件覆盖：
+ *   改动全是「在一个列表里加一项」，覆盖会把这 10 个不相关文件都变成我们维护的副本，
+ *   上游一升级就全脏。组件本体追加到 canvasImageNodes.tsx 末尾，
+ *   用到的 Props / imagesOf / frameProps / headerProps 都是同文件已有的。
+ *
+ * 运行期分工：按钮只调 `window.__FISHERAI_COMPOSITOR__.open(...)`（src/client 的桥），
+ * 应用结果由节点自己的 `onUpdate` 写回 —— `updateCanvasNode` 是 {...original, ...patch}，
+ * 所以 resultUrl / compositorGraph 不需要新协议。
+ */
+const COMPOSITOR_NODE_COMPONENT = `
+/**
+ * 调色节点（dsh-aifisher-canvas v1.70）——「打开合成器」入口。
+ * 合成器本体在 src/client/canvas/compositor/，这里只递上游图片和写回口。
+ */
+export function CanvasColorGradeNode(
+  React: Runtime,
+  props: Props,
+  { Frame, Header, Empty }: Components,
+) {
+  const images = imagesOf(props.connectedImageNodes, 10);
+  const data = props.data as NodeData & {
+    resultUrl?: string;
+    projectId?: string;
+    compositorGraph?: Record<string, unknown>;
+  };
+  const resultUrl = typeof data.resultUrl === 'string' ? data.resultUrl : '';
+  const open = (event: { stopPropagation(): void }) => {
+    event.stopPropagation();
+    const bridge = (window as unknown as {
+      __FISHERAI_COMPOSITOR__?: { open?: (options: Record<string, unknown>) => void };
+    }).__FISHERAI_COMPOSITOR__;
+    if (!bridge?.open) return;
+    bridge.open({
+      nodeId: data.id,
+      projectId: data.projectId,
+      title: data.title,
+      images: images.map((node) => ({ nodeId: node.id, url: node.url, title: node.title })),
+      graph: data.compositorGraph,
+      onSave: ({ resultUrl: nextUrl, graph }: { resultUrl: string; graph: unknown }) => {
+        // dsh-aifisher-canvas v1.73：用户「退出调色节点时应该会在调色节点后添加调整好的图像」。
+        // 优先走主画布的 __FISHERAI_CANVAS_GRADE_RESULT__.place：一次 setNodes 里回写调色节点、
+        // 在它右边新建一张 Upload Image 并连起来；桥不在（旧页面）才退回 v1.70 的只写回。
+        const grade = (window as unknown as {
+          __FISHERAI_CANVAS_GRADE_RESULT__?: {
+            place(input: Record<string, unknown>): { ok: boolean; error?: string };
+          };
+        }).__FISHERAI_CANVAS_GRADE_RESULT__;
+        const placed = grade?.place?.({
+          sourceId: data.id,
+          url: nextUrl,
+          graph,
+          title: '调色结果',
+        });
+        if (!placed?.ok) {
+          const update = props.onUpdate as
+            | ((id: string, patch: Record<string, unknown>) => void)
+            | undefined;
+          update?.(data.id, { resultUrl: nextUrl, compositorGraph: graph, status: 'success' });
+        }
+      },
+    });
+  };
+  return React.createElement(
+    Frame,
+    frameProps(props),
+    React.createElement(Header, headerProps(props)),
+    React.createElement(
+      'div',
+      {
+        className:
+          'relative w-full h-full rounded-lg overflow-hidden bg-[var(--af-surface)] ' +
+          (images.length ? 'cursor-pointer' : 'cursor-default'),
+        onDoubleClick: open,
+      },
+      resultUrl
+        ? React.createElement(
+            'div',
+            {
+              'data-af-media-chrome': 'true',
+              className:
+                'absolute inset-0 rounded-lg overflow-hidden bg-[var(--af-media-bg)] shadow-xl',
+            },
+            React.createElement('img', {
+              src: resultUrl,
+              alt: '调色结果',
+              className: 'w-full h-full object-cover pointer-events-none',
+              draggable: false,
+            }),
+          )
+        : React.createElement(
+            'div',
+            { className: 'w-full h-full bg-[var(--af-surface)] flex flex-col items-center justify-center gap-2' },
+            React.createElement(
+              'div',
+              { className: 'text-[var(--af-text-muted)]' },
+              React.createElement(Empty, { size: 40 }),
+            ),
+            React.createElement(
+              'div',
+              { className: 'text-[10px] text-[var(--af-text-muted)]' },
+              images.length ? '双击打开合成器' : '把图像连进来',
+            ),
+          ),
+      React.createElement(
+        'button',
+        {
+          type: 'button',
+          'data-fisherai-open-compositor': 'true',
+          className:
+            'absolute right-2 top-2 z-10 h-7 px-2 rounded-md text-[10px] font-bold bg-black/55 text-white hover:bg-black/75 backdrop-blur-sm',
+          onPointerDown: (event: { stopPropagation(): void }) => event.stopPropagation(),
+          onClick: open,
+        },
+        '合成器',
+      ),
+    ),
+  );
+}
+`;
+
+const COMPOSITOR_PATCHES = [
+  {
+    file: 'src/stable/dialogs/canvasDialogs.ts',
+    from: "export { CanvasCompareNode, CanvasCompositeNode } from '../nodes/canvasImageNodes';",
+    to: "export { CanvasCompareNode, CanvasCompositeNode, CanvasColorGradeNode } from '../nodes/canvasImageNodes';",
+    why: '对话框导出新节点组件',
+  },
+  {
+    file: 'src/stable/app/canvasComponents.ts',
+    from: 'export const CompositeNode = bind(Dialogs.CanvasCompositeNode)(() => [\n  { Frame: NodeFrame, Header: NodeHeader, Empty: Icons.Layers },\n]);',
+    to: 'export const CompositeNode = bind(Dialogs.CanvasCompositeNode)(() => [\n  { Frame: NodeFrame, Header: NodeHeader, Empty: Icons.Layers },\n]);\nexport const ColorGradeNode = bind(Dialogs.CanvasColorGradeNode)(() => [\n  { Frame: NodeFrame, Header: NodeHeader, Empty: Icons.Layers },\n]);',
+    why: '绑定新节点组件',
+  },
+  {
+    file: 'src/stable/app/canvasComponents.ts',
+    from: "  'Image Composite': CompositeNode,",
+    to: "  'Image Composite': CompositeNode,\n  'Color Grade': ColorGradeNode,",
+    why: 'type → 组件映射',
+  },
+  {
+    file: 'src/stable/canvas/canvasConnections.ts',
+    from: "  'Image Composite',\n  'ComfyUI',",
+    to: "  'Image Composite',\n  'Color Grade',\n  'ComfyUI',",
+    why: '图像参考白名单（下游能把它当图像来源）',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeFrame.tsx',
+    from: "  'Image Composite': '图片拼合',",
+    to: "  'Image Composite': '图片拼合',\n  'Color Grade': '调色',",
+    why: '节点标题',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeOperations.ts',
+    from: "if (target.type === 'Image Composite' && (target.parentIds?.length ?? 0) >= 10) return nodes;",
+    to: "if ((target.type === 'Image Composite' || target.type === 'Color Grade') && (target.parentIds?.length ?? 0) >= 10) return nodes;",
+    why: '输入上限 10 张',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeOperations.ts',
+    from: '          created.type === \'Image Composite\' &&',
+    to: '          (created.type === \'Image Composite\' || created.type === \'Color Grade\') &&',
+    why: '建节点时继承上游宽高比',
+  },
+  {
+    file: 'src/stable/media/mediaNodeSizing.ts',
+    from: "  'Image Composite',\n]);",
+    to: "  'Image Composite',\n  'Color Grade',\n]);",
+    why: '可缩放节点类型',
+  },
+  {
+    file: 'src/stable/nodes/nodeFramework.ts',
+    from: "  'Image Composite': 'image-composite',",
+    to: "  'Image Composite': 'image-composite',\n  'Color Grade': 'color-grade',",
+    why: '节点框架类型映射',
+  },
+  {
+    file: 'src/stable/canvas/canvasAssetInsertion.ts',
+    from: "  'Image Composite',\n  'ComfyUI',",
+    to: "  'Image Composite',\n  'Color Grade',\n  'ComfyUI',",
+    why: '拖素材可建节点',
+  },
+  {
+    file: 'src/stable/dialogs/canvasContextMenu.tsx',
+    from:
+      "            {item(\n              {\n                label: '图片拼合',\n                icon: 'composite',\n                action: () => props.onSelectType('Image Composite'),\n              },\n              true,\n            )}",
+    to:
+      "            {item(\n              {\n                label: '图片拼合',\n                icon: 'composite',\n                action: () => props.onSelectType('Image Composite'),\n              },\n              true,\n            )}\n            {item(\n              {\n                label: '调色',\n                icon: 'composite',\n                action: () => props.onSelectType('Color Grade'),\n              },\n              true,\n            )}",
+    why: '右键菜单「添加节点」',
+  },
+];
+
+{
+  const problems = [];
+  for (const patch of COMPOSITOR_PATCHES) {
+    const target = path.join(VENDOR, patch.file);
+    if (!fs.existsSync(target)) {
+      problems.push(`${patch.file}（文件不存在）`);
+      continue;
+    }
+    const original = fs.readFileSync(target, 'utf8');
+    const hits = original.split(patch.from).length - 1;
+    if (hits !== 1) {
+      problems.push(`${patch.file}: ${patch.why} —— 锚点命中 ${hits} 次（预期 1 次）`);
+      continue;
+    }
+    fs.writeFileSync(target, original.split(patch.from).join(patch.to));
+  }
+  if (problems.length > 0) {
+    throw new Error(`[vendor] 调色节点补丁没对齐（上游可能改了写法，请核对）：\n  - ${problems.join('\n  - ')}`);
+  }
+  const componentTarget = path.join(VENDOR, 'src/stable/nodes/canvasImageNodes.tsx');
+  if (!fs.existsSync(componentTarget)) {
+    throw new Error('[vendor] 调色节点组件没找到落点：src/stable/nodes/canvasImageNodes.tsx');
+  }
+  fs.appendFileSync(componentTarget, COMPOSITOR_NODE_COMPONENT);
+  console.log(
+    `[vendor] 调色节点：${COMPOSITOR_PATCHES.length} 处锚点 + 组件追加（Color Grade）`,
+  );
+}
+
+// ---------------------------------------------------------------- 3.11) 转接节点（Junction，v1.71）
+
+/**
+ * 用户 2026-10-29 原话：
+ *   「加一个shift+鼠标右键划过的线合并并添加转接口的功能」。
+ *
+ * 语义（用户确认过）：**同源才合并** —— 同一个输出口分出去的几条线并成一条主干，
+ * 不同上游各得一个转接点；合线只整理走向，求值结果必须和直连完全一样。
+ *
+ * 为什么必须是真节点（而不是画布上画个折点）：vendor 的连线完全由 child.parentIds
+ * 推导出来，没有「边的对象」可以挂折点；只有「上游 → 转接 → 下游」这种结构才能
+ * 既整理走向、又不动参考图。Junction 自己不出图：canvasSceneData 取 connectedImageNodes
+ * 时把 Junction 父节点解析成它上游那张（见本段 canvasSceneData 补丁）。
+ *
+ * 依赖顺序：本段排在 3.10 之后（锚点用到了调色节点插进去的几行），也排在 3.9 之后 ——
+ * canvasNodeRules 里的 Junction 由 scripts/patches/aifisher 那份覆盖文件自己维护。
+ */
+const JUNCTION_NODE_COMPONENT = `
+/**
+ * 转接节点（dsh-aifisher-canvas v1.71）—— Shift+右键划过的同源连线收进这里。
+ * 形态是一个 34×34 的小圆点（Blender Reroute 那种），圆里直接显示上游缩略图；
+ * 它不生成图：canvasSceneData 会把 Junction 父节点解析成更上游那张图，
+ * 所以下游拿到的参考图与直连完全一致。
+ */
+export function CanvasJunctionNode(
+  React: Runtime,
+  props: Props,
+  { Frame }: Components,
+) {
+  const [upstream] = imagesOf(props.connectedImageNodes, 1);
+  const url = upstream?.url || '';
+  const active = props.selected === true || props.isHoveredForConnection === true;
+  return React.createElement(
+    Frame,
+    { ...frameProps(props), isBareCard: true },
+    React.createElement(
+      'div',
+      {
+        title: '转接点：一路进、多路出，只整理连线走向',
+        'data-fisherai-junction': 'true',
+        style: {
+          position: 'relative',
+          width: '100%',
+          height: '100%',
+          borderRadius: '50%',
+          border: '2px solid ' + (active ? '#60a5fa' : 'var(--af-border-control)'),
+          background: 'var(--af-surface-raised)',
+          boxShadow: active ? '0 0 0 3px rgba(96,165,250,.28)' : '0 2px 8px rgba(0,0,0,.45)',
+          overflow: 'hidden',
+          boxSizing: 'border-box',
+        },
+      },
+      url
+        ? React.createElement('img', {
+            src: url,
+            alt: '转接上游',
+            draggable: false,
+            className: 'w-full h-full object-cover pointer-events-none',
+          })
+        : React.createElement('span', {
+            style: {
+              position: 'absolute',
+              left: '50%',
+              top: '50%',
+              width: '8px',
+              height: '8px',
+              marginLeft: '-4px',
+              marginTop: '-4px',
+              borderRadius: '50%',
+              background: 'var(--af-text-muted)',
+            },
+          }),
+    ),
+  );
+}
+`;
+
+const REROUTE_BRIDGE = `  // ---------------------------------------------------------------- dsh-aifisher-canvas v1.71
+  // 转接（Shift + 右键划选）：把划过的「同源」连线收进一个 Junction 节点。
+  // 手势/命中在 src/client/canvas/knife.ts；这里只做结构改写 —— 只有这一层够得着 nodes。
+  // 同源的几条边先并成「上游 → 转接」一条主干，再从转接点分回原来的每个输入槽，
+  // 槽位 index 原样保留（ComfyUI 的首帧/尾帧槽不会被挪位）。
+  React.useEffect(() => {
+    const holder = window as unknown as {
+      __FISHERAI_CANVAS_REROUTE__?: {
+        merge(groups: ReadonlyArray<any>): number;
+      };
+    };
+    const bridge = {
+      merge(groups: ReadonlyArray<any>): number {
+        if (!Array.isArray(groups) || groups.length === 0) return 0;
+        let next: any[] = getNodes() as any[];
+        const created: string[] = [];
+        for (const group of groups) {
+          if (!group || typeof group.parentId !== 'string') continue;
+          const children: any[] = Array.isArray(group.children) ? group.children : [];
+          if (!children.length) continue;
+          if (!next.some((node) => node.id === group.parentId)) continue;
+          const junction: any = createAgentNode(
+            'Junction',
+            { x: Number(group.x) || 0, y: Number(group.y) || 0 },
+            workflowId,
+          );
+          junction.width = 34;
+          junction.height = 34;
+          const firstSlot = Math.max(0, Math.trunc(Number(children[0] && children[0].portIndex) || 0));
+          const firstChild = next.find((node) => node.id === children[0]?.childId);
+          const sourcePort = Math.max(
+            0,
+            Math.trunc(Number(firstChild?.sourcePortIndices?.[firstSlot]) || 0),
+          );
+          junction.parentIds = [group.parentId];
+          junction.sourcePortIndices = [sourcePort];
+          const junctionId = junction.id;
+          next = next.map((node) => {
+            const targets = children.filter((item) => item && item.childId === node.id);
+            if (!targets.length) return node;
+            const parentIds = [...(node.parentIds || [])];
+            const sourcePortIndices = Array.isArray(node.sourcePortIndices)
+              ? [...node.sourcePortIndices]
+              : undefined;
+            let changed = false;
+            for (const target of targets) {
+              const slot = Math.max(0, Math.trunc(Number(target.portIndex) || 0));
+              if (parentIds[slot] !== group.parentId) continue;
+              parentIds[slot] = junctionId;
+              if (sourcePortIndices && sourcePortIndices.length > slot) sourcePortIndices[slot] = 0;
+              changed = true;
+            }
+            if (!changed) return node;
+            return sourcePortIndices
+              ? { ...node, parentIds, sourcePortIndices }
+              : { ...node, parentIds };
+          });
+          next = [...next, junction];
+          created.push(junctionId);
+        }
+        if (!created.length) return 0;
+        flushSync(() => {
+          setNodes(next);
+          setSelectedNodeIds(created);
+        });
+        return created.length;
+      },
+    };
+    holder.__FISHERAI_CANVAS_REROUTE__ = bridge;
+    return () => {
+      if (holder.__FISHERAI_CANVAS_REROUTE__ === bridge) holder.__FISHERAI_CANVAS_REROUTE__ = undefined;
+    };
+  }, [createAgentNode, getNodes, setNodes, setSelectedNodeIds, workflowId]);
+`;
+
+/**
+ * 调色结果落位桥（v1.73）。
+ *
+ * 用户 2026-10-29：「我退出调色节点时应该会在调色节点后添加调整好的图像」。
+ * 以前「应用」只把 resultUrl 写回调色节点本身（节点卡换成调好的图），下游没有独立的一张；
+ * 现在一次 setNodes 里做三件事：回写调色节点的预览图/图结构 → 在它右边新建一张
+ * Upload Image → 连成「调色 → 结果图」。必须一次写完：分两次 setNodes 时第二次拿到的是
+ * 旧快照，会把第一次的回写覆盖掉。
+ *
+ * 放在 canvasApplication 而不在 src/client：只有这一层够得着 createAgentNode /
+ * configureAgentNode / connectAgentNodes（vendor 与装配层是两份模块实例）。
+ */
+const GRADE_RESULT_BRIDGE = `  // ---------------------------------------------------------------- dsh-aifisher-canvas v1.73
+  // 调色结果落位：应用调色后，在调色节点右边新增一张成品图并连上。
+  React.useEffect(() => {
+    const holder = window as unknown as {
+      __FISHERAI_CANVAS_GRADE_RESULT__?: {
+        place(input: {
+          sourceId: string;
+          url: string;
+          graph?: unknown;
+          title?: string;
+        }): { ok: boolean; id?: string; error?: string };
+      };
+    };
+    const bridge = {
+      place(input: { sourceId: string; url: string; graph?: unknown; title?: string }) {
+        if (!workflowId || view !== 'canvas') return { ok: false, error: '请先打开项目。' };
+        if (!input || typeof input.url !== 'string' || !input.url)
+          return { ok: false, error: '调色结果还没生成。' };
+        const current: any[] = getNodes() as any[];
+        const source = current.find((node) => node.id === input.sourceId);
+        if (!source) return { ok: false, error: '找不到调色节点，请刷新后重试。' };
+        const width = Number(source.width) || 360;
+        const height = Number(source.height) || 360;
+        // 落位：优先用截帧那套「贴右缘 + 避开已有节点」的算法（__FISHERAI_FRAME_LAYOUT__），
+        // 桥不在才退回固定 +80。用户排布过画布，叠上去等于把结果藏了。
+        let point = {
+          x: Number(source.x || 0) + width + 80,
+          y: Number(source.y || 0) + height / 2 - 180,
+        };
+        try {
+          const layout = (
+            window as unknown as {
+              __FISHERAI_FRAME_LAYOUT__?: {
+                place(
+                  source: unknown,
+                  items: ReadonlyArray<{ title?: string }>,
+                  nodes?: ReadonlyArray<unknown>,
+                  options?: { frameWidth?: number; gap?: number },
+                ): Array<{ x: number; y: number }>;
+              };
+            }
+          ).__FISHERAI_FRAME_LAYOUT__;
+          const rects = layout?.place?.(source, [{ title: '调色结果' }], current, {
+            frameWidth: width,
+            gap: 80,
+          });
+          if (rects && rects[0]) point = { x: rects[0].x, y: rects[0].y };
+        } catch {
+          /* 落位算法失败就用固定偏移 */
+        }
+        const created: any = createAgentNode('Upload Image', point, workflowId);
+        let next = configureAgentNode(current, source.id, {
+          resultUrl: input.url,
+          status: 'success',
+          ...(input.graph ? { compositorGraph: input.graph } : {}),
+        } as never);
+        next = configureAgentNode([...next, created], created.id, {
+          resultUrl: input.url,
+          resultUrls: [input.url],
+          title: input.title || '调色结果',
+          status: 'success',
+          aspectRatio: source.aspectRatio || '1:1',
+          resultAspectRatio: source.resultAspectRatio,
+          projectId: workflowId,
+        } as never);
+        next = connectAgentNodes(next, source.id, created.id);
+        if (!next.some((node) => node.id === created.id))
+          return { ok: false, error: '新建调色结果节点失败。' };
+        flushSync(() => {
+          setNodes(next);
+          setSelectedNodeIds([created.id]);
+        });
+        // 结果图多半落在调色节点右侧、可能已经在视口外：把「调色 + 结果」框进画面，
+        // 用户退出合成器就能看见成品（focusNodes 是上游现成的视口聚焦桥）。
+        try {
+          (
+            window as unknown as { __FISHERAI_FOCUS_NODES__?: (ids: readonly string[]) => void }
+          ).__FISHERAI_FOCUS_NODES__?.([source.id, created.id]);
+        } catch {
+          /* 聚焦失败不影响落图 */
+        }
+        return { ok: true, id: created.id };
+      },
+    };
+    holder.__FISHERAI_CANVAS_GRADE_RESULT__ = bridge;
+    return () => {
+      if (holder.__FISHERAI_CANVAS_GRADE_RESULT__ === bridge)
+        holder.__FISHERAI_CANVAS_GRADE_RESULT__ = undefined;
+    };
+  }, [
+    createAgentNode,
+    configureAgentNode,
+    connectAgentNodes,
+    getNodes,
+    setNodes,
+    setSelectedNodeIds,
+    workflowId,
+    view,
+  ]);
+`;
+
+const REROUTE_PATCHES = [
+  {
+    file: 'src/stable/dialogs/canvasDialogs.ts',
+    from: "export { CanvasCompareNode, CanvasCompositeNode, CanvasColorGradeNode } from '../nodes/canvasImageNodes';",
+    to: "export { CanvasCompareNode, CanvasCompositeNode, CanvasColorGradeNode, CanvasJunctionNode } from '../nodes/canvasImageNodes';",
+    why: '对话框导出转接组件',
+  },
+  {
+    file: 'src/stable/app/canvasComponents.ts',
+    from: `export const ColorGradeNode = bind(Dialogs.CanvasColorGradeNode)(() => [
+  { Frame: NodeFrame, Header: NodeHeader, Empty: Icons.Layers },
+]);`,
+    to: `export const ColorGradeNode = bind(Dialogs.CanvasColorGradeNode)(() => [
+  { Frame: NodeFrame, Header: NodeHeader, Empty: Icons.Layers },
+]);
+export const JunctionNode = bind(Dialogs.CanvasJunctionNode)(() => [
+  { Frame: NodeFrame, Header: NodeHeader, Empty: Icons.Layers },
+]);`,
+    why: '绑定转接组件',
+  },
+  {
+    file: 'src/stable/app/canvasComponents.ts',
+    from: "  'Color Grade': ColorGradeNode,",
+    to: "  'Color Grade': ColorGradeNode,\n  'Junction': JunctionNode,",
+    why: 'type → 转接组件映射',
+  },
+  {
+    file: 'src/stable/canvas/canvasConnections.ts',
+    from: "  'Color Grade',\n  'ComfyUI',",
+    to: "  'Color Grade',\n  'Junction',\n  'ComfyUI',",
+    why: '图像来源白名单（下游能把转接当图像用）',
+  },
+  {
+    file: 'src/stable/canvas/canvasSceneData.ts',
+    from: '        let url = parent.resultUrl || parent.dataUrl;',
+    to: `        let url = parent.resultUrl || parent.dataUrl;
+        // dsh-aifisher-canvas v1.71：转接节点自己没有结果图，按它上游那张算
+        // （resolvedInputs 里已经有 inputUrl 自底向上解析出来的 url）。
+        if (!url && parent.type === 'Junction') url = resolvedInputs.get(parent.id);`,
+    why: '转接节点透传上游图片，否则下游参考图为空',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeFrame.tsx',
+    from: "  'Color Grade': '调色',",
+    to: "  'Color Grade': '调色',\n  'Junction': '转接',",
+    why: '节点标题',
+  },
+  {
+    file: 'src/stable/nodes/nodeFramework.ts',
+    from: `  {
+    type: 'comfyui',`,
+    to: `  {
+    type: 'junction',
+    category: 'tool',
+    inputs: [{ id: 'image', media: ['image'], required: true, multiple: false }],
+    outputs: [{ id: 'image', media: ['image'], multiple: true }],
+    initialStatus: 'success',
+  },
+  {
+    type: 'comfyui',`,
+    why: '节点框架定义（透传 image）',
+  },
+  {
+    file: 'src/stable/nodes/nodeFramework.ts',
+    from: "  'Color Grade': 'color-grade',",
+    to: "  'Color Grade': 'color-grade',\n  'Junction': 'junction',",
+    why: '节点框架类型别名',
+  },
+  {
+    file: 'src/stable/canvas/canvasApplication.tsx',
+    from: `  React.useEffect(() => {
+    window.__FISHERAI_FOCUS_NODES__ = focusNodes;`,
+    to: `${REROUTE_BRIDGE}  React.useEffect(() => {
+    window.__FISHERAI_FOCUS_NODES__ = focusNodes;`,
+    why: '画布应用里没有「插入转接并重接」的桥（只有这里够得着 nodes）',
+  },
+  {
+    // 同一个锚点再插一次：上一次替换后锚点仍在（REROUTE_BRIDGE 拼在它前面），
+    // 所以最终顺序是 REROUTE_BRIDGE → GRADE_RESULT_BRIDGE → focusNodes。
+    file: 'src/stable/canvas/canvasApplication.tsx',
+    from: `  React.useEffect(() => {
+    window.__FISHERAI_FOCUS_NODES__ = focusNodes;`,
+    to: `${GRADE_RESULT_BRIDGE}  React.useEffect(() => {
+    window.__FISHERAI_FOCUS_NODES__ = focusNodes;`,
+    why: '「退出调色后在调色节点后落一张成品图」需要 nodes 的写权限（只有这一层有）',
+  },
+];
+
+{
+  const problems = [];
+  for (const patch of REROUTE_PATCHES) {
+    const target = path.join(VENDOR, patch.file);
+    if (!fs.existsSync(target)) {
+      problems.push(`${patch.file}（文件不存在）`);
+      continue;
+    }
+    const original = fs.readFileSync(target, 'utf8');
+    const hits = original.split(patch.from).length - 1;
+    if (hits !== 1) {
+      problems.push(`${patch.file}: ${patch.why} —— 锚点命中 ${hits} 次（预期 1 次）`);
+      continue;
+    }
+    fs.writeFileSync(target, original.split(patch.from).join(patch.to));
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `[vendor] 转接节点补丁没对齐（上游可能改了写法，请核对）：\n  - ${problems.join('\n  - ')}`,
+    );
+  }
+  const componentTarget = path.join(VENDOR, 'src/stable/nodes/canvasImageNodes.tsx');
+  if (!fs.existsSync(componentTarget)) {
+    throw new Error('[vendor] 转接节点组件没找到落点：src/stable/nodes/canvasImageNodes.tsx');
+  }
+  fs.appendFileSync(componentTarget, JUNCTION_NODE_COMPONENT);
+  console.log(
+    `[vendor] 转接节点：${REROUTE_PATCHES.length} 处锚点 + 组件追加（Junction）`,
+  );
 }
 
 // ---------------------------------------------------------------- 4) 生成样式模块
@@ -3937,8 +4546,7 @@ if (versionAligned) {
   fs.writeFileSync(VENDOR_PKG_PATH, `${JSON.stringify(vendorPkg, null, 2)}\n`);
 }
 
-// ---------------------------------------------------------------- 4) 收尾
-
+// ---------------------------------------------------------------- 
 console.log(
   [
     `[vendor] 源：${SRC_ROOT}`,
@@ -3950,6 +4558,5 @@ console.log(
     `[vendor] 摘掉 Tailwind 构建期指令：${strippedDirectives} 条`,
     `[vendor] /api/ 命名空间改写：${apiRewrites} 处（${apiFiles} 个文件）`,
     `[vendor] 整文件覆盖（scripts/patches/aifisher）：${overridden} 个`,
-    `[vendor] 版本号：vendor/package.json = ${OWN_PKG.version}（看板左上角显示的就是它${versionAligned ? '' : '，原本就对'}）`,
   ].join('\n'),
 );

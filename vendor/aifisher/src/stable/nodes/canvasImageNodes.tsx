@@ -257,3 +257,170 @@ export function CanvasCompositeNode(
     </Frame>
   );
 }
+
+/**
+ * 调色节点（dsh-aifisher-canvas v1.70）——「打开合成器」入口。
+ * 合成器本体在 src/client/canvas/compositor/，这里只递上游图片和写回口。
+ */
+export function CanvasColorGradeNode(
+  React: Runtime,
+  props: Props,
+  { Frame, Header, Empty }: Components,
+) {
+  const images = imagesOf(props.connectedImageNodes, 10);
+  const data = props.data as NodeData & {
+    resultUrl?: string;
+    projectId?: string;
+    compositorGraph?: Record<string, unknown>;
+  };
+  const resultUrl = typeof data.resultUrl === 'string' ? data.resultUrl : '';
+  const open = (event: { stopPropagation(): void }) => {
+    event.stopPropagation();
+    const bridge = (window as unknown as {
+      __FISHERAI_COMPOSITOR__?: { open?: (options: Record<string, unknown>) => void };
+    }).__FISHERAI_COMPOSITOR__;
+    if (!bridge?.open) return;
+    bridge.open({
+      nodeId: data.id,
+      projectId: data.projectId,
+      title: data.title,
+      images: images.map((node) => ({ nodeId: node.id, url: node.url, title: node.title })),
+      graph: data.compositorGraph,
+      onSave: ({ resultUrl: nextUrl, graph }: { resultUrl: string; graph: unknown }) => {
+        // dsh-aifisher-canvas v1.73：用户「退出调色节点时应该会在调色节点后添加调整好的图像」。
+        // 优先走主画布的 __FISHERAI_CANVAS_GRADE_RESULT__.place：一次 setNodes 里回写调色节点、
+        // 在它右边新建一张 Upload Image 并连起来；桥不在（旧页面）才退回 v1.70 的只写回。
+        const grade = (window as unknown as {
+          __FISHERAI_CANVAS_GRADE_RESULT__?: {
+            place(input: Record<string, unknown>): { ok: boolean; error?: string };
+          };
+        }).__FISHERAI_CANVAS_GRADE_RESULT__;
+        const placed = grade?.place?.({
+          sourceId: data.id,
+          url: nextUrl,
+          graph,
+          title: '调色结果',
+        });
+        if (!placed?.ok) {
+          const update = props.onUpdate as
+            | ((id: string, patch: Record<string, unknown>) => void)
+            | undefined;
+          update?.(data.id, { resultUrl: nextUrl, compositorGraph: graph, status: 'success' });
+        }
+      },
+    });
+  };
+  return React.createElement(
+    Frame,
+    frameProps(props),
+    React.createElement(Header, headerProps(props)),
+    React.createElement(
+      'div',
+      {
+        className:
+          'relative w-full h-full rounded-lg overflow-hidden bg-[var(--af-surface)] ' +
+          (images.length ? 'cursor-pointer' : 'cursor-default'),
+        onDoubleClick: open,
+      },
+      resultUrl
+        ? React.createElement(
+            'div',
+            {
+              'data-af-media-chrome': 'true',
+              className:
+                'absolute inset-0 rounded-lg overflow-hidden bg-[var(--af-media-bg)] shadow-xl',
+            },
+            React.createElement('img', {
+              src: resultUrl,
+              alt: '调色结果',
+              className: 'w-full h-full object-cover pointer-events-none',
+              draggable: false,
+            }),
+          )
+        : React.createElement(
+            'div',
+            { className: 'w-full h-full bg-[var(--af-surface)] flex flex-col items-center justify-center gap-2' },
+            React.createElement(
+              'div',
+              { className: 'text-[var(--af-text-muted)]' },
+              React.createElement(Empty, { size: 40 }),
+            ),
+            React.createElement(
+              'div',
+              { className: 'text-[10px] text-[var(--af-text-muted)]' },
+              images.length ? '双击打开合成器' : '把图像连进来',
+            ),
+          ),
+      React.createElement(
+        'button',
+        {
+          type: 'button',
+          'data-fisherai-open-compositor': 'true',
+          className:
+            'absolute right-2 top-2 z-10 h-7 px-2 rounded-md text-[10px] font-bold bg-black/55 text-white hover:bg-black/75 backdrop-blur-sm',
+          onPointerDown: (event: { stopPropagation(): void }) => event.stopPropagation(),
+          onClick: open,
+        },
+        '合成器',
+      ),
+    ),
+  );
+}
+
+/**
+ * 转接节点（dsh-aifisher-canvas v1.71）—— Shift+右键划过的同源连线收进这里。
+ * 形态是一个 34×34 的小圆点（Blender Reroute 那种），圆里直接显示上游缩略图；
+ * 它不生成图：canvasSceneData 会把 Junction 父节点解析成更上游那张图，
+ * 所以下游拿到的参考图与直连完全一致。
+ */
+export function CanvasJunctionNode(
+  React: Runtime,
+  props: Props,
+  { Frame }: Components,
+) {
+  const [upstream] = imagesOf(props.connectedImageNodes, 1);
+  const url = upstream?.url || '';
+  const active = props.selected === true || props.isHoveredForConnection === true;
+  return React.createElement(
+    Frame,
+    { ...frameProps(props), isBareCard: true },
+    React.createElement(
+      'div',
+      {
+        title: '转接点：一路进、多路出，只整理连线走向',
+        'data-fisherai-junction': 'true',
+        style: {
+          position: 'relative',
+          width: '100%',
+          height: '100%',
+          borderRadius: '50%',
+          border: '2px solid ' + (active ? '#60a5fa' : 'var(--af-border-control)'),
+          background: 'var(--af-surface-raised)',
+          boxShadow: active ? '0 0 0 3px rgba(96,165,250,.28)' : '0 2px 8px rgba(0,0,0,.45)',
+          overflow: 'hidden',
+          boxSizing: 'border-box',
+        },
+      },
+      url
+        ? React.createElement('img', {
+            src: url,
+            alt: '转接上游',
+            draggable: false,
+            className: 'w-full h-full object-cover pointer-events-none',
+          })
+        : React.createElement('span', {
+            style: {
+              position: 'absolute',
+              left: '50%',
+              top: '50%',
+              width: '8px',
+              height: '8px',
+              marginLeft: '-4px',
+              marginTop: '-4px',
+              borderRadius: '50%',
+              background: 'var(--af-text-muted)',
+            },
+          }),
+    ),
+  );
+}

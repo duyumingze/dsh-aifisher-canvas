@@ -1348,6 +1348,178 @@ export function CanvasApplication(React: Runtime, dependencies: Dependencies) {
       if (holder.__FISHERAI_CANVAS_KNIFE__ === bridge) holder.__FISHERAI_CANVAS_KNIFE__ = undefined;
     };
   }, [getNodes, setNodes, setSelectedConnection]);
+  // ---------------------------------------------------------------- dsh-aifisher-canvas v1.71
+  // 转接（Shift + 右键划选）：把划过的「同源」连线收进一个 Junction 节点。
+  // 手势/命中在 src/client/canvas/knife.ts；这里只做结构改写 —— 只有这一层够得着 nodes。
+  // 同源的几条边先并成「上游 → 转接」一条主干，再从转接点分回原来的每个输入槽，
+  // 槽位 index 原样保留（ComfyUI 的首帧/尾帧槽不会被挪位）。
+  React.useEffect(() => {
+    const holder = window as unknown as {
+      __FISHERAI_CANVAS_REROUTE__?: {
+        merge(groups: ReadonlyArray<any>): number;
+      };
+    };
+    const bridge = {
+      merge(groups: ReadonlyArray<any>): number {
+        if (!Array.isArray(groups) || groups.length === 0) return 0;
+        let next: any[] = getNodes() as any[];
+        const created: string[] = [];
+        for (const group of groups) {
+          if (!group || typeof group.parentId !== 'string') continue;
+          const children: any[] = Array.isArray(group.children) ? group.children : [];
+          if (!children.length) continue;
+          if (!next.some((node) => node.id === group.parentId)) continue;
+          const junction: any = createAgentNode(
+            'Junction',
+            { x: Number(group.x) || 0, y: Number(group.y) || 0 },
+            workflowId,
+          );
+          junction.width = 34;
+          junction.height = 34;
+          const firstSlot = Math.max(0, Math.trunc(Number(children[0] && children[0].portIndex) || 0));
+          const firstChild = next.find((node) => node.id === children[0]?.childId);
+          const sourcePort = Math.max(
+            0,
+            Math.trunc(Number(firstChild?.sourcePortIndices?.[firstSlot]) || 0),
+          );
+          junction.parentIds = [group.parentId];
+          junction.sourcePortIndices = [sourcePort];
+          const junctionId = junction.id;
+          next = next.map((node) => {
+            const targets = children.filter((item) => item && item.childId === node.id);
+            if (!targets.length) return node;
+            const parentIds = [...(node.parentIds || [])];
+            const sourcePortIndices = Array.isArray(node.sourcePortIndices)
+              ? [...node.sourcePortIndices]
+              : undefined;
+            let changed = false;
+            for (const target of targets) {
+              const slot = Math.max(0, Math.trunc(Number(target.portIndex) || 0));
+              if (parentIds[slot] !== group.parentId) continue;
+              parentIds[slot] = junctionId;
+              if (sourcePortIndices && sourcePortIndices.length > slot) sourcePortIndices[slot] = 0;
+              changed = true;
+            }
+            if (!changed) return node;
+            return sourcePortIndices
+              ? { ...node, parentIds, sourcePortIndices }
+              : { ...node, parentIds };
+          });
+          next = [...next, junction];
+          created.push(junctionId);
+        }
+        if (!created.length) return 0;
+        flushSync(() => {
+          setNodes(next);
+          setSelectedNodeIds(created);
+        });
+        return created.length;
+      },
+    };
+    holder.__FISHERAI_CANVAS_REROUTE__ = bridge;
+    return () => {
+      if (holder.__FISHERAI_CANVAS_REROUTE__ === bridge) holder.__FISHERAI_CANVAS_REROUTE__ = undefined;
+    };
+  }, [createAgentNode, getNodes, setNodes, setSelectedNodeIds, workflowId]);
+  // ---------------------------------------------------------------- dsh-aifisher-canvas v1.73
+  // 调色结果落位：应用调色后，在调色节点右边新增一张成品图并连上。
+  React.useEffect(() => {
+    const holder = window as unknown as {
+      __FISHERAI_CANVAS_GRADE_RESULT__?: {
+        place(input: {
+          sourceId: string;
+          url: string;
+          graph?: unknown;
+          title?: string;
+        }): { ok: boolean; id?: string; error?: string };
+      };
+    };
+    const bridge = {
+      place(input: { sourceId: string; url: string; graph?: unknown; title?: string }) {
+        if (!workflowId || view !== 'canvas') return { ok: false, error: '请先打开项目。' };
+        if (!input || typeof input.url !== 'string' || !input.url)
+          return { ok: false, error: '调色结果还没生成。' };
+        const current: any[] = getNodes() as any[];
+        const source = current.find((node) => node.id === input.sourceId);
+        if (!source) return { ok: false, error: '找不到调色节点，请刷新后重试。' };
+        const width = Number(source.width) || 360;
+        const height = Number(source.height) || 360;
+        // 落位：优先用截帧那套「贴右缘 + 避开已有节点」的算法（__FISHERAI_FRAME_LAYOUT__），
+        // 桥不在才退回固定 +80。用户排布过画布，叠上去等于把结果藏了。
+        let point = {
+          x: Number(source.x || 0) + width + 80,
+          y: Number(source.y || 0) + height / 2 - 180,
+        };
+        try {
+          const layout = (
+            window as unknown as {
+              __FISHERAI_FRAME_LAYOUT__?: {
+                place(
+                  source: unknown,
+                  items: ReadonlyArray<{ title?: string }>,
+                  nodes?: ReadonlyArray<unknown>,
+                  options?: { frameWidth?: number; gap?: number },
+                ): Array<{ x: number; y: number }>;
+              };
+            }
+          ).__FISHERAI_FRAME_LAYOUT__;
+          const rects = layout?.place?.(source, [{ title: '调色结果' }], current, {
+            frameWidth: width,
+            gap: 80,
+          });
+          if (rects && rects[0]) point = { x: rects[0].x, y: rects[0].y };
+        } catch {
+          /* 落位算法失败就用固定偏移 */
+        }
+        const created: any = createAgentNode('Upload Image', point, workflowId);
+        let next = configureAgentNode(current, source.id, {
+          resultUrl: input.url,
+          status: 'success',
+          ...(input.graph ? { compositorGraph: input.graph } : {}),
+        } as never);
+        next = configureAgentNode([...next, created], created.id, {
+          resultUrl: input.url,
+          resultUrls: [input.url],
+          title: input.title || '调色结果',
+          status: 'success',
+          aspectRatio: source.aspectRatio || '1:1',
+          resultAspectRatio: source.resultAspectRatio,
+          projectId: workflowId,
+        } as never);
+        next = connectAgentNodes(next, source.id, created.id);
+        if (!next.some((node) => node.id === created.id))
+          return { ok: false, error: '新建调色结果节点失败。' };
+        flushSync(() => {
+          setNodes(next);
+          setSelectedNodeIds([created.id]);
+        });
+        // 结果图多半落在调色节点右侧、可能已经在视口外：把「调色 + 结果」框进画面，
+        // 用户退出合成器就能看见成品（focusNodes 是上游现成的视口聚焦桥）。
+        try {
+          (
+            window as unknown as { __FISHERAI_FOCUS_NODES__?: (ids: readonly string[]) => void }
+          ).__FISHERAI_FOCUS_NODES__?.([source.id, created.id]);
+        } catch {
+          /* 聚焦失败不影响落图 */
+        }
+        return { ok: true, id: created.id };
+      },
+    };
+    holder.__FISHERAI_CANVAS_GRADE_RESULT__ = bridge;
+    return () => {
+      if (holder.__FISHERAI_CANVAS_GRADE_RESULT__ === bridge)
+        holder.__FISHERAI_CANVAS_GRADE_RESULT__ = undefined;
+    };
+  }, [
+    createAgentNode,
+    configureAgentNode,
+    connectAgentNodes,
+    getNodes,
+    setNodes,
+    setSelectedNodeIds,
+    workflowId,
+    view,
+  ]);
   React.useEffect(() => {
     window.__FISHERAI_FOCUS_NODES__ = focusNodes;
     return () => {

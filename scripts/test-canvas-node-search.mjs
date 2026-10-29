@@ -69,6 +69,7 @@ console.log(JSON.stringify({
     comfy: ranked('comfy'),
     工作流: ranked('工作流'),
     音pin: ranked('音pin'),
+    调色: ranked('调色'),
     不存在xyz: ranked('不存在xyz'),
     空: ranked(''),
   },
@@ -104,9 +105,19 @@ if (probe.status !== 0) {
 const pure = JSON.parse(probe.stdout.trim().split('\n').pop());
 
 check(
-  '候选目录含 7 种画布节点类型',
-  pure.catalog.filter((item) => item.id.startsWith('type:')).length === 7,
+  '候选目录含 9 种画布节点类型（v1.70 加调色 / Color Grade，v1.71 加转接 / Junction）',
+  pure.catalog.filter((item) => item.id.startsWith('type:')).length === 9,
   String(pure.catalog.filter((item) => item.id.startsWith('type:')).length),
+);
+check(
+  '候选目录里有「转接」（Junction，v1.71 的划选合并产物）',
+  pure.catalog.some((item) => item.id === 'type:Junction'),
+  JSON.stringify(pure.catalog.filter((item) => item.id.startsWith('type:')).map((item) => item.id)),
+);
+check(
+  '搜「调色」第一名是调色节点（Color Grade）',
+  pure.queries.调色[0] === 'type:Color Grade',
+  JSON.stringify(pure.queries.调色.slice(0, 3)),
 );
 check(
   '候选目录不含「上传图片/视频/音频」（它们是连接产物，上游菜单也不给凭空新建）',

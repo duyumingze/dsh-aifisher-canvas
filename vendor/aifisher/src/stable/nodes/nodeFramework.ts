@@ -245,6 +245,13 @@ const BASE_DEFINITIONS: readonly NodeDefinition[] = [
     initialStatus: 'idle',
   },
   {
+    type: 'junction',
+    category: 'tool',
+    inputs: [{ id: 'image', media: ['image'], required: true, multiple: false }],
+    outputs: [{ id: 'image', media: ['image'], multiple: true }],
+    initialStatus: 'success',
+  },
+  {
     type: 'comfyui',
     category: 'workflow',
     inputs: [{ id: 'dynamic', media: ['any'], multiple: true }],
@@ -263,6 +270,8 @@ const STABLE_TYPE_ALIASES: Readonly<Record<string, string>> = {
   'Upload Audio': 'upload-audio',
   'Image Compare': 'image-compare',
   'Image Composite': 'image-composite',
+  'Color Grade': 'color-grade',
+  'Junction': 'junction',
   ComfyUI: 'comfyui',
 };
 

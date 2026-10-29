@@ -89,6 +89,7 @@ import { installCanvasAutoSave } from '../../../vendor/aifisher/src/stable/persi
 import { installCanvasSession } from '../../../vendor/aifisher/src/stable/persistence/canvasSession';
 import { installStableDesignSystem } from '../../../vendor/aifisher/src/stable/design/designSystem';
 import { installNodeFramework } from '../../../vendor/aifisher/src/stable/nodes/nodeFramework';
+import { installCompositorBridge } from './compositor/bridge';
 import { installImageModeAdapter } from '../../../vendor/aifisher/src/stable/generation/imageMode';
 import { installVideoModeAdapter } from '../../../vendor/aifisher/src/stable/generation/videoMode';
 import { installMidjourneyReferenceAdapter } from '../../../vendor/aifisher/src/stable/generation/midjourneyReferences';
@@ -694,7 +695,17 @@ function installCanvasVideoFrameSupport(): { dispose: () => void } {
   };
 }
 
-/** 顺序按上游 main.ts 的先后关系保留（外观/会话要早于画布组件读取它们）。 */const INSTALLERS: Installer[] = [
+/**
+ * v1.70：调色节点（Color Grade）→ 全屏合成器。
+ * 编辑器/引擎在 src/client/canvas/compositor/；vendor 节点卡只认 window.__FISHERAI_COMPOSITOR__，
+ * 写回走节点自己的 onUpdate（resultUrl + compositorGraph），不需要新协议。
+ */
+function installCanvasCompositorSupport(): { dispose: () => void } {
+  return installCompositorBridge();
+}
+
+/** 顺序按上游 main.ts 的先后关系保留（外观/会话要早于画布组件读取它们）。 */
+const INSTALLERS: Installer[] = [
   { name: 'installStableCanvasNavigation', install: installStableCanvasNavigation },
   { name: 'installStableCanvasClipboard', install: installStableCanvasClipboard },
   { name: 'installStableCanvasConnections', install: installStableCanvasConnections },
@@ -756,6 +767,8 @@ function installCanvasVideoFrameSupport(): { dispose: () => void } {
   // ---- v1.49：切刀（Ctrl + 右键拖拽，划过的连线断开）----
   //     手势/预览在 src/client/canvas/knife.ts；断开由 vendor 补丁 3.8t 的桥落地
   { name: 'installCanvasKnife', install: installCanvasKnife },
+  // ---- v1.70：调色节点（Color Grade）→ 全屏合成器（Shift+A 加效果、Shift+点击接预览）----
+  { name: 'installCanvasCompositor', install: installCanvasCompositorSupport },
 ];
 
 /** 已装成功的模块名（诊断用）。 */

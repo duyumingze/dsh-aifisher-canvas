@@ -296,6 +296,8 @@ const titles: Record<string, string> = {
   Audio: '音频生成',
   'Image Compare': '图片对比',
   'Image Composite': '图片拼合',
+  'Color Grade': '调色',
+  'Junction': '转接',
   Text: '文本输入',
   ComfyUI: 'ComfyUI',
 };

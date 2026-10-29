@@ -95,6 +95,22 @@ const NODE_ENTRIES: ReadonlyArray<Omit<CanvasNodeSearchEntry, 'id'>> = [
     keywords: ['composite', 'pinhe', 'ph', '拼合', '拼接', '合图', 'collage'],
     group: '节点',
   },
+  {
+    // v1.70：调色节点（Color Grade）—— 多图进全屏合成器，一个效果一个节点
+    type: 'Color Grade',
+    label: '调色',
+    description: '多图进合成器：调色、混合、蒙版，一个效果一个节点',
+    keywords: ['color', 'grade', 'tiaose', 'ts', '调色', '校色', '合成', '合成器', 'blender', 'compositor', '色彩'],
+    group: '节点',
+  },
+  {
+    // v1.71：转接节点 —— 多数时候由 Shift+右键划选自动插入，这里留一个手动入口
+    type: 'Junction',
+    label: '转接',
+    description: '一路进、一路出，只整理连线走向，不改求值结果',
+    keywords: ['junction', 'reroute', 'zhuanjie', 'zj', '转接', '转接口', '中继', '合线'],
+    group: '节点',
+  },
 ];
 
 /**

@@ -17,6 +17,8 @@ const IMAGE_REFERENCE_NODE_TYPES = new Set([
   'Upload Image',
   'Image Compare',
   'Image Composite',
+  'Color Grade',
+  'Junction',
   'ComfyUI',
 ]);
 

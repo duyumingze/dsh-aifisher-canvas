@@ -306,7 +306,7 @@ export function connectNewCanvasNode(
   );
   if (!mode) return nodes;
   if (target.type === 'Image Compare' && (target.parentIds?.length ?? 0) >= 2) return nodes;
-  if (target.type === 'Image Composite' && (target.parentIds?.length ?? 0) >= 10) return nodes;
+  if ((target.type === 'Image Composite' || target.type === 'Color Grade') && (target.parentIds?.length ?? 0) >= 10) return nodes;
   return connectCanvasNodes(nodes, {
     parentId: sourceId,
     childId: targetId,
@@ -357,7 +357,7 @@ export function createNodeMenuOperations(
         const firstSource = nodes.find((node) => node.id === sources[0]);
         if (
           menu.connectorSide !== 'left' &&
-          created.type === 'Image Composite' &&
+          (created.type === 'Image Composite' || created.type === 'Color Grade') &&
           firstSource &&
           runtime.mediaType(firstSource.type) === 'image'
         ) {

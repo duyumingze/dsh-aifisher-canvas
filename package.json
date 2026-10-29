@@ -1,36 +1,14 @@
 {
   "name": "dsh-aifisher-canvas",
-  "version": "1.70.0",
+  "version": "1.79.0",
   "private": true,
-  "description": "把专业 AI 创作无限画布做成 DSH 插件：DSH 原生 Agent 通过 canvas_control 直接接管画布（建节点、连线、填参、整理素材），支持本地 ComfyUI 与多云端生成。",
-  "keywords": [
-    "dsh",
-    "deepseek-harness",
-    "plugin",
-    "canvas",
-    "infinite-canvas",
-    "comfyui",
-    "image-generation",
-    "video-generation",
-    "storyboard",
-    "agent"
-  ],
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/duyumingze/dsh-aifisher-canvas.git"
-  },
-  "homepage": "https://github.com/duyumingze/dsh-aifisher-canvas#readme",
-  "license": "SEE LICENSE IN LICENSE",
-  "packageManager": "pnpm@11.28.5",
   "type": "module",
   "main": "lib/index.js",
   "files": [
     "lib",
     "public",
     "cordis.patch.yml",
-    "README.md",
-    "CHANGELOG.md",
-    "CONTRIBUTING.md"
+    "README.md"
   ],
   "engines": {
     "node": ">=22.19",
@@ -64,8 +42,6 @@
     "clean": "node scripts/clean.mjs",
     "typecheck": "node scripts/typecheck.mjs",
     "build": "node scripts/clean.mjs && node scripts/vendor-aifisher.mjs && node scripts/build-canvas-css.mjs && node node_modules/tsdown/dist/run.js",
-    "build:offline": "node scripts/clean.mjs && node scripts/build-canvas-css.mjs && node node_modules/tsdown/dist/run.js",
-    "check:contract": "node scripts/check-contract-sync.mjs",
     "sync:shadcn": "node scripts/sync-shadcn-ui.mjs",
     "verify:ui": "node scripts/verify-canvas-ui.mjs",
     "test:canvas-ui": "node scripts/test-canvas-shadcn-ui.mjs",
@@ -124,7 +100,7 @@
     "test:video-frames": "node scripts/test-canvas-video-frames.mjs",
     "test:video-seek": "node scripts/test-canvas-video-seek.mjs",
     "test:workflow-library": "node scripts/test-canvas-workflow-library.mjs",
-    "test": "node scripts/typecheck.mjs && node scripts/smoke-contract.mjs && node scripts/test-canvas-backend.mjs && node scripts/test-canvas-render.mjs && node scripts/test-panel-exit.mjs && node scripts/test-canvas-chat-dock.mjs && node scripts/test-canvas-agent.mjs && node scripts/test-canvas-agent-chat.mjs && node scripts/test-canvas-agent-speed.mjs && node scripts/test-canvas-placement.mjs && node scripts/test-canvas-digest.mjs && node scripts/test-canvas-recipe.mjs && node scripts/test-canvas-preview.mjs && node scripts/test-canvas-events.mjs && node scripts/test-canvas-references.mjs && node scripts/test-canvas-generation.mjs && node scripts/test-media-editing.mjs && node scripts/test-canvas-library.mjs && node scripts/test-custom-workflows.mjs && node scripts/test-canvas-workflow-config.mjs && node scripts/test-canvas-local-workflows.mjs && node scripts/test-cloud-generation.mjs && node scripts/test-ark-generation.mjs && node scripts/test-cloud-channels.mjs && node scripts/test-canvas-cloud-generation.mjs && node scripts/test-canvas-ui-services.mjs && node scripts/test-canvas-grid.mjs && node scripts/test-canvas-node-search.mjs && node scripts/test-canvas-stack.mjs && node scripts/test-canvas-video-history.mjs && node scripts/test-canvas-video-references.mjs && node scripts/test-canvas-video-frames.mjs && node scripts/test-canvas-video-seek.mjs && node scripts/test-canvas-knife.mjs && node scripts/test-canvas-outpaint.mjs && node scripts/test-canvas-last-model.mjs && node scripts/test-project-archive.mjs && node scripts/test-canvas-data-dir.mjs && node scripts/test-canvas-task-queue.mjs && node scripts/test-canvas-workflow-library.mjs && node scripts/test-canvas-shadcn-ui.mjs && node scripts/verify-canvas-ui.mjs && node scripts/test-canvas-memory.mjs && node scripts/test-canvas-consistency.mjs && node scripts/test-canvas-copilot.mjs && node scripts/test-canvas-job.mjs && node scripts/test-canvas-storyboard.mjs && node scripts/test-canvas-p2.mjs && node scripts/test-canvas-crew.mjs && node scripts/test-canvas-agent-tools.mjs",
+    "test": "node scripts/typecheck.mjs && node scripts/smoke-contract.mjs && node scripts/test-canvas-backend.mjs && node scripts/test-canvas-render.mjs && node scripts/test-panel-exit.mjs && node scripts/test-canvas-chat-dock.mjs && node scripts/test-canvas-agent.mjs && node scripts/test-canvas-agent-chat.mjs && node scripts/test-canvas-agent-speed.mjs && node scripts/test-canvas-placement.mjs && node scripts/test-canvas-digest.mjs && node scripts/test-canvas-recipe.mjs && node scripts/test-canvas-preview.mjs && node scripts/test-canvas-events.mjs && node scripts/test-canvas-references.mjs && node scripts/test-canvas-generation.mjs && node scripts/test-media-editing.mjs && node scripts/test-canvas-library.mjs && node scripts/test-custom-workflows.mjs && node scripts/test-canvas-workflow-config.mjs && node scripts/test-canvas-local-workflows.mjs && node scripts/test-cloud-generation.mjs && node scripts/test-ark-generation.mjs && node scripts/test-cloud-channels.mjs && node scripts/test-canvas-cloud-generation.mjs && node scripts/test-canvas-ui-services.mjs && node scripts/test-canvas-grid.mjs && node scripts/test-canvas-node-search.mjs && node scripts/test-canvas-stack.mjs && node scripts/test-canvas-video-history.mjs && node scripts/test-canvas-video-references.mjs && node scripts/test-canvas-video-frames.mjs && node scripts/test-canvas-video-seek.mjs && node scripts/test-canvas-knife.mjs && node scripts/test-canvas-compositor.mjs && node scripts/test-canvas-reroute.mjs && node scripts/test-canvas-outpaint.mjs && node scripts/test-canvas-last-model.mjs && node scripts/test-project-archive.mjs && node scripts/test-canvas-data-dir.mjs && node scripts/test-canvas-task-queue.mjs && node scripts/test-canvas-workflow-library.mjs && node scripts/test-canvas-shadcn-ui.mjs && node scripts/verify-canvas-ui.mjs && node scripts/test-canvas-memory.mjs && node scripts/test-canvas-consistency.mjs && node scripts/test-canvas-copilot.mjs && node scripts/test-canvas-job.mjs && node scripts/test-canvas-storyboard.mjs && node scripts/test-canvas-p2.mjs && node scripts/test-canvas-crew.mjs && node scripts/test-canvas-agent-tools.mjs",
     "dev": "tsdown --watch"
   },
   "peerDependencies": {

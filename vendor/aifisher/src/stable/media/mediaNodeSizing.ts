@@ -9,6 +9,7 @@ const RESIZABLE_MEDIA_TYPES = new Set([
   ...ADAPTIVE_MEDIA_TYPES,
   'Image Compare',
   'Image Composite',
+  'Color Grade',
 ]);
 
 export interface AdaptiveMediaNode {

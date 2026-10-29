@@ -4,6 +4,12 @@
  * 用户原话（2026-10-19）：
  *   「现在做一个新功能，像blender一样按住ctrl加鼠标右键切换到切刀工具，划过的线会断开连接」。
  *
+ * v1.71（2026-10-29）用户追加：
+ *   「加一个shift+鼠标右键划过的线合并并添加转接口的功能」→ 同一个划选手势，
+ *   改成把**同源**的几条线收进一个「转接」节点（Junction），求值结果不变。
+ *   两种模式共用采样/命中/浮层，只是在松手时调不同的桥：
+ *   Ctrl/Meta+右键 → `__FISHERAI_CANVAS_KNIFE__.cut`；Shift+右键 → `__FISHERAI_CANVAS_REROUTE__.merge`。
+ *
  * ## 行为
  *
  *   按住 Ctrl（mac 上 Meta 等价）+ 鼠标右键按下，画布上就进入切刀：
@@ -75,20 +81,25 @@ export interface KnifeReport {
   canvas: boolean;
   edges: number;
   bridge: boolean;
+  bridgeReroute: boolean;
   sessions: number;
   cuts: number;
+  merges: number;
   targets: number;
   lastError: string;
   lastGesture: {
     strokeLength: number;
     targets: number;
     cut: number;
+    mode: 'cut' | 'reroute';
+    merges: number;
   } | null;
 }
 
-const stats: Omit<KnifeReport, 'installed' | 'canvas' | 'edges' | 'bridge'> = {
+const stats: Omit<KnifeReport, 'installed' | 'canvas' | 'edges' | 'bridge' | 'bridgeReroute'> = {
   sessions: 0,
   cuts: 0,
+  merges: 0,
   targets: 0,
   lastError: '',
   lastGesture: null,
@@ -436,6 +447,8 @@ export function collectKnifeEdges(doc: Document): KnifeEdgePath[] {
 
 interface KnifeSession {
   pointerId: number;
+  /** cut = 切刀（Ctrl+右键）；reroute = 合并加转接（Shift+右键）。 */
+  mode: 'cut' | 'reroute';
   stroke: KnifePoint[];
   edges: KnifeEdgePath[];
   hits: KnifeEdgePath[];
@@ -473,6 +486,20 @@ function now(): number {
 
 function canvasSurface(): HTMLElement | null {
   return typeof document === 'undefined' ? null : document.getElementById('canvas-background');
+}
+
+/**
+ * 调色面板（合成器）盖在画布上时，画布手势一律不接管。
+ *
+ * 为什么会在捕获阶段抢走：这个模块把 pointerdown 挂在 **document 的捕获阶段**（必须早于
+ * vendor 的 React 处理），而 `#canvas-background` 的 rect 铺满整个视口，所以「指针明明在
+ * 合成器层上」也会被 insideCanvas 判成在画布上。表现就是：在调色面板里 Shift+右键划选，
+ * 转接点却被建到了下面的主画布上（用户 2026-10-29 报的 bug）。
+ * 合成器是全屏模态层（`.cg-root` inset:0），它开着的时候画布本来就不可见，直接让路。
+ */
+function compositorOwnsPointer(): boolean {
+  if (typeof document === 'undefined') return false;
+  return !!document.querySelector('[data-fisherai-compositor]');
 }
 
 /** 指针是不是在画布底盘上（jsdom 里 rect 全 0，只能用 DOM 包含关系判断）。 */
@@ -523,17 +550,19 @@ function mountOverlay(current: KnifeSession): void {
   svg.style.height = '100%';
   svg.style.overflow = 'visible';
 
-  // 会被切断的连线：先在底下铺一层红光，再压一条实线（像 Blender 的切刀高亮）。
+  // 会被切断 / 合并的连线：先在底下铺一层光，再压一条实线（像 Blender 的切刀高亮）。
+  // 切刀用红、合并用绿 —— 同一套浮层，靠颜色区分这一下会「断线」还是「收束」。
+  const merge = current.mode === 'reroute';
   const hintHalo = makeSvgElement('path', {
     'data-fisherai-knife-hint-halo': 'true',
-    stroke: 'rgba(255, 77, 90, 0.28)',
+    stroke: merge ? 'rgba(96, 220, 160, 0.28)' : 'rgba(255, 77, 90, 0.28)',
     'stroke-width': '9',
     'stroke-linecap': 'round',
     'stroke-linejoin': 'round',
   });
   const hintPath = makeSvgElement('path', {
     'data-fisherai-knife-hint': 'true',
-    stroke: 'rgba(255, 77, 90, 0.95)',
+    stroke: merge ? 'rgba(96, 220, 160, 0.95)' : 'rgba(255, 77, 90, 0.95)',
     'stroke-width': '2.4',
     'stroke-linecap': 'round',
     'stroke-linejoin': 'round',
@@ -639,9 +668,10 @@ function setReadyClass(value: boolean): void {
   document.body.classList.toggle('fisherai-knife-ready', value);
 }
 
-function startSession(event: PointerEvent): void {
+function startSession(event: PointerEvent, mode: 'cut' | 'reroute'): void {
   const current: KnifeSession = {
     pointerId: Number.isFinite(event.pointerId) ? event.pointerId : 1,
+    mode,
     stroke: [{ x: event.clientX, y: event.clientY }],
     edges: collectKnifeEdges(document),
     hits: [],
@@ -680,7 +710,23 @@ function finishSession(fadeOut = true): void {
   else current.hits = [];
   const hits = current.hits;
   let cut = 0;
-  if (hits.length) {
+  let merges = 0;
+  if (current.mode === 'reroute' && hits.length) {
+    const bridge = (window as unknown as {
+      __FISHERAI_CANVAS_REROUTE__?: {
+        merge(groups: readonly RerouteGroup[]): number;
+      };
+    }).__FISHERAI_CANVAS_REROUTE__;
+    if (bridge && typeof bridge.merge === 'function') {
+      try {
+        merges = Number(bridge.merge(rerouteGroupsFromHits(current.stroke, hits))) || 0;
+      } catch (error) {
+        stats.lastError = error instanceof Error ? error.message : String(error);
+      }
+    } else {
+      stats.lastError = '转接桥未装配（window.__FISHERAI_CANVAS_REROUTE__.merge 不存在）';
+    }
+  } else if (hits.length) {
     const bridge = (window as unknown as {
       __FISHERAI_CANVAS_KNIFE__?: {
         cut(edges: readonly KnifeEdgeIdentity[]): number;
@@ -698,8 +744,15 @@ function finishSession(fadeOut = true): void {
   }
   stats.targets = hits.length;
   stats.cuts += cut;
-  stats.lastGesture = { strokeLength: Math.round(length), targets: hits.length, cut };
-  // 落刀后留一道淡出的红线（视觉反馈：确实切开了这几条）。
+  stats.merges += merges;
+  stats.lastGesture = {
+    strokeLength: Math.round(length),
+    targets: hits.length,
+    cut,
+    mode: current.mode,
+    merges,
+  };
+  // 收手势后留一道淡出的高亮（红线=切开了；绿线=收进转接点了）。
   removeOverlay(current, fadeOut);
 }
 
@@ -713,6 +766,83 @@ function cancelSession(): void {
     current.frame = null;
   }
   removeOverlay(current, false);
+}
+
+/** 屏幕坐标 → 画布世界坐标（合线时用来摆转接点；读不到变换就返回 null）。 */
+export function canvasWorldPoint(point: KnifePoint): KnifePoint | null {
+  if (typeof document === 'undefined') return null;
+  const content = document.getElementById('canvas-viewport-content');
+  const surface = canvasSurface();
+  const rect = surface && typeof surface.getBoundingClientRect === 'function'
+    ? surface.getBoundingClientRect()
+    : null;
+  const origin =
+    rect && rect.width > 1 && rect.height > 1 ? { x: rect.left, y: rect.top } : { x: 0, y: 0 };
+  const inline = content
+    ? knifeViewportTransform((content as HTMLElement).style.transform)
+    : null;
+  if (!inline) return null;
+  return {
+    x: (point.x - origin.x - inline.x) / inline.zoom,
+    y: (point.y - origin.y - inline.y) / inline.zoom,
+  };
+}
+
+/** 转接节点的直径；与 vendor 桥里写死的 34×34 保持一致（回归会对）。 */
+export const JUNCTION_WIDTH = 34;
+export const JUNCTION_HEIGHT = 34;
+
+/** Shift+右键松手时要交给 vendor 桥的「一组合并」。 */
+export interface RerouteGroup {
+  parentId: string;
+  x: number;
+  y: number;
+  children: Array<{ childId: string; portIndex: number }>;
+}
+
+/** 划选线第一次擦到这条连线的那一小段中点。 */
+function strokeHitPoint(
+  stroke: readonly KnifePoint[],
+  points: readonly KnifePoint[],
+): KnifePoint | null {
+  for (let index = 1; index < stroke.length; index += 1) {
+    const start = stroke[index - 1];
+    const end = stroke[index];
+    for (let step = 1; step < points.length; step += 1) {
+      if (!knifeSegmentsCross(start, end, points[step - 1], points[step])) continue;
+      return { x: (start.x + end.x) / 2, y: (start.y + end.y) / 2 };
+    }
+  }
+  return null;
+}
+
+/**
+ * 把命中的连线按**上游节点**分组：同一个父节点的几条线合成一个转接点；
+ * 不同上游各得一个。位置取划选线第一次擦到那一组的地方（世界坐标，左上角）。
+ */
+export function rerouteGroupsFromHits(
+  stroke: readonly KnifePoint[],
+  hits: readonly KnifeEdgePath[],
+): RerouteGroup[] {
+  const groups = new Map<string, { point: KnifePoint; children: RerouteGroup['children'] }>();
+  for (const hit of hits) {
+    const point = strokeHitPoint(stroke, hit.points) ?? stroke[stroke.length - 1];
+    const existing = groups.get(hit.parentId);
+    const child = { childId: hit.childId, portIndex: hit.portIndex };
+    if (existing) existing.children.push(child);
+    else groups.set(hit.parentId, { point, children: [child] });
+  }
+  const result: RerouteGroup[] = [];
+  for (const [parentId, group] of groups) {
+    const center = canvasWorldPoint(group.point) ?? group.point;
+    result.push({
+      parentId,
+      x: center.x - JUNCTION_WIDTH / 2,
+      y: center.y - JUNCTION_HEIGHT / 2,
+      children: group.children,
+    });
+  }
+  return result;
 }
 
 /** 拆掉所有监听与残留（画布卸载时调用）。 */
@@ -734,12 +864,16 @@ export function installCanvasKnife(): { dispose(): void } {
   const onPointerDown = (event: PointerEvent) => {
     if (session) return;
     if (event.button !== 2) return;
-    if (!(event.ctrlKey || event.metaKey)) return;
+    // 调色面板开着时全屏模态层在上面，画布手势让路（否则会在下面的画布上建转接点）
+    if (compositorOwnsPointer()) return;
+    // Ctrl/Meta = 切刀；Shift = 合并加转接（两者共用采样/浮层，颜色与落点不同）
+    const mode = event.ctrlKey || event.metaKey ? 'cut' : event.shiftKey ? 'reroute' : null;
+    if (!mode) return;
     if (!insideCanvas(event, event.clientX, event.clientY)) return;
-    // 这一刀必须由我们独占：vendor 的右键手势（contextmenu）不能同时开菜单。
+    // 这一下必须由我们独占：vendor 的右键手势（contextmenu）不能同时开菜单。
     event.preventDefault();
     event.stopPropagation();
-    startSession(event);
+    startSession(event, mode);
   };
 
   const onPointerMove = (event: PointerEvent) => {
@@ -787,10 +921,16 @@ export function installCanvasKnife(): { dispose(): void } {
   };
 
   const onContextMenu = (event: MouseEvent) => {
+    // 调色面板自己管右键（它自己会压掉 contextmenu），别在这里抢
+    if (compositorOwnsPointer()) return;
     const inside = insideCanvas(event, event.clientX, event.clientY);
-    // ① 正在切；② 按住 Ctrl 在画布上（这一下就是切刀的起手，不能弹菜单）；
-    // ③ 刚收刀的一小段时间里（浏览器可能把 contextmenu 排在 pointerup 之后）。
-    if (session || (inside && (event.ctrlKey || event.metaKey)) || (inside && now() < suppressContextUntil)) {
+    // ① 正在划；② 按住 Ctrl / Shift 在画布上（这一下就是手势的起手，不能弹菜单）；
+    // ③ 刚收手势的一小段时间里（浏览器可能把 contextmenu 排在 pointerup 之后）。
+    if (
+      session ||
+      (inside && (event.ctrlKey || event.metaKey || event.shiftKey)) ||
+      (inside && now() < suppressContextUntil)
+    ) {
       event.preventDefault();
       event.stopPropagation();
     }
@@ -831,18 +971,23 @@ export function installCanvasKnife(): { dispose(): void } {
   };
 }
 
-/** 排查 / 回归读数：装没装、认得出几条线、切过几刀。 */
+/** 排查 / 回归读数：装没装、认得出几条线、切过几刀 / 合过几组。 */
 export function knifeReport(): KnifeReport {
-  const bridge = (window as unknown as {
+  const holder = window as unknown as {
     __FISHERAI_CANVAS_KNIFE__?: { cut?: unknown };
-  }).__FISHERAI_CANVAS_KNIFE__;
+    __FISHERAI_CANVAS_REROUTE__?: { merge?: unknown };
+  };
+  const bridge = holder.__FISHERAI_CANVAS_KNIFE__;
+  const reroute = holder.__FISHERAI_CANVAS_REROUTE__;
   return {
     installed,
     canvas: Boolean(canvasSurface()),
     edges: installed ? collectKnifeEdges(document).length : 0,
     bridge: Boolean(bridge && typeof bridge.cut === 'function'),
+    bridgeReroute: Boolean(reroute && typeof reroute.merge === 'function'),
     sessions: stats.sessions,
     cuts: stats.cuts,
+    merges: stats.merges,
     targets: stats.targets,
     lastError: stats.lastError,
     lastGesture: stats.lastGesture,

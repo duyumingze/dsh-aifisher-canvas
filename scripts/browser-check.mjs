@@ -711,6 +711,218 @@ const knifeUrl = (file) => `/api/aifisher/canvas/media/${knifeProjectId}/images/
 }
 
 /**
+ * 转接场景（v1.71，?xreroute=1）的种子项目。
+ *
+ * 用户 2026-10-29 追加：「加一个shift+鼠标右键划过的线合并并添加转接口的功能」，
+ * 确认「同源才合并」。这里直接把合并后的结构写成 A → J → (C, D)：
+ *   · J 是 `Junction` 类型（没有自己的 resultUrl）；
+ *   · C、D 的上游都是 J，但截图里必须还能看到 A 的缩略图（转接透传）。
+ * 断言在 Node 侧（见 label === 'reroute'），页面只负责读数与交付截图。
+ */
+const rerouteProjectId = 'browser-reroute-proj';
+{
+  const url = (file) => `/api/aifisher/canvas/media/${knifeProjectId}/images/${file}`;
+  const rerouteNode = (id, type, x, y, extra = {}) => ({
+    id,
+    type,
+    x,
+    y,
+    // Junction 不写 title：要验节点框架的默认标题（画布上应该显示「转接」）
+    title: type === 'Junction' ? undefined : id,
+    prompt: type === 'Junction' ? '' : id,
+    status: 'success',
+    model: 'Upload',
+    resultUrl: type === 'Junction' ? undefined : url('knife-a.png'),
+    resultUrls: type === 'Junction' ? undefined : [url('knife-a.png')],
+    resultAspectRatio: type === 'Junction' ? undefined : '320/240',
+    aspectRatio: '4:3',
+    parentIds: [],
+    projectId: rerouteProjectId,
+    width: type === 'Junction' ? 34 : 320,
+    height: type === 'Junction' ? 34 : 240,
+    ...extra,
+  });
+  const saved = await dispatchApi(
+    'POST',
+    new URL('/api/aifisher/canvas/workflows', ORIGIN),
+    Buffer.from(
+      JSON.stringify({
+        id: rerouteProjectId,
+        revision: 0,
+        title: '转接真机验证',
+        nodes: [
+          rerouteNode('reroute-a', 'Image', 120, 260),
+          rerouteNode('reroute-j', 'Junction', 720, 280, { parentIds: ['reroute-a'] }),
+          rerouteNode('reroute-c', 'Image', 1080, 160, { parentIds: ['reroute-j'] }),
+          rerouteNode('reroute-d', 'Image', 1080, 520, { parentIds: ['reroute-j'] }),
+        ],
+        groups: [],
+        viewport: { x: 0, y: 0, zoom: 1 },
+      }),
+      'utf8',
+    ),
+  );
+  console.log(`[browser] 预置转接项目 ${rerouteProjectId}（A → J → C/D）→ ${saved.status}`);
+}
+
+/**
+ * 调色面板场景（v1.72，?xcompositor=1）的种子项目。
+ *
+ * 用户 2026-10-29 四条原话：
+ *   「调色面板 shift+鼠标右键划过线段没有创建转节点，退出主画布后发现在主画布上」
+ *   「shift 新建节点后节点不会跟随鼠标指针，操作和主画布不一致」
+ *   「预览图像没有放大移动功能」
+ *   「节点属性希望和 blender 一样显示在节点里，而不是在右侧」
+ * 一张上游 Image → 一个 Color Grade 节点，点卡片上的「合成器」进全屏层即可复现。
+ */
+const compositorProjectId = 'browser-compositor-proj';
+/** v1.73：新工具交付图单独一个项目 —— 和 ?xcompositor=1 共用一个项目时，
+ *  前一场「应用」会把 compositorGraph 写回节点，后一场再打开就不是默认图了。 */
+const compositorPanelProjectId = 'browser-compositor-panel-proj';
+
+/**
+ * 示波器验证用的「色彩测试卡」PNG（320×240）。
+ *
+ * 用上游那张纯红图看示波器没有意义（波形就是两条平线），也验不出靶位对不对。
+ * 这里现场编一张达芬奇调色台上最常用的图：
+ *   上半 = 75% 彩条（白/黄/青/绿/品红/红/蓝）→ 分量图是三段台阶、矢量图正好点亮六个靶位；
+ *   中段 = 0→100% 灰阶 → 波形图底部一条斜带、矢量图中心一串灰点；
+ *   下段 = 深色 + 一块肤色 → 肤色线附近应该有一点。
+ */
+function scopeChartPng() {
+  const crcTable = Array.from({ length: 256 }, (_, index) => {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1)
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    return value >>> 0;
+  });
+  const crc32 = (buffer) => {
+    let value = 0xffffffff;
+    for (const byte of buffer) value = crcTable[(value ^ byte) & 0xff] ^ (value >>> 8);
+    return (value ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length, 0);
+    const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body), 0);
+    return Buffer.concat([length, body, crc]);
+  };
+  const width = 320;
+  const height = 240;
+  const bars = [
+    [180, 180, 180],
+    [180, 180, 0],
+    [0, 180, 180],
+    [0, 180, 0],
+    [180, 0, 180],
+    [180, 0, 0],
+    [0, 0, 180],
+  ];
+  const raw = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y += 1) {
+    const row = y * (width * 3 + 1);
+    raw[row] = 0; // filter: none
+    for (let x = 0; x < width; x += 1) {
+      let rgb;
+      if (y < 160) {
+        rgb = bars[Math.min(bars.length - 1, Math.floor((x / width) * bars.length))];
+      } else if (y < 196) {
+        const level = Math.round((255 * x) / (width - 1));
+        rgb = [level, level, level];
+      } else if (x > width * 0.5) {
+        rgb = [204, 154, 128]; // 肤色块：应该落在矢量图的肤色线上
+      } else {
+        rgb = [26, 28, 32]; // 深色块：读暗部
+      }
+      raw[row + 1 + x * 3] = rgb[0];
+      raw[row + 2 + x * 3] = rgb[1];
+      raw[row + 3 + x * 3] = rgb[2];
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 2; // color type: truecolor
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(raw, { level: 9 })),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+{
+  const url = `/api/aifisher/canvas/media/${knifeProjectId}/images/knife-a.png`;
+  // 调色面板那一场换成色彩测试卡（见 scopeChartPng 的说明）：示波器才有东西可读
+  const chartDir = join(
+    fakeHome,
+    'storages',
+    'dsh-aifisher-canvas',
+    'media',
+    compositorPanelProjectId,
+    'images',
+  );
+  mkdirSync(chartDir, { recursive: true });
+  const chart = scopeChartPng();
+  writeFileSync(join(chartDir, 'scope-chart.png'), chart);
+  const chartUrl = `/api/aifisher/canvas/media/${compositorPanelProjectId}/images/scope-chart.png`;
+  const seeds = [
+    [compositorProjectId, '调色面板真机验证', 'comp-src', 'comp-grade', url],
+    [compositorPanelProjectId, '调色面板新工具', 'panel-src', 'panel-grade', chartUrl],
+  ];
+  for (const [id, title, srcId, gradeId, sourceUrl] of seeds) {
+    const saved = await dispatchApi(
+      'POST',
+      new URL('/api/aifisher/canvas/workflows', ORIGIN),
+      Buffer.from(
+        JSON.stringify({
+          id,
+          revision: 0,
+          title,
+          nodes: [
+            {
+              id: srcId,
+              type: 'Image',
+              x: 80,
+              y: 460,
+              title: '上游',
+              prompt: '上游',
+              status: 'success',
+              model: 'Upload',
+              resultUrl: sourceUrl,
+              resultUrls: [sourceUrl],
+              resultAspectRatio: '320/240',
+              aspectRatio: '4:3',
+              parentIds: [],
+              projectId: id,
+              width: 320,
+              height: 240,
+            },
+            {
+              id: gradeId,
+              type: 'Color Grade',
+              x: 560,
+              y: 460,
+              title: '调色',
+              status: 'idle',
+              parentIds: [srcId],
+              projectId: id,
+            },
+          ],
+          groups: [],
+          viewport: { x: 0, y: 0, zoom: 1 },
+        }),
+        'utf8',
+      ),
+    );
+    console.log(`[browser] 预置调色面板项目 ${id}（图像 → 调色）→ ${saved.status}`);
+  }
+}
+
+/**
  * 「项目归档」场景（v1.42，?xarchive=1）的种子项目。
  *
  * 带两个节点 + 两张素材：面板上「2 个节点 · 素材 2 个（x KB）」才有真数字可对，
@@ -1458,6 +1670,9 @@ const HOST_PAGE = `<!doctype html>
         // 画布挂载容器自己：DSH 布局把它撑得比画布面板宽（改之前就有的宿主层现象），
         // 它没有任何可见绘制，也不是「贴边元素」，别进越界清单（否则 node-search / chat 场景恒红）。
         if (el.classList.contains('af-canvas-mount')) continue;
+        // 画布内部的 SVG 连线层是「铺满内容区」的绝对定位层，视图一聚焦就会整体越过
+        // 侧边栏（连线跟着节点走，是画布的正常表现），不是贴边 UI 元素。
+        if (el.tagName.toLowerCase() === 'svg') continue;
         // 节点内容（节点框与它内部的一切）：世界坐标里节点本来就能被拖到任意位置，
         // 越到侧边栏上方是画布的正常表现，不是「贴边元素跑到 DSH 界面上」。
         // 这条以前不会红，是因为场景里恰好没有节点落在侧边栏那一段；node-search 场景
@@ -1547,6 +1762,16 @@ const HOST_PAGE = `<!doctype html>
         archive: archiveSteps,
         /** v1.49：切刀（?xknife=1 场景，见 buildKnifeScene） */
         knife: knifeSteps,
+        /** v1.71：转接（?xreroute=1 场景，见 buildRerouteScene） */
+        reroute: rerouteSteps,
+        /** v1.72：调色面板（?xcompositor=1 场景，见 buildCompositorScene） */
+        compositor: compositorSteps,
+        /** v1.73：调色面板新工具（?xcompositor=panel 场景，见 buildCompositorPanelScene） */
+        compositorPanel: compositorPanelSteps,
+        /** v1.75：四轮调色（?xcompositor=wheels 场景，见 buildCompositorWheelsScene） */
+        compositorWheels: compositorWheelsSteps,
+        /** v1.79：混合节点三输入 + 深色下拉（?xcompositor=mix 场景，见 buildCompositorMixScene） */
+        compositorMix: compositorMixSteps,
       };
       // 网格探针会临时把底盘钉到视口左上角（让 offsetX 可预测），
       // 所以必须放在 leaks 采完之后 —— 否则那次临时移动会被当成「越界压住侧边栏」。
@@ -4670,8 +4895,7 @@ const HOST_PAGE = `<!doctype html>
     };
     const buildKnifeScene = async () => {
       if (!knifeScene) return;
-      try {
-        // ⚠️ 底盘/桥都要**等到画布真挂上**再取：场景函数与 mountCanvas 是同一条脚本，
+      try {        // ⚠️ 底盘/桥都要**等到画布真挂上**再取：场景函数与 mountCanvas 是同一条脚本，
         // 一开始这里还是空的（第一版就把 surface 在等之前抓死了，后面 dispatchEvent 直接 null）。
         const surfaceOf = () => document.getElementById('canvas-background');
         const edgeGroups = () =>
@@ -4755,6 +4979,1060 @@ const HOST_PAGE = `<!doctype html>
       knifeSteps.done = true;
     };
 
+    /**
+     * 转接场景（?xreroute=1，v1.71）：直接看合并后的画布（A → J → C/D）。
+     * jsdom（test-canvas-reroute）验的是手势与结构；这一场只验「真浏览器里
+     * J 卡片长什么样、透传缩略图对不对、连线是不是三条」。
+     */
+    const rerouteScene = new URLSearchParams(location.search).get('xreroute') === '1';
+    const rerouteSteps = {
+      done: false,
+      error: '',
+      image: '',
+      width: 0,
+      height: 0,
+      edges: 0,
+      text: '',
+      junction: false,
+      radius: '',
+      bridge: false,
+    };
+    const buildRerouteScene = async () => {
+      if (!rerouteScene) return;
+      try {
+        await until(() => document.querySelector('img[alt="转接上游"]'), 20000);
+        await wait(700);
+        const image = document.querySelector('img[alt="转接上游"]');
+        const card = image && image.closest('[data-node-id]');
+        const rect = card && card.getBoundingClientRect();
+        const dot = card && card.querySelector('[data-fisherai-junction]');
+        rerouteSteps.image = (image && image.getAttribute('src')) || '';
+        rerouteSteps.width = Math.round((rect && rect.width) || 0);
+        rerouteSteps.height = Math.round((rect && rect.height) || 0);
+        rerouteSteps.text = ((card && card.textContent) || '').slice(0, 80);
+        rerouteSteps.junction = !!dot;
+        rerouteSteps.radius = dot ? getComputedStyle(dot).borderRadius : '';
+        rerouteSteps.edges = document.querySelectorAll(
+          '#canvas-viewport-content g[data-fisherai-edge-parent-id]',
+        ).length;
+        rerouteSteps.bridge = typeof window.__FISHERAI_CANVAS_REROUTE__?.merge === 'function';
+      } catch (error) {
+        rerouteSteps.error = String((error && error.stack) || error);
+      }
+      rerouteSteps.done = true;
+    };
+
+    /**
+     * 调色面板场景（?xcompositor=1，v1.72）。
+     *
+     * 用户 2026-10-29 四条原话的实机取证：
+     *   ① 节点属性在节点体内（没有右侧面板）；
+     *   ② 上方预览能滚轮缩放 / 拖动平移；
+     *   ③ Shift+右键**在连线上起手**也能合出转接点，而且不会建到下面的主画布上；
+     *   ④ Shift+A 建出来的节点跟着鼠标走、左键放下。
+     * 交付截图停在合成器里：能直接看到「参数长在卡片上 + 预览缩放读数」。
+     */
+    const compositorScene = new URLSearchParams(location.search).get('xcompositor') === '1';
+    const compositorSteps = {
+      done: false,
+      error: '',
+      opened: false,
+      inspector: true,
+      nodeWidth: 0,
+      canvasNodesBefore: 0,
+      canvasNodesAfter: 0,
+      zoomLabel: '',
+      zoomAfterWheel: '',
+      previewTransform: '',
+      addedKind: '',
+      paramsInNode: 0,
+      paramWidth: 0,
+      // v1.75：色彩平衡 = 四轮调色
+      wheels: 0,
+      wheelValues: 0,
+      viewScale: 0,
+      followDelta: null,
+      followWorldDelta: null,
+      marqueeAfterPlace: true,
+      rerouteAfterMerge: 0,
+      delivery: null,
+      // v1.73
+      webgl2: false,
+      scopeTabs: 0,
+      scopeHasImage: false,
+      curvePoints: 0,
+      spliceHighlight: false,
+      insertEdgesBefore: 0,
+      insertEdgesAfter: 0,
+      insertTarget: null,
+      insertSpliceTarget: null,
+      // v1.78：Ctrl+Z 撤销 / 重做
+      undoNodesBefore: 0,
+      undoNodesAfterAdd: 0,
+      undoNodesAfterUndo: 0,
+      undoNodesAfterRedo: 0,
+      undoNodesReverted: 0,
+      undoCanRedo: false,
+      undoError: '',
+      canvasNodesBeforeApply: 0,
+      canvasNodesAfterApply: 0,
+      mediaImagesBeforeApply: 0,
+      mediaImagesAfterApply: 0,
+      mediaSamples: null,
+      applied: false,
+      applyTimedOut: false,
+      applyToast: '',
+      // v1.77：Esc = 保存并退出（用户「希望按退出也会输出保存图像」）
+      reopened: false,
+      escEdited: false,
+      escClosed: false,
+      escTimedOut: false,
+      escImageBefore: 0,
+      escImageAfter: 0,
+      escToast: '',
+      escError: '',
+    };
+    const buildCompositorScene = async () => {
+      if (!compositorScene) return;
+      try {
+        await until(() => document.querySelector('[data-fisherai-open-compositor]'), 20000);
+        await wait(500);
+        document
+          .querySelector('[data-fisherai-open-compositor]')
+          .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await until(() => document.querySelector('.cg-root'), 8000);
+        await wait(800);
+        const root = document.querySelector('.cg-root');
+        compositorSteps.opened = !!root;
+        compositorSteps.inspector = !!root.querySelector('.cg-inspector');
+        const stage = root.querySelector('.cg-stage');
+        compositorSteps.canvasNodesBefore = document.querySelectorAll(
+          '#canvas-viewport-content [data-node-id]',
+        ).length;
+
+        // ---- ② 预览缩放 / 平移
+        const preview = root.querySelector('.cg-preview');
+        const zoomLabel = root.querySelector('.cg-preview-zoom');
+        compositorSteps.zoomLabel = String(zoomLabel.textContent || '');
+        const previewBox = preview.getBoundingClientRect();
+        const cx = previewBox.left + previewBox.width / 2;
+        const cy = previewBox.top + previewBox.height / 2;
+        preview.dispatchEvent(
+          new WheelEvent('wheel', { deltaY: -240, clientX: cx, clientY: cy, bubbles: true, cancelable: true }),
+        );
+        await wait(120);
+        compositorSteps.zoomAfterWheel = String(zoomLabel.textContent || '');
+        preview.dispatchEvent(
+          new PointerEvent('pointerdown', {
+            button: 0, buttons: 1, clientX: cx, clientY: cy, pointerId: 81, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+          }),
+        );
+        window.dispatchEvent(
+          new PointerEvent('pointermove', { clientX: cx + 36, clientY: cy + 24, bubbles: true, cancelable: true }),
+        );
+        window.dispatchEvent(
+          new PointerEvent('pointerup', { button: 0, buttons: 0, clientX: cx + 36, clientY: cy + 24, bubbles: true, cancelable: true }),
+        );
+        await wait(120);
+        compositorSteps.previewTransform = String(root.querySelector('.cg-preview-canvas').style.transform || '');
+        preview.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+
+        // ---- ④ Shift+A 添加「色彩平衡」：参数在卡片体内 + 节点跟鼠标
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'a', shiftKey: true, bubbles: true, cancelable: true }),
+        );
+        await wait(200);
+        const items = [...document.querySelectorAll('.cg-menu-item')];
+        const balance = items.find((item) => item.textContent === '色彩平衡');
+        if (!balance) throw new Error('Shift+A 菜单里没有「色彩平衡」');
+        balance.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await wait(200);
+        const cardNodes = [...root.querySelectorAll('.cg-node')];
+        const added = cardNodes[cardNodes.length - 1];
+        // 卡片宽度用 offsetWidth（布局宽度）：getBoundingClientRect 会带上 fitView 的 world 缩放
+        compositorSteps.nodeWidth = Math.round(added.offsetWidth);
+        compositorSteps.addedKind = added.dataset.nodeId || '';
+        compositorSteps.paramsInNode = added.querySelectorAll('.cg-param').length;
+        // v1.75：色彩平衡换成四轮调色（暗部/中灰/亮部/偏移），参数不再是 .cg-param 行
+        compositorSteps.wheels = added.querySelectorAll('.cg-wheel').length;
+        compositorSteps.wheelValues = added.querySelectorAll('.cg-wheel-value').length;
+        const firstParam = added.querySelector('.cg-wheel-values');
+        compositorSteps.paramWidth = Math.round(firstParam ? firstParam.offsetWidth : 0);
+        compositorSteps.viewScale =
+          Number(window.__FISHERAI_COMPOSITOR__?.report?.()?.view?.scale ?? 0) || 0;
+        const stageBox = stage.getBoundingClientRect();
+        const sx = stageBox.left + stageBox.width / 2;
+        const sy = stageBox.top + stageBox.height / 2;
+        const startPos = [Math.round(added.offsetLeft), Math.round(added.offsetTop)];
+        // 同步连发两下、只量「第二下相对第一下」的位移：宿主页每 250ms 会派发一次
+        // 「把指针挪走」的 pointermove，夹在中间就会把节点先拖走一段（跟随本身是对的，
+        // 只是量到的位移不再只是鼠标那一下）。
+        window.dispatchEvent(new PointerEvent('pointermove', { clientX: sx, clientY: sy, bubbles: true }));
+        const midRect = added.getBoundingClientRect();
+        const midPos = [Math.round(added.offsetLeft), Math.round(added.offsetTop)];
+        window.dispatchEvent(new PointerEvent('pointermove', { clientX: sx + 70, clientY: sy + 50, bubbles: true }));
+        const movedRect = added.getBoundingClientRect();
+        compositorSteps.followDelta = [
+          Math.round(movedRect.left - midRect.left),
+          Math.round(movedRect.top - midRect.top),
+        ];
+        compositorSteps.followWorldDelta = [
+          Math.round(added.offsetLeft) - midPos[0],
+          Math.round(added.offsetTop) - midPos[1],
+        ];
+        compositorSteps.followStart = startPos;
+        compositorSteps.followEnd = [Math.round(added.offsetLeft), Math.round(added.offsetTop)];
+        // 交付图要看得见「参数长在卡片里」：跟随是位移式的，趁还没放下把卡片挪到台面上
+        // （同步派发，中间不能让宿主页那片 250ms 的 pointermove 插进来改基线）
+        const target = [330, 110];
+        const scale = Number(compositorSteps.viewScale) || 1;
+        window.dispatchEvent(
+          new PointerEvent('pointermove', {
+            clientX: sx + 70 + (target[0] - added.offsetLeft) * scale,
+            clientY: sy + 50 + (target[1] - added.offsetTop) * scale,
+            bubbles: true,
+          }),
+        );
+        compositorSteps.followEnd = [Math.round(added.offsetLeft), Math.round(added.offsetTop)];
+        await wait(80);
+        stage.dispatchEvent(
+          new PointerEvent('pointerdown', {
+            button: 0, buttons: 1, clientX: sx + 70, clientY: sy + 50, pointerId: 82, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+          }),
+        );
+        await wait(120);
+        compositorSteps.marqueeAfterPlace = !!root.querySelector('.cg-marquee');
+
+        // ---- ③ Shift+右键**压在连线上**起手：合出转接点（主画布不能多出节点）
+        // 取第二条（输入→预览）：合并点落在下方右侧，交付图里不会压住刚摆好的卡片
+        const hit = [...root.querySelectorAll('.cg-edge-hit')].pop();
+        const hitBox = hit.getBoundingClientRect();
+        const hx = hitBox.left + hitBox.width / 2;
+        const hy = hitBox.top + hitBox.height / 2;
+        const mergeEvent = (type, clientX, clientY, buttons) =>
+          new PointerEvent(type, {
+            bubbles: true, cancelable: true, button: 2, buttons,
+            shiftKey: true, clientX, clientY, pointerId: 83, pointerType: 'mouse', isPrimary: true,
+          });
+        hit.dispatchEvent(mergeEvent('pointerdown', hx, hy, 2));
+        await wait(60);
+        window.dispatchEvent(mergeEvent('pointermove', hx, hy - 36, 2));
+        await wait(60);
+        window.dispatchEvent(mergeEvent('pointermove', hx, hy + 36, 2));
+        await wait(120);
+        window.dispatchEvent(mergeEvent('pointerup', hx, hy + 36, 0));
+        await wait(300);
+        compositorSteps.rerouteAfterMerge = root.querySelectorAll('.cg-node-compact').length;
+        await wait(200);
+        compositorSteps.canvasNodesAfter = document.querySelectorAll(
+          '#canvas-viewport-content [data-node-id]',
+        ).length;
+
+        // ---- ⑤ v1.73：示波器 / 曲线 / 拖节点压线插入 / 应用后落成品图
+        const report = () => window.__FISHERAI_COMPOSITOR__?.report?.() ?? {};
+        compositorSteps.webgl2 = !!document.createElement('canvas').getContext('webgl2');
+        compositorSteps.scopeTabs = root.querySelectorAll('.cg-scope-tab').length;
+        compositorSteps.scopeHasImage = report().scope?.hasImage === true;
+
+        // 曲线节点：Shift+A → 曲线 → 卡片里应有 2 个可拖端点
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'a', shiftKey: true, bubbles: true, cancelable: true }),
+        );
+        await wait(180);
+        [...document.querySelectorAll('.cg-menu-item')]
+          .find((item) => item.textContent === '曲线')
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await wait(160);
+        const curveSvg = root.querySelector('.cg-curve');
+        compositorSteps.curvePoints = curveSvg
+          ? curveSvg.querySelectorAll('.cg-curve-point').length
+          : 0;
+        // 跟随状态下第一下左键 = 放下（放到舞台左上角，别压到线）
+        const stageRect = stage.getBoundingClientRect();
+        stage.dispatchEvent(
+          new PointerEvent('pointerdown', {
+            button: 0, buttons: 1,
+            clientX: stageRect.left + 24, clientY: stageRect.top + 24,
+            pointerId: 90, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+          }),
+        );
+        await wait(120);
+
+        // ---- 新建一个「亮度/对比度」后直接把它拖到两条线之间：压线松手自动串进去
+        const wire = [...root.querySelectorAll('path.cg-edge')].find((path) => path.dataset.edgeId);
+        const edgesBeforeInsert = Number(report().edgeCount);
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'a', shiftKey: true, bubbles: true, cancelable: true }),
+        );
+        await wait(180);
+        [...document.querySelectorAll('.cg-menu-item')]
+          .find((item) => item.textContent === '亮度/对比度')
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await wait(160);
+        const fresh = [...root.querySelectorAll('.cg-node')].pop();
+        if (wire && fresh) {
+          const mid = wire.getPointAtLength(wire.getTotalLength() / 2);
+          const wirePoint = { x: stageRect.left + mid.x, y: stageRect.top + mid.y };
+          const freshBox = fresh.getBoundingClientRect();
+          const deltaX = wirePoint.x - (freshBox.left + freshBox.width / 2);
+          const deltaY = wirePoint.y - (freshBox.top + freshBox.height / 2);
+          // 跟随状态：第一次 pointermove 只定基线，第二次才是位移；down → up 同步连发，
+          // 避免宿主页每 250ms 的「把指针挪走」插进来。
+          window.dispatchEvent(
+            new PointerEvent('pointermove', { clientX: 200, clientY: 200, bubbles: true }),
+          );
+          window.dispatchEvent(
+            new PointerEvent('pointermove', {
+              clientX: 200 + deltaX, clientY: 200 + deltaY, bubbles: true,
+            }),
+          );
+          compositorSteps.spliceHighlight = !!root.querySelector('.cg-edge-splice');
+          compositorSteps.insertSpliceTarget = report().insertTarget ?? null;
+          compositorSteps.insertEdgesBefore = Number(report().edgeCount);
+          stage.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              button: 0, buttons: 1,
+              clientX: 200 + deltaX, clientY: 200 + deltaY,
+              pointerId: 91, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+            }),
+          );
+          await wait(240);
+        }
+        compositorSteps.insertEdgesBefore = compositorSteps.insertEdgesBefore || edgesBeforeInsert;
+        compositorSteps.insertEdgesAfter = Number(report().edgeCount);
+        compositorSteps.insertTarget = report().insertTarget ?? null;
+
+        // ---- v1.78：Ctrl+Z 撤销 / Ctrl+Shift+Z 重做（用户「添加 ctrl+z 撤销功能」）
+        // 新增一个节点 → 撤销 → 重做 → 再撤销回原样，真实键盘事件 + 真实历史栈。
+        try {
+          compositorSteps.undoNodesBefore = Number(report().nodeCount);
+          document.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'a', shiftKey: true, bubbles: true, cancelable: true }),
+          );
+          await wait(180);
+          [...document.querySelectorAll('.cg-menu-item')]
+            .find((item) => item.textContent === '曝光')
+            ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          await wait(200);
+          compositorSteps.undoNodesAfterAdd = Number(report().nodeCount);
+          document.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }),
+          );
+          await wait(180);
+          compositorSteps.undoNodesAfterUndo = Number(report().nodeCount);
+          compositorSteps.undoCanRedo = report().history?.canRedo === true;
+          document.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, shiftKey: true, bubbles: true, cancelable: true }),
+          );
+          await wait(180);
+          compositorSteps.undoNodesAfterRedo = Number(report().nodeCount);
+          // 收尾：把测试节点撤掉，后面的「应用 / Esc 保存」按原状态跑
+          document.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true }),
+          );
+          await wait(180);
+          compositorSteps.undoNodesReverted = Number(report().nodeCount);
+        } catch (error) {
+          compositorSteps.undoError = String((error && error.stack) || error);
+        }
+
+        // ---- 交付图：先记下合成器里的读数（参数在卡片里、预览有缩放）
+        compositorSteps.delivery = {
+          previewLabel: String(zoomLabel.textContent || ''),
+          params: root.querySelectorAll('.cg-param').length,
+          wheels: root.querySelectorAll('.cg-wheel').length,
+          cards: root.querySelectorAll('.cg-node').length,
+        };
+
+        // ---- ⑥ 点「应用」：合成结果落盘 → 合成器关闭 → 主画布调色节点右边多一张成品图
+        compositorSteps.canvasNodesBeforeApply = document.querySelectorAll(
+          '#canvas-viewport-content [data-node-id]',
+        ).length;
+        compositorSteps.mediaImagesBeforeApply = document.querySelectorAll(
+          '#canvas-viewport-content img[src*="/media/"]',
+        ).length;
+        if (compositorSteps.webgl2) {
+          root
+            .querySelector('[data-act="apply"]')
+            ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          try {
+            await until(() => !document.querySelector('.cg-root'), 12000);
+          } catch {
+            compositorSteps.applyTimedOut = true;
+          }
+          await wait(1200);
+          compositorSteps.applied = !document.querySelector('.cg-root');
+          compositorSteps.applyToast = String(
+            document.querySelector('.cg-toast.cg-show')?.textContent || '',
+          );
+          compositorSteps.canvasNodesAfterApply = document.querySelectorAll(
+            '#canvas-viewport-content [data-node-id]',
+          ).length;
+          compositorSteps.mediaImagesAfterApply = document.querySelectorAll(
+            '#canvas-viewport-content img[src*="/media/"]',
+          ).length;
+          // 取每张成品图缩到 1×1 的颜色：导出曾经从 RGBA16F 直接 readPixels UNSIGNED_BYTE
+          // （非法组合）拿到全黑，这里用像素采样把它钉住。
+          compositorSteps.mediaSamples = [
+            ...document.querySelectorAll('#canvas-viewport-content img[src*="/media/"]'),
+          ].map((img) => {
+            try {
+              const canvas = document.createElement('canvas');
+              canvas.width = 1;
+              canvas.height = 1;
+              const context = canvas.getContext('2d');
+              context.drawImage(img, 0, 0, 1, 1);
+              const data = context.getImageData(0, 0, 1, 1).data;
+              return {
+                complete: img.complete === true,
+                naturalWidth: img.naturalWidth,
+                px: [data[0], data[1], data[2], data[3]],
+              };
+            } catch {
+              return null;
+            }
+          });
+
+          // ---- v1.77：再开一次合成器，加个节点让图变「有改动」，按 Esc → 保存并退出。
+          // 用户 2026-10-29：「没有应用按钮啊？希望按退出也会输出保存图像」。
+          try {
+            document
+              .querySelector('[data-fisherai-open-compositor]')
+              ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            await until(() => document.querySelector('.cg-root'), 8000);
+            await wait(500);
+            compositorSteps.reopened = !!document.querySelector('.cg-root');
+            compositorSteps.escImageBefore = document.querySelectorAll(
+              '#canvas-viewport-content img[src*="/media/"]',
+            ).length;
+            document.dispatchEvent(
+              new KeyboardEvent('keydown', { key: 'a', shiftKey: true, bubbles: true, cancelable: true }),
+            );
+            await wait(200);
+            [...document.querySelectorAll('.cg-menu-item')]
+              .find((item) => item.textContent === '曝光')
+              ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+            await wait(220);
+            // Shift+A 出来的节点先「跟随鼠标」，这一下左键是把它放下；
+            // 不放下的话 Esc 只会结束跟随（合成器的既有手势），不会走到保存。
+            const escStage = document.querySelector('.cg-stage');
+            const escRect = escStage.getBoundingClientRect();
+            escStage.dispatchEvent(
+              new PointerEvent('pointerdown', {
+                button: 0, buttons: 1,
+                clientX: escRect.left + 32, clientY: escRect.top + 32,
+                pointerId: 95, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+              }),
+            );
+            await wait(160);
+            compositorSteps.escEdited =
+              window.__FISHERAI_COMPOSITOR__?.report?.()?.edited === true;
+            document.dispatchEvent(
+              new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+            );
+            try {
+              await until(() => !document.querySelector('.cg-root'), 12000);
+            } catch {
+              compositorSteps.escTimedOut = true;
+            }
+            await wait(1200);
+            compositorSteps.escClosed = !document.querySelector('.cg-root');
+            compositorSteps.escToast = String(
+              document.querySelector('.cg-toast.cg-show')?.textContent || '',
+            );
+            compositorSteps.escImageAfter = document.querySelectorAll(
+              '#canvas-viewport-content img[src*="/media/"]',
+            ).length;
+          } catch (error) {
+            compositorSteps.escError = String((error && error.stack) || error);
+          }
+        }
+      } catch (error) {
+        compositorSteps.error = String((error && error.stack) || error);
+      }
+      compositorSteps.done = true;
+    };
+
+    /**
+     * 调色面板「新工具长什么样」（?xcompositor=panel，v1.73）。
+     * 交付图：示波器 + 曲线编辑器 + 全宽滑块同屏；断言面板/曲线/画布都有实际尺寸。
+     */
+    const compositorPanelScene =
+      new URLSearchParams(location.search).get('xcompositor') === 'panel';
+    const compositorPanelSteps = {
+      done: false,
+      error: '',
+      scopeWidth: 0,
+      scopeHeight: 0,
+      scopeCanvasWidth: 0,
+      scopeWidthBefore: 0,
+      scopeWidthAfter: 0,
+      scopeHeightBefore: 0,
+      scopeHeightAfter: 0,
+      scopeReset: null,
+      scopeKind: '',
+      scopeInk: 0,
+      scopePixels: [],
+      curveWidth: 0,
+      curvePoints: 0,
+      sliders: 0,
+      hueValue: '',
+    };
+    const buildCompositorPanelScene = async () => {
+      if (!compositorPanelScene) return;
+      try {
+        await until(() => document.querySelector('[data-fisherai-open-compositor]'), 20000);
+        await wait(400);
+        document
+          .querySelector('[data-fisherai-open-compositor]')
+          .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await until(() => document.querySelector('.cg-root'), 8000);
+        await wait(700);
+        const root = document.querySelector('.cg-root');
+        const stage = root.querySelector('.cg-stage');
+        const stageBox = stage.getBoundingClientRect();
+        let pointerId = 60;
+        const placeNew = async (kindLabel, worldX, worldY) => {
+          document.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'a', shiftKey: true, bubbles: true, cancelable: true }),
+          );
+          await wait(160);
+          const item = [...document.querySelectorAll('.cg-menu-item')].find(
+            (entry) => entry.textContent === kindLabel,
+          );
+          if (!item) throw new Error('菜单里没有 ' + kindLabel);
+          item.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          await wait(160);
+          const card = [...root.querySelectorAll('.cg-node')].pop();
+          const view = window.__FISHERAI_COMPOSITOR__.report().view;
+          const box = card.getBoundingClientRect();
+          const dx = stageBox.left + view.x + worldX * view.scale - box.left;
+          const dy = stageBox.top + view.y + worldY * view.scale - box.top;
+          pointerId += 1;
+          // 跟随状态：第一次 move 定基线，第二次才是位移；move 与 down 同步连发
+          window.dispatchEvent(new PointerEvent('pointermove', { clientX: 260, clientY: 260, bubbles: true }));
+          window.dispatchEvent(
+            new PointerEvent('pointermove', { clientX: 260 + dx, clientY: 260 + dy, bubbles: true }),
+          );
+          stage.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              button: 0, buttons: 1, clientX: 260 + dx, clientY: 260 + dy,
+              pointerId, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+            }),
+          );
+          await wait(160);
+          return card;
+        };
+        await placeNew('曲线', 980, 110);
+        await placeNew('色相/饱和度', 980, 350);
+        // 在曲线中间点一下：加一个控制点，截图里能看见曲线被抬起来
+        const curveSvg = root.querySelector('.cg-curve');
+        if (curveSvg) {
+          const box = curveSvg.getBoundingClientRect();
+          curveSvg.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              button: 0, buttons: 1,
+              clientX: box.left + box.width * 0.5, clientY: box.top + box.height * 0.42,
+              pointerId: pointerId + 1, pointerType: 'mouse', isPrimary: true,
+              bubbles: true, cancelable: true,
+            }),
+          );
+          curveSvg.dispatchEvent(
+            new PointerEvent('pointerup', {
+              button: 0, buttons: 0,
+              clientX: box.left + box.width * 0.5, clientY: box.top + box.height * 0.42,
+              bubbles: true,
+            }),
+          );
+          await wait(140);
+        }
+        // 示波器（v1.74 达芬奇同款）：先把面板往左拉宽（交付图里波形看得清），
+        // 再切到本场要求的图（?scope=parade / vectorscope，缺省波形图）。
+        const gripX = root.querySelector('.cg-scope-grip-x');
+        const panelEl = root.querySelector('.cg-scopes');
+        const widthBefore = panelEl ? Math.round(panelEl.getBoundingClientRect().width) : 0;
+        if (gripX && panelEl) {
+          const gripBox = gripX.getBoundingClientRect();
+          const startX = gripBox.left + gripBox.width / 2;
+          const startY = gripBox.top + 60;
+          // down → move → up 同步连发：宿主页每 250ms 会插一条「把指针挪走」的 pointermove，
+          // 中间一旦 await，宽度就会被那条事件拽到上限。
+          gripX.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              button: 0, buttons: 1, clientX: startX, clientY: startY,
+              pointerId: 95, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+            }),
+          );
+          window.dispatchEvent(
+            new PointerEvent('pointermove', {
+              clientX: startX - 200, clientY: startY, buttons: 1, bubbles: true,
+            }),
+          );
+          window.dispatchEvent(
+            new PointerEvent('pointerup', { clientX: startX - 200, clientY: startY, bubbles: true }),
+          );
+          await wait(220);
+        }
+        compositorPanelSteps.scopeWidthBefore = widthBefore;
+        compositorPanelSteps.scopeWidthAfter = panelEl
+          ? Math.round(panelEl.getBoundingClientRect().width)
+          : 0;
+        // 再量一次高度拉动条：拖下边缘变高、双击复位（复位会把宽度也一起回默认，
+        // 所以放在「变宽」之后再试，最后重新拉宽一次留给截图）
+        const gripY = root.querySelector('.cg-scope-grip-y');
+        const heightBefore = panelEl ? Math.round(panelEl.getBoundingClientRect().height) : 0;
+        if (gripY && panelEl) {
+          const gripBox = gripY.getBoundingClientRect();
+          const startX = gripBox.left + gripBox.width / 2;
+          const startY = gripBox.top + gripBox.height / 2;
+          gripY.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              button: 0, buttons: 1, clientX: startX, clientY: startY,
+              pointerId: 96, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+            }),
+          );
+          window.dispatchEvent(
+            new PointerEvent('pointermove', { clientX: startX, clientY: startY + 90, buttons: 1, bubbles: true }),
+          );
+          window.dispatchEvent(
+            new PointerEvent('pointerup', { clientX: startX, clientY: startY + 90, bubbles: true }),
+          );
+          await wait(160);
+        }
+        compositorPanelSteps.scopeHeightBefore = heightBefore;
+        compositorPanelSteps.scopeHeightAfter = panelEl
+          ? Math.round(panelEl.getBoundingClientRect().height)
+          : 0;
+        gripY?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+        await wait(140);
+        compositorPanelSteps.scopeReset = {
+          width: Math.round((panelEl || { getBoundingClientRect: () => ({ width: 0 }) }).getBoundingClientRect().width),
+          height: Math.round((panelEl || { getBoundingClientRect: () => ({ height: 0 }) }).getBoundingClientRect().height),
+        };
+        if (gripX && panelEl) {
+          // 复位之后重新拉宽，截图里示波器才是宽的
+          const gripBox = gripX.getBoundingClientRect();
+          const startX = gripBox.left + gripBox.width / 2;
+          const startY = gripBox.top + 80;
+          gripX.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              button: 0, buttons: 1, clientX: startX, clientY: startY,
+              pointerId: 97, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+            }),
+          );
+          window.dispatchEvent(
+            new PointerEvent('pointermove', { clientX: startX - 200, clientY: startY, buttons: 1, bubbles: true }),
+          );
+          window.dispatchEvent(
+            new PointerEvent('pointerup', { clientX: startX - 200, clientY: startY, bubbles: true }),
+          );
+          await wait(220);
+        }
+        const wantScope = new URLSearchParams(location.search).get('scope') || 'waveform';
+        root
+          .querySelector('.cg-scope-tab[data-scope="' + wantScope + '"]')
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await wait(320);
+        compositorPanelSteps.scopeKind = window.__FISHERAI_COMPOSITOR__?.report?.().scope?.kind ?? '';
+        {
+          // 示波器画布里到底画出东西没有：数一遍非背景像素（背景是 #08080a）
+          const canvas = root.querySelector('.cg-scope-canvas');
+          try {
+            const context = canvas.getContext('2d');
+            const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            let ink = 0;
+            let total = 0;
+            for (let index = 0; index < data.length; index += 4 * 7) {
+              total += 1;
+              if (Math.max(data[index], data[index + 1], data[index + 2]) > 40) ink += 1;
+            }
+            compositorPanelSteps.scopeInk = total ? Number((ink / total).toFixed(4)) : 0;
+            compositorPanelSteps.scopePixels = [canvas.width, canvas.height];
+          } catch (error) {
+            compositorPanelSteps.scopeInkError = String(error);
+          }
+        }
+        // 适应视图：把新加的节点也框进来
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', bubbles: true }));
+        await wait(320);
+        const scopePanel = root.querySelector('.cg-scopes');
+        const scopeCanvas = root.querySelector('.cg-scope-canvas');
+        const panelBox = scopePanel ? scopePanel.getBoundingClientRect() : null;
+        const scopeBox = scopeCanvas ? scopeCanvas.getBoundingClientRect() : null;
+        const curveBox = root.querySelector('.cg-curve')
+          ? root.querySelector('.cg-curve').getBoundingClientRect()
+          : null;
+        compositorPanelSteps.scopeWidth = Math.round(panelBox ? panelBox.width : 0);
+        compositorPanelSteps.scopeHeight = Math.round(panelBox ? panelBox.height : 0);
+        compositorPanelSteps.scopeCanvasWidth = Math.round(scopeBox ? scopeBox.width : 0);
+        compositorPanelSteps.curveWidth = Math.round(curveBox ? curveBox.width : 0);
+        compositorPanelSteps.curvePoints = root.querySelectorAll('.cg-curve-point').length;
+        compositorPanelSteps.sliders = root.querySelectorAll('.cg-slider').length;
+        compositorPanelSteps.hueValue = String(
+          root.querySelector('.cg-slider[data-param="hue"] .cg-slider-value')?.textContent || '',
+        );
+        await wait(600);
+      } catch (error) {
+        compositorPanelSteps.error = String((error && error.stack) || error);
+      }
+      compositorPanelSteps.done = true;
+    };
+
+    /**
+     * 复刻 DSH 桌面端的两条环境事实（否则 harness 里的截图比真机好、缺陷看不出来）：
+     *  ① nova 主题把 * / ::before / ::after 全设成 corner-shape: superellipse(1.5)
+     *     —— border-radius:50% 会变成超椭圆（用户 2026-10-30 报「色轮变方」的根因）；
+     *  ② Windows 顶上 40px 是系统 caption 带，网页收不到点击（「上方按钮点不动」）。
+     * 注意这段跑在 HOST_PAGE 模板字符串里：不能出现反引号，也不能出现裸的大括号插值。
+     */
+    const applyDshDesktopEmulation = () => {
+      if (!document.querySelector('style[data-harness-corner-shape]')) {
+        const cornerStyle = document.createElement('style');
+        cornerStyle.setAttribute('data-harness-corner-shape', 'true');
+        cornerStyle.textContent =
+          '@supports (corner-shape: superellipse(1.5)) { :root { --dsw-corner-shape: superellipse(1.5); } *, ::before, ::after { corner-shape: var(--dsw-corner-shape); } }';
+        document.head.append(cornerStyle);
+      }
+      try {
+        Object.defineProperty(navigator, 'windowControlsOverlay', {
+          configurable: true,
+          value: {
+            visible: true,
+            getTitlebarAreaRect: () => ({
+              x: 0,
+              y: 0,
+              width: Math.max(0, window.innerWidth - 138),
+              height: 40,
+            }),
+            addEventListener: () => undefined,
+            removeEventListener: () => undefined,
+          },
+        });
+        Object.defineProperty(navigator, 'userAgent', {
+          configurable: true,
+          get: () => 'Mozilla/5.0 Chrome/156.0 Electron/33.2.0 Safari/537.36',
+        });
+      } catch {
+        /* 覆盖不了就按浏览器跑，断言会按 browser 分支处理 */
+      }
+    };
+
+    /**
+     * 四轮调色（?xcompositor=wheels，v1.75）。
+     * 用户 2026-10-29 给的参照图是 Blender Color Balance：暗部 / 中灰 / 亮部 / 偏移 四个色轮。
+     * 这一场：开合成器 → Shift+A 建「色彩平衡」→ 放下 → 拖「偏移」轮的白点往红，
+     * 真读一次预览像素，证明不是只画了控件、shader 也真的在调色。截图就是交付图。
+     */
+    const compositorWheelsScene =
+      new URLSearchParams(location.search).get('xcompositor') === 'wheels';
+    const compositorWheelsSteps = {
+      done: false,
+      error: '',
+      inserted: false,
+      wheels: 0,
+      values: 0,
+      nodeWidth: 0,
+      wheelWidth: 0,
+      dotMoved: 0,
+      before: null,
+      after: null,
+      delta: null,
+      webgl2: false,
+    };
+    const buildCompositorWheelsScene = async () => {
+      if (!compositorWheelsScene) return;
+      try {
+        applyDshDesktopEmulation();
+        await until(() => document.querySelector('[data-fisherai-open-compositor]'), 20000);
+        await wait(400);
+        document
+          .querySelector('[data-fisherai-open-compositor]')
+          .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await until(() => document.querySelector('.cg-root'), 8000);
+        await wait(700);
+        const root = document.querySelector('.cg-root');
+        const stage = root.querySelector('.cg-stage');
+
+        // ---- 顶栏能不能点：几何（是否让出系统标题栏）+ 命中测试 + 真点一下
+        {
+          const addButton = root.querySelector('[data-act="add"]');
+          const box = addButton.getBoundingClientRect();
+          compositorWheelsSteps.titlebarInset = root.style.getPropertyValue('--cg-titlebar-top') || '';
+          compositorWheelsSteps.topbarInset = root.style.getPropertyValue('--cg-topbar-right') || '';
+          compositorWheelsSteps.addTop = Math.round(box.top);
+          compositorWheelsSteps.addHeight = Math.round(box.height);
+          const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+          compositorWheelsSteps.addHit =
+            hit === addButton || (hit && addButton.contains(hit)) ? 'button' : String(hit?.className || hit?.tagName || 'none');
+          addButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          await wait(220);
+          compositorWheelsSteps.addMenuOpened = !!document.querySelector('.cg-menu');
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          await wait(120);
+          compositorWheelsSteps.addMenuClosed = !document.querySelector('.cg-menu');
+        }
+
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'a', shiftKey: true, bubbles: true, cancelable: true }),
+        );
+        await wait(200);
+        const item = [...document.querySelectorAll('.cg-menu-item')].find(
+          (entry) => entry.textContent === '色彩平衡',
+        );
+        if (!item) throw new Error('菜单里没有「色彩平衡」');
+        item.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await wait(200);
+        const card = [...root.querySelectorAll('.cg-node')].pop();
+        // 四轮调色要真的进链路才会影响预览：把跟随中的卡片拖到「输入→预览」那条线中点上，
+        // 左键放下 = insert-on-link（上游 → 调色 → 预览），和用户平时的接法一样。
+        const viewerWire = [...root.querySelectorAll('path.cg-edge')].find((path) =>
+          String(path.dataset.edgeId || '').endsWith('->viewer:0'),
+        );
+        const stageBox0 = stage.getBoundingClientRect();
+        let targetX = stageBox0.left + stageBox0.width / 2;
+        let targetY = stageBox0.top + stageBox0.height * 0.42;
+        if (viewerWire) {
+          const mid = viewerWire.getPointAtLength(viewerWire.getTotalLength() / 2);
+          targetX = stageBox0.left + mid.x;
+          targetY = stageBox0.top + mid.y;
+        }
+        const cardBox0 = card.getBoundingClientRect();
+        const deltaX = targetX - (cardBox0.left + cardBox0.width / 2);
+        const deltaY = targetY - (cardBox0.top + cardBox0.height / 2);
+        window.dispatchEvent(new PointerEvent('pointermove', { clientX: 200, clientY: 200, bubbles: true }));
+        window.dispatchEvent(
+          new PointerEvent('pointermove', { clientX: 200 + deltaX, clientY: 200 + deltaY, bubbles: true }),
+        );
+        stage.dispatchEvent(
+          new PointerEvent('pointerdown', {
+            button: 0, buttons: 1, clientX: 200 + deltaX, clientY: 200 + deltaY,
+            pointerId: 120, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+          }),
+        );
+        await wait(300);
+        compositorWheelsSteps.inserted = root.querySelectorAll('path.cg-edge').length >= 3;
+        // 适应视图：宽卡片完整进画面（截图要看得清四个轮子）
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true }));
+        await wait(420);
+        // 再以卡片中心为准放大一档（交付图里色轮/数字要看得清）
+        {
+          const box = card.getBoundingClientRect();
+          stage.dispatchEvent(
+            new WheelEvent('wheel', {
+              deltaY: -240,
+              clientX: box.left + box.width / 2,
+              clientY: box.top + box.height / 2,
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+          await wait(260);
+        }
+        compositorWheelsSteps.nodeWidth = Math.round(card.offsetWidth);
+        compositorWheelsSteps.wheels = card.querySelectorAll('.cg-wheel').length;
+        compositorWheelsSteps.values = card.querySelectorAll('.cg-wheel-value').length;
+        compositorWheelsSteps.wheelWidth = Math.round(card.querySelector('.cg-wheel')?.offsetWidth || 0);
+        // 用户 2026-10-30 报「色轮怎么变方了」：DSH 主题把 border-radius:50% 变成超椭圆，
+        // 这里量盘面伪元素的 corner-shape —— 必须是 round（浏览器支持该属性时）。
+        {
+          compositorWheelsSteps.cornerShapeSupported =
+            typeof CSS !== 'undefined' && CSS.supports('corner-shape', 'superellipse(1.5)');
+          const wheel = card.querySelector('.cg-wheel');
+          const before = wheel ? getComputedStyle(wheel, '::before') : null;
+          compositorWheelsSteps.wheelCornerShape = before
+            ? String(before.getPropertyValue('corner-shape') || before.cornerShape || '')
+            : '';
+          compositorWheelsSteps.wheelRadius = before
+            ? String(before.getPropertyValue('border-radius') || before.borderRadius || '')
+            : '';
+          compositorWheelsSteps.wheelDiscSize = Math.round(wheel?.offsetWidth || 0);
+          // 反证「模拟真的生效了」：同一张卡片里没被我们改写的元素应当还是超椭圆，
+          // 否则这条断言会在旧引擎/没注入主题时假通过。
+          const plain = card.querySelector('.cg-node-body');
+          compositorWheelsSteps.harnessCornerShape = plain
+            ? String(getComputedStyle(plain).getPropertyValue('corner-shape') || '')
+            : '';
+        }
+
+        /** 预览画布中心 + 四角读一点像素（preserveDrawingBuffer 为 true，可直接 readPixels）。 */
+        const sample = () => {
+          const canvas = root.querySelector('.cg-preview-canvas');
+          if (!canvas) return null;
+          const gl = canvas.getContext('webgl2');
+          if (!gl) return null;
+          const points = [
+            [0.5, 0.5], [0.3, 0.35], [0.7, 0.35], [0.5, 0.7], [0.2, 0.85], [0.8, 0.85],
+          ];
+          const total = [0, 0, 0];
+          const pixel = new Uint8Array(4);
+          for (const point of points) {
+            const x = Math.min(canvas.width - 1, Math.max(0, Math.round(canvas.width * point[0])));
+            const y = Math.min(canvas.height - 1, Math.max(0, Math.round(canvas.height * point[1])));
+            gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+            total[0] += pixel[0];
+            total[1] += pixel[1];
+            total[2] += pixel[2];
+          }
+          return total.map((value) => Math.round(value / points.length));
+        };
+        compositorWheelsSteps.webgl2 = !!document.createElement('canvas').getContext('webgl2');
+        await wait(300);
+        compositorWheelsSteps.before = sample();
+        // 拖「偏移」轮白点往红（色轮上红在左上 120°）：整幅图应该整体偏红
+        const offsetWheel = card.querySelector('.cg-wheel[data-range="offset"]');
+        if (offsetWheel) {
+          const box = offsetWheel.getBoundingClientRect();
+          const cx = box.left + box.width / 2;
+          const cy = box.top + box.height / 2;
+          const radius = box.width * 0.3;
+          const targetX = cx - radius * 0.5;
+          const targetY = cy - radius * 0.866;
+          offsetWheel.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              button: 0, buttons: 1, clientX: cx, clientY: cy,
+              pointerId: 121, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+            }),
+          );
+          offsetWheel.dispatchEvent(
+            new PointerEvent('pointermove', {
+              clientX: targetX, clientY: targetY, buttons: 1, bubbles: true,
+            }),
+          );
+          offsetWheel.dispatchEvent(
+            new PointerEvent('pointerup', {
+              button: 0, buttons: 0, clientX: targetX, clientY: targetY, bubbles: true,
+            }),
+          );
+          await wait(520);
+          const dot = offsetWheel.parentElement?.querySelector('.cg-wheel-dot');
+          const dotX = Number(dot?.getAttribute('cx') ?? 56);
+          const dotY = Number(dot?.getAttribute('cy') ?? 56);
+          compositorWheelsSteps.dotMoved = Math.round(Math.hypot(dotX - 56, dotY - 56));
+        }
+        compositorWheelsSteps.after = sample();
+        if (compositorWheelsSteps.before && compositorWheelsSteps.after) {
+          compositorWheelsSteps.delta = [
+            compositorWheelsSteps.after[0] - compositorWheelsSteps.before[0],
+            compositorWheelsSteps.after[1] - compositorWheelsSteps.before[1],
+            compositorWheelsSteps.after[2] - compositorWheelsSteps.before[2],
+          ];
+        }
+        await wait(400);
+      } catch (error) {
+        compositorWheelsSteps.error = String((error && error.stack) || error);
+      }
+      compositorWheelsSteps.done = true;
+    };
+
+    /**
+     * 混合节点（?xcompositor=mix，v1.79）。
+     * 用户 2026-10-30：「混合节点应该有三个输入通道，a b 和系数」「下拉选项的ui还没有做好，
+     * 现在是纯白的」。这一场：开合成器 → Shift+A 搜「hh」→ 建混合节点 → 放下 →
+     * 打开模式下拉停在打开状态（截图 = 三个输入口 + 深色下拉的交付图）。
+     */
+    const compositorMixScene =
+      new URLSearchParams(location.search).get('xcompositor') === 'mix';
+    const compositorMixSteps = {
+      opened: false,
+      search: false,
+      searchResults: 0,
+      card: false,
+      ports: 0,
+      portTitles: '',
+      nativeSelect: true,
+      options: 0,
+      dropdownInViewport: false,
+      dropdownBg: '',
+      error: '',
+      done: false,
+    };
+    const buildCompositorMixScene = async () => {
+      if (!compositorMixScene) return;
+      try {
+        applyDshDesktopEmulation();
+        await until(() => document.querySelector('[data-fisherai-open-compositor]'), 20000);
+        await wait(400);
+        document
+          .querySelector('[data-fisherai-open-compositor]')
+          .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await until(() => document.querySelector('.cg-root'), 8000);
+        await wait(600);
+        const root = document.querySelector('.cg-root');
+        const stage = root.querySelector('.cg-stage');
+        compositorMixSteps.opened = true;
+
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'a', shiftKey: true, bubbles: true, cancelable: true }),
+        );
+        await wait(220);
+        const search = document.querySelector('.cg-menu-search input');
+        compositorMixSteps.search = !!search;
+        if (search) {
+          search.value = 'hh';
+          search.dispatchEvent(new Event('input', { bubbles: true }));
+          await wait(220);
+          compositorMixSteps.searchResults = document.querySelectorAll('.cg-menu-item').length;
+          search.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+          );
+          await wait(260);
+        }
+
+        // 放下：拖到画面右下的空白处（用卡片当前矩形算位移，别按指针差值硬推）
+        const created = [...root.querySelectorAll('.cg-node')].find(
+          (element) => element.querySelector('.cg-node-title')?.textContent?.trim() === '混合',
+        );
+        const stageBox = stage.getBoundingClientRect();
+        const targetX = stageBox.left + stageBox.width - 300;
+        const targetY = stageBox.top + stageBox.height - 170;
+        const createdBox = created.getBoundingClientRect();
+        const deltaX = targetX - (createdBox.left + createdBox.width / 2);
+        const deltaY = targetY - (createdBox.top + createdBox.height / 2);
+        window.dispatchEvent(new PointerEvent('pointermove', { clientX: 200, clientY: 200, bubbles: true }));
+        window.dispatchEvent(
+          new PointerEvent('pointermove', { clientX: 200 + deltaX, clientY: 200 + deltaY, bubbles: true }),
+        );
+        stage.dispatchEvent(
+          new PointerEvent('pointerdown', {
+            button: 0, buttons: 1, clientX: 200 + deltaX, clientY: 200 + deltaY,
+            pointerId: 131, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+          }),
+        );
+        await wait(320);
+
+        const card = [...root.querySelectorAll('.cg-node')].find(
+          (element) => element.querySelector('.cg-node-title')?.textContent?.trim() === '混合',
+        );
+        compositorMixSteps.card = !!card;
+        compositorMixSteps.ports = card ? card.querySelectorAll('.cg-port.cg-in').length : 0;
+        compositorMixSteps.portTitles = card
+          ? [...card.querySelectorAll('.cg-port.cg-in')].map((port) => port.title).join(' | ')
+          : '';
+        compositorMixSteps.nativeSelect = card ? !!card.querySelector('select') : true;
+
+        // 打开模式下拉，停在打开状态（截图里的下拉列表要是深色的）
+        card
+          ?.querySelector('.cg-select-button')
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await wait(260);
+        const list = document.querySelector('.cg-select-list');
+        compositorMixSteps.options = list ? list.querySelectorAll('.cg-select-option').length : 0;
+        if (list) {
+          const box = list.getBoundingClientRect();
+          compositorMixSteps.dropdownInViewport =
+            box.top >= 0 &&
+            box.left >= 0 &&
+            box.bottom <= window.innerHeight &&
+            box.right <= window.innerWidth;
+          compositorMixSteps.dropdownBg = String(getComputedStyle(list).backgroundColor || '');
+        }
+        await wait(220);
+      } catch (error) {
+        compositorMixSteps.error = String((error && error.stack) || error);
+      }
+      compositorMixSteps.done = true;
+    };
+
     // ⚠️ 探针定时器必须在任何 await 之前立起来：headless 的 --virtual-time-budget
     //    会等页面的微任务/定时器都跑完，如果前面有长 await 把这段脚本卡住，探针一次都发不出去
     //    （现象：没收到页面探针）。所以这里先装探针，再启动那些要等 DOM 的场景流程。
@@ -4776,6 +6054,11 @@ const HOST_PAGE = `<!doctype html>
     void buildLastModelScene();
     void buildArchiveScene();
     void buildKnifeScene();
+    void buildRerouteScene();
+    void buildCompositorScene();
+    void buildCompositorPanelScene();
+    void buildCompositorWheelsScene();
+    void buildCompositorMixScene();
   </script>
 </body>
 </html>`;
@@ -4988,6 +6271,8 @@ function shoot(name, url, budgetMs = 12000, scale = '1') {
       [
         '--headless=new',
         '--disable-gpu',
+        // 合成器要 WebGL2：headless 没有真 GPU，新版本 Chrome 需要这个开关才放行 SwiftShader
+        '--enable-unsafe-swiftshader',
         '--hide-scrollbars',
         '--no-first-run',
         '--no-default-browser-check',
@@ -5203,6 +6488,43 @@ const SCENES = [
    */
   ['knife', `${ORIGIN}/?resume=${knifeProjectId}&xknife=1`, `?resume=${knifeProjectId}&xknife=1`,
     (probe) => probe.knife?.done === true, 26000],
+  /**
+   * 转接（v1.71）：种子项目已经把结构写成 A → J → (C, D)，只看真浏览器里的卡片/连线/透传图。
+   */
+  ['reroute', `${ORIGIN}/?resume=${rerouteProjectId}&xreroute=1`, `?resume=${rerouteProjectId}&xreroute=1`,
+    (probe) => probe.reroute?.done === true, 20000],
+  /**
+   * 调色面板（v1.72）：打开合成器 → 预览缩放/平移 → Shift+A 建节点（跟随鼠标、参数在卡片里）
+   * → Shift+右键**压在连线上**合出转接点（主画布不多节点）。截图停在合成器里当交付图。
+   */
+  ['compositor', `${ORIGIN}/?resume=${compositorProjectId}&xcompositor=1`, `?resume=${compositorProjectId}&xcompositor=1`,
+    (probe) => probe.compositor?.done === true, 34000],
+  /**
+   * 调色面板新工具（v1.73）：曲线编辑器 + 示波器 + 全宽滑块的交付图。
+   * 只开面板、加两个节点，不做应用（截图停在合成器里）。
+   * v1.74 起这条再拆两份：`&scope=parade` / `&scope=vectorscope` 各自出一张
+   * 「达芬奇同款示波器」的交付图（波形图是缺省那一张）。
+   */
+  ['compositor-panel', `${ORIGIN}/?resume=${compositorPanelProjectId}&xcompositor=panel`, `?resume=${compositorPanelProjectId}&xcompositor=panel`,
+    (probe) => probe.compositorPanel?.done === true, 28000],
+  ['compositor-parade', `${ORIGIN}/?resume=${compositorPanelProjectId}&xcompositor=panel&scope=parade`, `?resume=${compositorPanelProjectId}&xcompositor=panel&scope=parade`,
+    (probe) => probe.compositorPanel?.done === true, 28000],
+  ['compositor-vectorscope', `${ORIGIN}/?resume=${compositorPanelProjectId}&xcompositor=panel&scope=vectorscope`, `?resume=${compositorPanelProjectId}&xcompositor=panel&scope=vectorscope`,
+    (probe) => probe.compositorPanel?.done === true, 28000],
+  /**
+   * 四轮调色（v1.75）：用户 2026-10-29 给的参照图是 Blender Color Balance
+   * （暗部 / 中灰 / 亮部 / 偏移 四个色轮）。只开合成器、建一个色彩平衡节点、
+   * 拖一下偏移轮的白点，截图就是交付图；像素断言在 verify 段里读预览画布。
+   */
+  ['compositor-wheels', `${ORIGIN}/?resume=${compositorPanelProjectId}&xcompositor=wheels`, `?resume=${compositorPanelProjectId}&xcompositor=wheels`,
+    (probe) => probe.compositorWheels?.done === true, 28000],
+  /**
+   * 混合节点（v1.79）：用户 2026-10-30 报「混合节点应该有三个输入通道，a b 和系数」
+   * +「下拉选项的ui还没有做好，现在是纯白的」。这一场建一个混合节点、打开模式下拉，
+   * 截图就是「三个输入口 + 深色自绘下拉」的交付图。
+   */
+  ['compositor-mix', `${ORIGIN}/?resume=${compositorPanelProjectId}&xcompositor=mix`, `?resume=${compositorPanelProjectId}&xcompositor=mix`,
+    (probe) => probe.compositorMix?.done === true, 28000],
 ];
 const onlyScenes = String(process.env.BROWSER_ONLY ?? '')
   .split(',')
@@ -6591,6 +7913,238 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     report('交付图停在「切到一半」（刀口与红线还在画面上）',
       knife.delivery?.overlay === true && knife.delivery?.hint === true,
       JSON.stringify(knife.delivery ?? null));
+  }
+
+  /**
+   * 转接（?xreroute=1，v1.71）：用户「shift+鼠标右键划过的线合并并添加转接口」。
+   * 种子项目就是合并后的结构（A → J → C/D），这里验真浏览器里卡片与连线的交付形态。
+   */
+  if (label === 'reroute') {
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const scene = probe.reroute ?? {};
+    report('转接场景跑完了（没有半途报错）', scene.done === true && !scene.error,
+      String(scene.error ?? '').slice(0, 240));
+    report('转接桥装上了（window.__FISHERAI_CANVAS_REROUTE__.merge）', scene.bridge === true);
+    report('J 卡片把上游 A 的图透传出来（缩略图 src 指向 knife-a.png）',
+      /knife-a\.png/.test(String(scene.image ?? '')), String(scene.image ?? ''));
+    report('J 是 34×34 的小圆点（卡片上没有标题栏）',
+      scene.junction === true &&
+        Number(scene.width) >= 30 && Number(scene.width) <= 44 &&
+        Number(scene.height) >= 30 && Number(scene.height) <= 44 &&
+        /50%|17px/.test(String(scene.radius ?? '')),
+      `${scene.width}×${scene.height} radius=${scene.radius ?? ''} dot=${scene.junction === true}`);
+    report('连线是三条（A→J、J→C、J→D）', Number(scene.edges) === 3, String(scene.edges ?? 0));
+  }
+
+  /**
+   * 调色面板（?xcompositor=1，v1.72）：用户 2026-10-29 报的四条 ——
+   * 参数要在节点里、预览要能缩放平移、Shift+右键在连线上也要能合线、新节点要跟鼠标。
+   * 这一场是真浏览器里真派发事件，能验到 jsdom 量不到的布局（卡片宽度、控件真的在卡里）。
+   */
+  if (label === 'compositor') {
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const scene = probe.compositor ?? {};
+    report('调色面板场景跑完了（没有半途报错）', scene.done === true && !scene.error,
+      String(scene.error ?? '').slice(0, 240));
+    report('点调色卡片的「合成器」打开了全屏层', scene.opened === true);
+    report('右侧属性面板不存在（参数改到节点体内）', scene.inspector === false);
+    report('滚轮缩放预览（读数从 100% 变了）',
+      scene.zoomLabel === '100%' && scene.zoomAfterWheel !== '100%' &&
+        /translate\(.*\) scale\(/.test(String(scene.previewTransform ?? '')),
+      `${scene.zoomLabel} → ${scene.zoomAfterWheel} ${String(scene.previewTransform ?? '').slice(0, 60)}`);
+    report('Shift+A 建的「色彩平衡」是四轮调色（4 个色轮 + 15 个数字，控件在卡内）',
+      Number(scene.paramsInNode) === 0 && Number(scene.wheels) === 4 && Number(scene.wheelValues) === 15 &&
+        Number(scene.paramWidth) > 120,
+      `params=${scene.paramsInNode} wheels=${scene.wheels} values=${scene.wheelValues} paramWidth=${scene.paramWidth} cardWidth=${scene.nodeWidth} scale=${scene.viewScale}`);
+    report('四轮卡片宽度够横排四个色轮（≥700px）',
+      Number(scene.nodeWidth) >= 700, String(scene.nodeWidth));
+    report('新节点跟着鼠标走（世界位移 = 鼠标位移 ÷ 视图缩放）',
+      Array.isArray(scene.followWorldDelta) &&
+        Math.abs(Number(scene.followWorldDelta[0]) - 70 / (Number(scene.viewScale) || 1)) <= 3 &&
+        Math.abs(Number(scene.followWorldDelta[1]) - 50 / (Number(scene.viewScale) || 1)) <= 3,
+      JSON.stringify({ screen: scene.followDelta, world: scene.followWorldDelta, scale: scene.viewScale,
+        start: scene.followStart, end: scene.followEnd }));
+    report('左键放下那一下不再起框选', scene.marqueeAfterPlace === false);
+    report('Shift+右键压在连线上也能合出转接点',
+      Number(scene.rerouteAfterMerge) >= 1, `reroutes=${scene.rerouteAfterMerge}`);
+    report('合线没有穿透到下面的主画布（主画布节点数不变）',
+      Number(scene.canvasNodesBefore) === Number(scene.canvasNodesAfter),
+      `${scene.canvasNodesBefore} → ${scene.canvasNodesAfter}`);
+    // ---- v1.73：示波器 / 曲线 / 压线插入 / 应用后落成品图
+    report('预览右侧有示波器（直方图 / 波形 / 矢量三个 tab）',
+      Number(scene.scopeTabs) === 3, String(scene.scopeTabs));
+    report('示波器从预览结果里读到了像素（WebGL2 可用时）',
+      scene.webgl2 !== true || scene.scopeHasImage === true,
+      `webgl2=${scene.webgl2} hasImage=${scene.scopeHasImage}`);
+    report('曲线节点有可拖控制点（默认两个端点）',
+      Number(scene.curvePoints) === 2, String(scene.curvePoints));
+    report('拖节点压住连线时那条线高亮',
+      scene.spliceHighlight === true, String(scene.spliceHighlight));
+    report('压线松手自动插入连线（边数 +1）',
+      Number(scene.insertEdgesAfter) === Number(scene.insertEdgesBefore) + 1,
+      `${scene.insertEdgesBefore} → ${scene.insertEdgesAfter} target=${JSON.stringify(scene.insertSpliceTarget)} 残留=${JSON.stringify(scene.insertTarget)}`);
+    // v1.78：Ctrl+Z / Ctrl+Shift+Z 在真浏览器里真的改节点数
+    report('Ctrl+Z 撤销新增节点、Ctrl+Shift+Z 重做回来（键盘事件真的改了历史栈）',
+      Number(scene.undoNodesAfterAdd) === Number(scene.undoNodesBefore) + 1 &&
+        Number(scene.undoNodesAfterUndo) === Number(scene.undoNodesBefore) &&
+        scene.undoCanRedo === true &&
+        Number(scene.undoNodesAfterRedo) === Number(scene.undoNodesBefore) + 1 &&
+        Number(scene.undoNodesReverted) === Number(scene.undoNodesBefore),
+      `${scene.undoNodesBefore} → 加 ${scene.undoNodesAfterAdd} → 撤 ${scene.undoNodesAfterUndo} → 重做 ${scene.undoNodesAfterRedo} → 收尾 ${scene.undoNodesReverted} canRedo=${scene.undoCanRedo} ${String(scene.undoError || '').slice(0, 120)}`);
+    if (scene.webgl2) {
+      report('点「应用」后合成器关闭（结果已写回画布）',
+        scene.applied === true,
+        `applied=${scene.applied} timeout=${scene.applyTimedOut} toast=${String(scene.applyToast || '').slice(0, 80)}`);
+      report('应用后在调色节点后面多了一张成品图',
+        Number(scene.canvasNodesAfterApply) === Number(scene.canvasNodesBeforeApply) + 1 &&
+          Number(scene.mediaImagesAfterApply) > Number(scene.mediaImagesBeforeApply),
+        `nodes ${scene.canvasNodesBeforeApply} → ${scene.canvasNodesAfterApply}，图片 ${scene.mediaImagesBeforeApply} → ${scene.mediaImagesAfterApply}`);
+      const redSamples = (Array.isArray(scene.mediaSamples) ? scene.mediaSamples : []).filter(
+        (sample) => sample && Array.isArray(sample.px) && sample.px[0] > 100 && sample.px[1] < 120,
+      ).length;
+      report('导出的成品图不是黑的（采样到画面颜色）',
+        redSamples >= 2,
+        `${redSamples} 张红色样本 ${JSON.stringify(scene.mediaSamples)}`);
+      // v1.77：用户「希望按退出也会输出保存图像」——Esc 有改动时＝保存并退出
+      report('按 Esc 退出也会保存（有改动时合成器关闭）',
+        scene.reopened === true && scene.escEdited === true && scene.escClosed === true,
+        `reopened=${scene.reopened} edited=${scene.escEdited} closed=${scene.escClosed} timeout=${scene.escTimedOut} toast=${String(scene.escToast ?? '').slice(0, 80)} err=${String(scene.escError ?? '').slice(0, 120)}`);
+      report('Esc 保存后在调色节点后面又落了一张成品图',
+        Number(scene.escImageAfter) > Number(scene.escImageBefore),
+        `图片 ${scene.escImageBefore} → ${scene.escImageAfter}`);
+    } else {
+      console.log(`[browser] SKIP  ${label}: 这个 headless 环境没有 WebGL2，跳过「应用落成品图」两项`);
+    }
+    report('交付读数：参数在卡片里、预览读数在画面上',
+      Number(scene.delivery?.wheels) >= 4 && Number(scene.delivery?.cards) >= 4,
+      JSON.stringify(scene.delivery ?? null));
+  }
+
+  /**
+   * 调色面板新工具（?xcompositor=panel，v1.73）：曲线编辑器 + 示波器 + 全宽滑块。
+   * v1.74 加上达芬奇同款示波器（波形图 / 分量图 / 矢量图）与可调面板大小的取证：
+   * 这一场的截图就是交付图，断言它们有实际尺寸（不是被挤成一条）、示波器真的画出了东西。
+   */
+  if (
+    label === 'compositor-panel' ||
+    label === 'compositor-parade' ||
+    label === 'compositor-vectorscope'
+  ) {
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const scene = probe.compositorPanel ?? {};
+    const wantScope = label === 'compositor-parade' ? 'parade' : label === 'compositor-vectorscope' ? 'vectorscope' : 'waveform';
+    report('调色面板新工具场景跑完了', scene.done === true && !scene.error,
+      String(scene.error ?? '').slice(0, 240));
+    report('示波器面板有实际尺寸（不是被挤成一条）',
+      Number(scene.scopeWidth) >= 200 && Number(scene.scopeHeight) >= 160,
+      `${scene.scopeWidth}×${scene.scopeHeight}`);
+    report('示波器画布有宽度', Number(scene.scopeCanvasWidth) >= 150, String(scene.scopeCanvasWidth));
+    report('拖左边缘能把示波器面板拉宽（v1.74 可调大小）',
+      Number(scene.scopeWidthAfter) >= Number(scene.scopeWidthBefore) + 120,
+      `${scene.scopeWidthBefore} → ${scene.scopeWidthAfter}`);
+    report('拖下边缘能把示波器面板拉高',
+      Number(scene.scopeHeightAfter) >= Number(scene.scopeHeightBefore) + 60,
+      `${scene.scopeHeightBefore} → ${scene.scopeHeightAfter}`);
+    report('双击拉动条复位成 268px 宽 / 跟预览等高',
+      Number(scene.scopeReset?.width) === 268 && Number(scene.scopeReset?.height) > 0,
+      JSON.stringify(scene.scopeReset ?? null));
+    report('示波器切到了要求的图（波形图 / 分量图 / 矢量图）',
+      scene.scopeKind === wantScope, `${scene.scopeKind} (want ${wantScope})`);
+    report('示波器画布里真的画出像素了（不是一块空黑）',
+      Number(scene.scopeInk) >= 0.01,
+      `ink=${scene.scopeInk} px=${JSON.stringify(scene.scopePixels ?? [])} ${String(scene.scopeInkError ?? '')}`);
+    report('曲线编辑器有宽度、加点后是 3 个控制点',
+      Number(scene.curveWidth) >= 120 && Number(scene.curvePoints) === 3,
+      `width=${scene.curveWidth} points=${scene.curvePoints}`);
+    report('色相/饱和度节点是全宽滑轨且色相显示角度',
+      Number(scene.sliders) >= 3 && /°$/.test(String(scene.hueValue)),
+      `sliders=${scene.sliders} hue=${scene.hueValue}`);
+  }
+
+  /**
+   * 四轮调色（?xcompositor=wheels，v1.75）：用户给的参照图是 Blender Color Balance 的
+   * 暗部 / 中灰 / 亮部 / 偏移 四个色轮。这一场的截图就是交付图；
+   * 除了控件尺寸，这里还读预览像素，确认拖色轮真的改了画面（不是只换皮）。
+   */
+  if (label === 'compositor-wheels') {
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const scene = probe.compositorWheels ?? {};
+    report('四轮调色场景跑完了（没有半途报错）', scene.done === true && !scene.error,
+      String(scene.error ?? '').slice(0, 300));
+    report('节点里有 4 个色轮 + 15 个数字（偏移少一个亮度格）',
+      Number(scene.wheels) === 4 && Number(scene.values) === 15,
+      `wheels=${scene.wheels} values=${scene.values}`);
+    report('节点插进了「输入 → 预览」链路（预览看的是调色后的结果）', scene.inserted === true);
+    report('四轮卡片横排够宽、色轮盘面有实际尺寸',
+      Number(scene.nodeWidth) >= 700 && Number(scene.wheelWidth) >= 100,
+      `${scene.nodeWidth}px / wheel=${scene.wheelWidth}px`);
+    report('拖动色轮白点（偏移轮）', Number(scene.dotMoved) >= 6, `moved=${scene.dotMoved}px`);
+    // 用户 2026-10-30 三条报障的真渲染取证
+    report('顶栏让出了 Windows 系统标题栏（--cg-titlebar-top=40px，按钮不再压进 caption 带）',
+      String(scene.titlebarInset || '') === '40px' && Number(scene.addTop) >= 40,
+      `inset=${scene.titlebarInset} top=${scene.addTop} right=${scene.topbarInset}`);
+    report('顶栏按钮命中测试落在按钮自己身上（没被别的层盖住）',
+      scene.addHit === 'button', String(scene.addHit));
+    report('点「+ 添加节点」真的弹出搜索菜单（Esc 能收起）',
+      scene.addMenuOpened === true && scene.addMenuClosed === true,
+      `opened=${scene.addMenuOpened} closed=${scene.addMenuClosed}`);
+    // 注意：Chrome 把 round 归一化成 superellipse(1)，两者都是「正圆弧角」；
+    // 被 DSH 主题改成 superellipse(1.5) 的普通元素（harnessCornerShape）必须不是这两个值，
+    // 否则说明模拟没生效、这条断言会假通过。
+    const shape = String(scene.wheelCornerShape || '');
+    const rounded = shape === 'round' || shape === 'superellipse(1)';
+    report('色轮盘面 corner-shape 是正圆弧角（DSH 主题的 superellipse 不再把它压成圆角方块）',
+      scene.cornerShapeSupported !== true || (rounded && String(scene.harnessCornerShape || '') !== 'superellipse(1)'),
+      `supported=${scene.cornerShapeSupported} wheel=${shape} plain=${scene.harnessCornerShape} radius=${scene.wheelRadius} size=${scene.wheelDiscSize}`);
+    if (scene.webgl2) {
+      report('拖色轮后预览画面真的偏红了（R 明显升高、R 与 G 的差拉大）',
+        Array.isArray(scene.delta) &&
+          Number(scene.delta[0]) >= 8 &&
+          Number(scene.delta[0]) - Number(scene.delta[1]) >= 8,
+        `before=${JSON.stringify(scene.before)} after=${JSON.stringify(scene.after)} delta=${JSON.stringify(scene.delta)}`);
+    } else {
+      console.log(`[browser] SKIP  ${label}: 这个 headless 环境没有 WebGL2，跳过像素断言`);
+    }
+  }
+
+  /**
+   * 混合节点（?xcompositor=mix，v1.79）：用户 2026-10-30 两条报障的交付图与取证 ——
+   * 「混合节点应该有三个输入通道，a b 和系数」「下拉选项的ui还没有做好，现在是纯白的」。
+   */
+  if (label === 'compositor-mix') {
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const scene = probe.compositorMix ?? {};
+    report('混合节点场景跑完了（没有半途报错）', scene.done === true && !scene.error,
+      String(scene.error ?? '').slice(0, 300));
+    report('Shift+A 的菜单带搜索框，输入 hh 后能筛出「混合」',
+      scene.search === true && Number(scene.searchResults) > 0 && Number(scene.searchResults) < 18,
+      `search=${scene.search} results=${scene.searchResults}`);
+    report('混合节点卡片建出来了', scene.card === true);
+    report('混合节点有三个输入口（A / B / 系数）',
+      Number(scene.ports) === 3 && /A 上层/.test(String(scene.portTitles)) && /系数/.test(String(scene.portTitles)),
+      `ports=${scene.ports} titles=${scene.portTitles}`);
+    report('混合模式不再用原生 select（弹层白板）', scene.nativeSelect === false);
+    report('点开模式下拉：14 个选项、整块在视口内、底色是深色玻璃（不是纯白）',
+      Number(scene.options) === 14 &&
+        scene.dropdownInViewport === true &&
+        /rgba?\(/.test(String(scene.dropdownBg)) &&
+        !/255,\s*255,\s*255/.test(String(scene.dropdownBg)),
+      `options=${scene.options} inViewport=${scene.dropdownInViewport} bg=${scene.dropdownBg}`);
   }
 
   /**

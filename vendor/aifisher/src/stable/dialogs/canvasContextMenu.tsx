@@ -362,6 +362,14 @@ export function CanvasContextMenu(
               },
               true,
             )}
+            {item(
+              {
+                label: '调色',
+                icon: 'composite',
+                action: () => props.onSelectType('Color Grade'),
+              },
+              true,
+            )}
           </>
         )}
       </div>

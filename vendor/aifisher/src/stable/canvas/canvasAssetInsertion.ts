@@ -55,6 +55,7 @@ const supportedTypes = new Set([
   'Upload Audio',
   'Image Compare',
   'Image Composite',
+  'Color Grade',
   'ComfyUI',
 ]);
 

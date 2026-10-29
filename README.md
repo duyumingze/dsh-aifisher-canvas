@@ -1,12 +1,8 @@
 # 🎨 dsh-aifisher-canvas
 
-[![ci](https://github.com/duyumingze/dsh-aifisher-canvas/actions/workflows/ci.yml/badge.svg)](https://github.com/duyumingze/dsh-aifisher-canvas/actions/workflows/ci.yml)
-
 > 把专业级 AI 创作无限画布带进 DeepSeek Harness：**不是插件内置一个聊天框，而是让 DSH 原生 AI Agent 直接接管整个画布**——本地 ComfyUI、多云端生成、节点编排、素材整理，全靠你在右侧说一句话完成。
 
-**Version**: v1.70 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
-
-> **界面标识**：画布里露出的图形标识、画布名（渡雨鸣泽 画布）与助手名（渡雨鸣泽 Agent）都是**渡雨鸣泽**的视觉标识 v1.0，上游 AIFISHER 的图形标识已不在界面上出现（文件名沿用上游的兼容壳见 [`public/brand/README.md`](public/brand/README.md)）。`docs/shots/` 里的截图仍是旧标识，重新截图前以下文的文字说明为准。
+**Version**: v1.79 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
 
 ---
 
@@ -46,9 +42,6 @@
 - 🗂️ **分镜板**：画布底部一条缩略图带，按镜头号排好、点一张聚焦过去、按播放自动翻页——只看顺序，不塞完整导演台
 - 🧭 **主动副驾**：发现失败节点、空提示词、没锁的镜头时，在左下角安静冒一个小胶囊，点开才看建议；没有建议时不出现，点「不再提示」彻底关掉
 - 🔁 **在画布里换会话，不被打断**：右侧栏标题本身就是会话列表（可搜、标出当前、滤掉归档与子代理会话），点一条即切；头部「＋」在当前工作区新建（或复用空白）会话。两个动作都在画布内完成——不会再被 DSH 侧边栏那条「先切回对话区」的导航把你带出画布
-- 🎥 **镜头语言可复用**：机身 / 镜头 / 焦段 / 光圈四件事按项目存一套（`camera`），一次 `apply` 就把「85mm、f/1.8、库克 S7/i 的暖调虚化 + 别把摄影机画进画面」这段英文光学描述写进每个镜头提示词的末尾。重复 apply **只替换不叠加**，换参数重跑也不会越跑越长；只动提示词，不碰模型与参数
-- 🎯 **只取那一小块**：节点一多，Agent 不再整张画布 `read` 一遍——`query` 支持按节点看上游/下游/双向邻域（深度 1–3）、按标题/提示词/正文关键词找、按类型过滤、分页返回，只回命中的几条和它们之间的连线
-- 🧾 **进度可续跑**：`progress` 把「做到第几步 + 用户确认了哪一版方案 + 哪些节点已定稿」写进项目文件（十个阶段：接单→概念→剧本→拆解→参考→分镜→视频→音频→审片→完成）。它和项目记忆一起注入画布对话，换个会话接手也知道停在哪，不用从头问
 
 > 传统 AI 画布是"你手动摆节点 + 点按钮生成单张图"，这个插件是"你跟 AI 说你要做什么，AI 自己在无限画布上帮你搭整个创作流水线"。
 
@@ -79,6 +72,7 @@
 ### 无限画布原生体验
 - 节点连线、编组、框选复制粘贴、历史回退全套基础能力完整保留
 - **Blender 式切刀**：按住 `Ctrl` + 鼠标右键拖拽，划过的连线当场变红、松手即断开（`Esc` 取消，只断划过的那条）
+- **划选合并 / 转接口**：按住 `Shift` + 鼠标右键拖拽，划过的连线当场变绿；同一个上游分出去的几条线会并成一条主干，并在划过处插入一个 **34×34 的「转接」小圆点**（圆里直接显示上游缩略图；一路进、多路出，只整理走向、不改参考图，下游照旧拿到上游那张图）。不同上游各得一个转接点。`Esc` 取消。回归 `test:reroute`（20 项，含圆点形态、真手势、透传缩略图、与切刀共存、落盘）
 - 多选图片自动折叠成叠图，不展开也能在卡片上翻页查看
 - 两步式智能扩图：先自动生成外延参考画面，再生成你自己的扩图节点，提示词参考图自动填好，生成由你自己触发
 - 内置图片裁剪、宫格切分、标注蒙版、尺寸调整工具，不用跳出去用其他软件
@@ -122,7 +116,7 @@ pnpm install
 pnpm build
 ```
 
-`pnpm build` = `clean → vendor-aifisher → build-canvas-css → tsdown`，**顺序不可变**。没有上游源码树、只改了本仓库代码时用 `pnpm build:offline`（跳过 vendor，直接用仓库里已提交的 `vendor/`；CI 走的就是这条）。产物三件，DSH 加载的就是它们：
+`pnpm build` = `clean → vendor-aifisher → build-canvas-css → tsdown`，**顺序不可变**。产物三件，DSH 加载的就是它们：
 
 - `lib/index.js` — host 半（路由、ComfyUI、生成、媒体库、诊断）
 - `lib/client/apply.js` — 浏览器半（panel / slot 注册）
@@ -185,32 +179,24 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
 - 视频截帧（v1.66）：视频底栏那枚按钮变成三项菜单 —— **截取首帧 / 截取尾帧 / 首尾帧各一张**，单截一帧不会多掉一个要删的节点。取帧在 `src/canvas-ui/canvas/CanvasVideoFrames.ts`（输出最长边 2048、尾帧从 `duration - 0.05` 起试、探到空白画面自动往前退），落位在 `CanvasFrameLayout.ts`（贴视频右侧 60px、首上尾下、避开已有节点，截完把「视频 + 新帧」一起聚焦进视口），vendor 侧只做接线（补丁 3.8x）；截帧节点的提示词留空，不会被当成生成提示词。
 - 截帧加固（v1.67，2026-10-23 报障「截取视频首尾帧失败了」）：等待判定从「单次 `seeked` 快照」改成**事件唤醒 + 40ms 轮询**（事件来早了、干脆不来都不会再白等 15s 报「视频定位超时」）；落点容差 0.5s（Chromium 会吸到最近可解码帧）；按 `seekable` 钳制目标（远端素材只缓冲了一截时不硬拖片尾）；空白帧先等最多 800ms 再判；超时**换一个新解码器重试一次**；错误文案带现场（`readyState` / 是否仍在寻址 / 落点 / 时长）。同时 host 的 `/api/aifisher/canvas/proxy` **开始透传 Range**（206 + `Content-Range`）——以前远端视频经代理后浏览器当它是「不可寻址」，拖进度条和截尾帧都会卡死。
 - 进度条拖拽（v1.68，2026-10-23 报障「视频下方进度条拖到不了」）：底栏那根 16px 的原生滑杆换成**自己吃指针的轨道** —— 整条轨道（20px + 上下余量）按下即跳到落点，不再要求戳中 12px 的拇指；拖动期间读数/拇指 1:1 跟指针（本地 scrub 状态，播放时钟的回写不会再把拇指拽回去）；seek 按 120ms 节流、松手补最后一发（长片里 60Hz 连打会打乱解码器）；松手后真在寻址时显示「定位中…」；底栏收起时 `pointer-events-none`，不再吞掉视频底部的点击。实现在整文件覆盖 `canvasVideoPlayer.tsx`，回归 `test:video-seek`（19 项）。
-- 镜头语言 / 精准查询 / 创作进度（v1.69，2026-10-25）：
-  - `camera`（`src/host/canvas/camera.ts`）：8 机身 × 8 镜头 × 11 焦段 × 10 光圈；`describeFocalLength`/`describeAperture` 把数字翻成英文光学描述，片段约 250 字符（SD 系 CLIP 77 token、`read` 240 字截断，太长会跟用户提示词抢预算）。片段以 `camera direction only —` 开头、以 `[cam: …]` 结尾，重复 apply 按句首定位**整段替换**；用户在我们写入后又往后接了字，宁可不动也不误删。存 `<数据目录>/canvas-camera.json`（按项目一套）。只写 `prompt`，不碰 model/parameters，所以不会撞 configure 的声明约束。
-  - `query`（`src/host/canvas/query.ts`）：纯函数跑在一次 `read` 之上，回命中节点 + 两端都在结果里的边；提示词只回前 160 字（`read detail:"full"` 取全文），越界带 `truncated` 与「还有 N 条」。
-  - `progress`（`src/host/canvas/progress.ts`）：十阶段线 + brief/approvedPlan/定稿与参考节点，存 `<数据目录>/canvas-progress.json`；阶段变了才记 history（最近 20 条），非法 phase 直接 `INVALID`（不静默落回 intake）。注入走 v1.59 那条 `agent/pre-step` 通道，与项目记忆拼成一段、内容变了才重插。
-  - 回归 `test:tools`（63 项）：幂等/剥离/非法值、邻域与分页、阶段机与注入。
-- `canvas_control` 表面收敛（v1.70，2026-10-26）：枚举从 29 项降到 26 项 —— `runGeneration` / `media` / `workflow` / `product` 这四个「实现只回一句『请改用 command』」的动作撤掉，统一走 `action:"command"` + 完整 `CanvasControl`；host 白名单（`src/host/canvas/commandMapping.ts`）只放行**不会让 Agent 自己花钱**的动作，`runGeneration` 与 `prepareBudget` / `revokeBudget` 永久拒绝并给出可读理由。工具描述同时从 7,657 字符压到 2,710 字符（每个 DSH 会话少付约 1.6k tokens），各动作细节留在 [docs/canvas-agent-contract.md](docs/canvas-agent-contract.md) 的 §2.5 / §2.6。回归 `test:tools` 69 项（新增 6 项逃生舱用例）。
-- 体积与缓存（v1.70）：host / client 两个产物开启压缩 —— `lib/index.js` 1.23MB → 643KB、`lib/client/apply.js` 777KB → 686KB；画布应用的缓存策略按文件名分流：带内容哈希的 chunk 走 `immutable` 长缓存，入口 `canvas-app.js` 改 `no-cache` + ETag（每次打开只做一次 304，不再重下 2.8MB，开发期 `pnpm build` + 刷新依旧立刻生效）。
-- 测试覆盖：类型门禁（`pnpm typecheck`，`src/` 零错误）+ jsdom 契约测试 + 真机浏览器视觉校验，累计 2500+ 回归用例守住画布几何、交互、响应逻辑
-- 保存链路（v1.58，见 `scripts/patches/aifisher/src/stable/persistence/canvasWorkflow.ts`）：上游的乐观并发是「撞 409 → 重读服务端 → 三向合并 → 重发」，但三向合并遇到**同一字段两边都改**会抛冲突，并把这份文档的保存**永久封锁**（只有重新打开项目才解），画布照常能编辑、实际一个字都存不进去。本插件改成「救援合并」：节点/分组按 id 取并集、同 id 以当前窗口为准、**一定落盘**，并提示用户核对；保存/读取请求另加 20s 超时，避免一次挂住的请求把保存队列永久占死。agent 的每次改动还会由 host 立刻追加一次保存，回执里用 `saved` 说明有没有真的写进 `canvas.json`。
+- 调色节点 / 合成器（v1.70）：主画布新增 `Color Grade` 节点（右键「调色」创建，多图输入上限 10）。节点卡上的「合成器」按钮（或双击）进入全屏合成器：上方**一块预览**，优先显示「预览」节点（没接线时退回输出，标签会写明是哪个）；下方是节点画布，预置 **输入 / 输出 / 预览** 三个节点 —— 输入节点的输出口数量等于上游图片数（接 3 张就是 3 个口），默认就连好「输入→输出 / 输入→预览」两条线（黄绿＝图像、灰白＝蒙版，端口接上后填充），连线画在屏幕坐标里，滚轮缩放时线宽不变粗。画布手势与主画布一致：**左键拖＝框选**（可多选、拖动任一选中节点整体移动、`Delete` 批量删）、**中键 / 空格+左键＝平移**、滚轮以光标为中心缩放、点阵背景跟随平移/缩放，首次打开自动适应视图。`Shift+点击节点`接到预览、`Ctrl+Shift+点击`接到输出、`Shift+A` 或「+ 添加节点」按分类加效果、点连线断开、`Esc` 退出；**`Shift` + 右键划过几条线**＝同源线收进一个「转接点」（一路进、多路出，只整理走向、求值结果不变；不同上游各得一个，也可在「+ 添加节点 → 基础」里手动加）。求值在浏览器端（WebGL2，linear 空间计算 + RGBA16F 中间纹理 + 按节点缓存/脏传播，拖滑块只重算下游）。15 种效果：色彩平衡（四轮调色：暗部/中灰/亮部/偏移，ASC CDL 的 lift/gamma/gain + offset 色彩轮）、曲线、色相/饱和度、亮度/对比度、曝光、Gamma、混合（14 种模式，W3C 公式）、Alpha 上叠、模糊、锐化、暗角、颗粒、变换、椭圆/矩形/渐变蒙版。点「应用」把输出落进媒体库并写回节点的 `resultUrl`，下游生成节点可直接当参考图；图结构、参数与视图状态存在节点字段 `compositorGraph`，随项目保存。实现在 `src/client/canvas/compositor/`（图纯逻辑 / WebGL 引擎 / 纯 DOM 编辑器三层），vendor 侧 11 处锚点补丁 + 组件追加；回归 `test:compositor`（60 项，含「默认两条连线真的画出来」、框选/平移手势与划选合并）。2026-10-29 按 Blender 手感再收紧：**参数控件直接长在节点体内**（右侧属性面板拆掉，卡片宽 224px，数字参数＝标签+滑块+数字框，布尔＝勾选，混合模式＝下拉，`Delete`/拖动等手势不变）；**上方预览可缩放平移**（滚轮以光标为中心 20%–800%、右下角实时读数、左键/中键拖动平移、双击复位 100%，只改 transform 不重算求值）；**`Shift+A` / 「+ 添加节点」建出来的节点跟着鼠标走、左键放下**（位移 ÷ 当前缩放，与主画布「新建并移动」同手感，`Esc` 只结束跟随）；调色面板开着时画布的切刀/合线手势**让路**（以前会隔着全屏层把转接点建到下面的主画布上），且 `Shift`+右键**压在连线上也能起手**合线。
+- 调色面板 v1.73（2026-10-29）：**拖节点压住连线松手就串进去**（Blender 的 insert-on-link，压住的线会变蓝加粗；新建节点跟随状态下同样生效）；**端口命中区 10px → 26px**，松手还按「线上的输入口 → 节点身上取空输入口 → 34px 内最近输入口」三级吸附，拖线悬停节点时输入口整体点亮；数字参数换成**专业单位 + 全宽滑轨**（色相 ±180°、饱和度/明度/强度 ±100%、色温 2000–12000K、曝光 EV；标签与数值印在轨道上，Shift/Alt 拖动 0.12× 微调、滚轮一格、方向键一步、双击复位、数字框直填）；**曲线节点**支持主曲线 + R/G/B 分通道（点击加点 / 拖动 / 双击删点 / 重置，引擎合成 256×1 LUT 查表，单调三次插值）；预览右侧常驻**示波器**（直方图 / 波形 / 矢量，带暗部·高光裁切百分比），并新增**白平衡**节点；点「应用」退出后会在调色节点右侧**自动多一张「调色结果」图**并连成「调色 → 结果图」（以前只把结果写回调色节点本身），视口自动框住这两张。顺手修掉 **WebGL2 下导出全黑**（RGBA16F 直接 `readPixels(UNSIGNED_BYTE)` 是非法组合，现在统一先画进 RGBA8 再读，导出与示波器共用）。
+- 调色面板示波器换成达芬奇同款 v1.74（2026-10-29）：**波形图 / 分量图 / 矢量图**三张（直方图 tab 撤掉，统计仍用来算暗部·高光裁切），纵轴统一 **10-bit 0–1023**、每 128 一格、顶格写 1023。**分量图**红/绿/蓝三路并排、共用刻度与同一峰值；**波形图**用每格像素的平均色给波形上色（灰阶→灰白、偏暖→橙，重叠加成）；**矢量图**带 5°/30° 刻度环、六个 **75% 彩条靶位**（角度/半径由 BT.601 反算，不是写死的）与肤色线（I 轴 ≈128°），纯色块额外加一颗径向柔光。**面板可调大小**：拖左边缘改宽、拖下边缘改高、双击任一边复位，尺寸存进 `compositorGraph.scope` 随项目保存；画布按 CSS 尺寸 × dpr 重设，拉宽不糊。交付图见 `docs/shots/compositor-scopes-{waveform,parade,vectorscope}.png`。
+- 调色面板四轮调色 v1.75（2026-10-29）：**「色彩平衡」换成 Blender Color Balance 同款四轮卡片**（用户给的参照图）—— 暗部 / 中灰 / 亮部 / 偏移 四个色轮横排，卡片 744px 宽。每个轮子：色相环 + 十字准星 + 白点（位置由 R/G/B 的色度反算，纯红推在左上 120°、纯绿左下、纯蓝右侧）+ 外圈亮度弧 + 「亮度 + R/G/B」四个数字框（偏移只有 R/G/B，25.00 为中性）+ 四条彩色细滑轨（白/R/G/B）+ 一条带刻度的亮度长条。**手势**：盘内拖动＝色度（三通道此消彼长、平均亮度不动）、盘外圈上下拖＝亮度（三通道同时加减、色偏保留）、数字框直接输入、细滑轨/长条拖动（双击复位）、标题右边 `↺` 整个轮子回中性。**参数就是界面上的数字**：暗部/中灰中性 0.00、亮部 1.00、偏移 25.00；引擎按 ASC CDL 的 `slope = gain − lift`、`offset = lift` 与偏移量（25 = 0）在 linear 空间求值，中性值代进去恰好是恒等，所以老项目存的 `liftR…gainB` 不用迁移。交付图见 `docs/shots/compositor-color-wheels.png`，回归 `test:compositor` 139 项 + 真机 `compositor-wheels` 场景（拖偏移轮后读预览像素，R 明显升高）。
+- 调色面板换皮 + 修「放大就糊」v1.76（2026-10-29）：用户反馈「画布上的节点 ui 放大后很模糊」，按「先出概念稿、拍板再改」的流程走了三套，最终选**玻璃面板**那一套 —— 冷灰蓝底 + 半透明面板 + 青色强调，标题栏 34px、分类色收成一颗小圆点，连线改青色、选中态青色描边，画布右下角新增缩放读数 `− 100% + ⤢`（点读数回 100%）。**糊的真因是两处渲染**：`.cg-world` 常驻 `will-change: transform` 把整棵节点树固化成合成层位图、缩放时按旧分辨率拉伸；色轮是 canvas，按固定 dpr 画完跟着 `scale()` 一起放大。现在只在缩放/拖动期间加 `.cg-scaling`、抬手 140ms 撤掉（浏览器按新 DPI 重栅格化），色轮盘面改成 conic + radial 渐变（矢量）；顺手修掉高分屏上**示波器只画左上 1/4** 的老 bug（`clearScope` 把 transform 打回单位矩阵却按 CSS 尺寸清屏）。几何：四轮卡片 744 → 792、端口 10 → 12、点阵 22 → 26、色轮盒 148px（色盘 68% / 外圈亮度轨道 84%，拖拽坐标仍按 112 逻辑单位，手势没动）。
+- 调色面板保存与退出 v1.77（2026-10-29）：用户报「没有应用按钮啊？希望按退出也会输出保存图像」。**按钮被系统窗口按钮压住了** —— DSH 桌面窗口的 `titleBarOverlay` 原生 − ▢ ✕ 画在网页上方、任何 z-index 都盖不住，调色面板右上角的「应用」正好在它下面。现在顶栏右侧按 Window Controls Overlay 几何让出系统按钮宽度（取不到时 Electron 兜底 152px、浏览器 0），窄窗口整组动作换行仍靠右。主动作改名「保存并退出」，**有改动时按 Esc 也等于保存并落成品图**；「放弃修改」要点两次才丢。导出目标改成「所见即所得」：效果只接了预览链、输出还接着原图时按预览结果导出（以前会导出没调过色的原图），规则是 `graph.ts` 的 `chooseApplyTargets`。回归 `test:compositor` 153 项 + browser-check 新增 Esc 保存两项。
+- 调色面板六条 v1.79（2026-10-30）：用户一次报了六件事 ——「上方的按钮点不动／拖入线段接入后自动调整节点位置／色轮变方了／Shift+A 模糊搜索节点／下拉选项纯白／混合节点要有 a b 系数三个输入」。
+  ① **顶栏按钮点不动** = 整排压在 Windows 系统标题栏带里（DSH 桌面窗口 `titleBarOverlay.height: 40` 那 40px 网页收不到点击）；上一版只让了右侧宽度，现在按 WCO 几何给整块面板 `padding-top`（Electron 兜底 40px、浏览器 0）。
+  ② **色轮变方** = DSH nova 主题的全局 `corner-shape: superellipse(1.5)` 把 `border-radius:50%` 变成超椭圆；圆形控件统一补 `corner-shape: round`。
+  ③ **下拉纯白** = 原生 `<select>` 弹层是系统画的，混合模式与曲线通道换成深色自绘下拉（打勾、键盘可选、自动翻面不跑出视口）。
+  ④ **混合节点三输入** = A / B / 系数（系数口接灰度或蒙版按像素控混合量，空接等价于滑块）。
+  ⑤ **Shift+A 模糊搜索** = 中文子序列 / 拼音首字母（scph → 色彩平衡）/ 英文名，Enter 直接建节点。
+  ⑥ **自动避让** = 宽节点串进连线后先站到上游右边 40px、再把挡路的卡片向右级联推开，用户亲手放下的那张永不移动。
+- 调色面板撤销/重做 v1.78（2026-10-29）：用户「添加 ctrl+z 撤销功能」。调色面板按**整张图快照**记历史（节点位置 + 连线 + 节点参数一次回退），支持 **Ctrl+Z 撤销 / Ctrl+Shift+Z（或 Ctrl+Y）重做**，顶栏新增 `↶` `↷` 两颗按钮（同一套历史、禁用态跟着走）。连续手势（滑块 / 色轮 / 曲线控制点）在第一次改动时抓快照、停手 420ms 合成**一步**，拖一次色相不会吃掉几十步撤销；新增节点（含跟随移动）、拖动节点（含压线插入）、接线 / 断线、`Delete` 删节点、`Shift+右键` 合线都能整步撤销。历史最多 80 步，视图平移 / 缩放与示波器开关不进历史；撤销回到打开时的状态后 `edited` 归零，Esc 不会再白落一张图。输入框里 Ctrl+Z 仍走浏览器原生撤销。
+- 测试覆盖：类型门禁（`pnpm typecheck`，`src/` 零错误）+ jsdom 契约测试 + 真机浏览器视觉校验，累计 2500+ 回归用例守住画布几何、交互、响应逻辑- 保存链路（v1.58，见 `scripts/patches/aifisher/src/stable/persistence/canvasWorkflow.ts`）：上游的乐观并发是「撞 409 → 重读服务端 → 三向合并 → 重发」，但三向合并遇到**同一字段两边都改**会抛冲突，并把这份文档的保存**永久封锁**（只有重新打开项目才解），画布照常能编辑、实际一个字都存不进去。本插件改成「救援合并」：节点/分组按 id 取并集、同 id 以当前窗口为准、**一定落盘**，并提示用户核对；保存/读取请求另加 20s 超时，避免一次挂住的请求把保存队列永久占死。agent 的每次改动还会由 host 立刻追加一次保存，回执里用 `saved` 说明有没有真的写进 `canvas.json`。
 - 云端结果落盘（2026-10-20）：云端通道回的是**服务商临时链接**（如 `https://file*.aitohumanize.com/file/<hash>.png`），host 侧会先把字节下载进素材库，节点的 `resultUrl` 才是同源 `/api/aifisher/canvas/media/...`。图床在任务刚回报 SUCCESS 的头几秒常常还是 404（文件没落地），所以下载带 4 次退避重试；真要失败，节点会显示「图片链接已失效」并留痕到 `/api/aifisher/canvas/diagnostics`（`installImageLoadTelemetry` 收 img 的 error 事件），而不是静默留一块黑。
 - 火山方舟直连（v1.60）：一张卡片管两种媒体，只认 `ARK_API_KEY`。**图片**走 `POST /api/v3/images/generations`（`arkImageProvider.ts`：档位+比例 → `size`、参考图内联成 data URL、组图/图层拆分按模型能力分流）；**视频**（Seedance 2.0，`arkVideoProvider.ts`）走异步任务 —— `POST /api/v3/contents/generations/tasks` 提交 `content` 数组（`text` / `first_frame` / `last_frame` / `reference_image` / `reference_video` / `reference_audio`）再轮询 `GET …/tasks/{id}`，出片后立刻把 mp4 下载进素材库。参考图的字节内联（方舟访问不到 `127.0.0.1`），参考视频/音频只收公网直链；模型名逐字取自画布目录（`豆包视频2.0`），界面的「自定义模型 ID」可换成账号下的推理接入点（`ep-…`）。
 - Agent 契约：[docs/canvas-agent-contract.md](docs/canvas-agent-contract.md) —— `canvas_control` 每类 operation 的字段、`configure` 的四条硬约束（模型名逐字匹配 / 换模型会重置高级参数）、生成授权边界与错误码速查。**要让 AI 正确操作画布，先喂它这份文档。**
-
-### 服务端拼版（独立工具，2026-10-25）
-
-[`tools/contact-sheet/`](tools/contact-sheet/README.md)：把项目里**已出图**的节点按画布阅读顺序排成分镜 contact sheet，在 Node 里直接渲染 PNG，完全不走浏览器。
-
-- 为什么：画布自带的导出是 DOM 截图（`html-to-image`），撞三处天花板 —— `foreignObject` 重排慢、跨域素材会污染 canvas、单边 8192+ px 就画不下；服务端重画只受内存限制。
-- 怎么画：读 `canvas.json` → 用 LeaferJS（MIT）重建场景 → `@napi-rs/canvas`（Skia 原生绑定）出 PNG。
-- 边界：**独立 `package.json`，不参与 `pnpm build`、不进 `lib/`、不影响回归**；只拼图片节点，视频节点要求先截帧。
-
-```bash
-cd tools/contact-sheet
-pnpm install --config.node-linker=hoisted --config.enableGlobalVirtualStore=false
-node render.mjs --project 显影 --out sheet.png     # 默认 $DSH_HOME/storages/dsh-aifisher-canvas
-```
 
 ---
 
@@ -221,8 +207,6 @@ node render.mjs --project 显影 --out sheet.png     # 默认 $DSH_HOME/storages
 - `media/`：生成与上传的图片/视频/音频素材
 - `workflows/`：自定义 ComfyUI 工作流配置
 - `cloud-channels.json`：云端通道与密钥配置（密钥值不回传前端）
-- `canvas-memory.json` / `canvas-assets.json`：项目记忆（风格/角色/参数 + 参考锚点）、可复用资产卡片
-- `canvas-camera.json` / `canvas-progress.json`（v1.69）：按项目的摄影参数（机身/镜头/焦段/光圈）、创作进度（阶段 + 已确认方案 + 定稿/参考节点）
 
 ---
 
@@ -238,10 +222,4 @@ node render.mjs --project 显影 --out sheet.png     # 默认 $DSH_HOME/storages
 
 ## 🤝 贡献
 
-欢迎提交 Issue 和 PR。动手前请读：
-
-- [CONTRIBUTING.md](CONTRIBUTING.md) —— 环境、构建（含没有上游源码时的 `pnpm build:offline`）、三条纪律（不手改 vendor / 契约三处同步 / 审批红线）、测试与发版；
-- [CHANGELOG.md](CHANGELOG.md) —— 每个版本对外可见的变化与踩过的坑；
-- `README.dev.md` —— 开发过程中的约束与历史坑（vendor 补丁机制、双 React bundle 隔离、画布几何的 dpr 约束）。
-
-`pnpm check:contract` 会机器对账 enum / 契约文档 / 逃生舱白名单 / 描述预算 / 版本号，CI 也会跑它。
+欢迎提交 Issue 和 PR。修改代码前请阅读 `README.dev.md` 中的开发约束章节，了解 vendor 补丁机制、双 React bundle 隔离规则和画布几何的 dpr 约束，避免踩历史踩过的坑。

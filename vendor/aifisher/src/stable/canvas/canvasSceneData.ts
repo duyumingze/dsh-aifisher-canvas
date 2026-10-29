@@ -96,6 +96,9 @@ export function canvasSceneData(
         const parent = byId.get(id);
         if (!parent) return [];
         let url = parent.resultUrl || parent.dataUrl;
+        // dsh-aifisher-canvas v1.71：转接节点自己没有结果图，按它上游那张算
+        // （resolvedInputs 里已经有 inputUrl 自底向上解析出来的 url）。
+        if (!url && parent.type === 'Junction') url = resolvedInputs.get(parent.id);
         if (['Video', 'Upload Video'].includes(parent.type)) url = parent.lastFrame || url;
         else if (parent.type === 'Text') url = 'text-node-placeholder';
         else if (['Audio', 'Upload Audio'].includes(parent.type)) url = 'audio-node-placeholder';

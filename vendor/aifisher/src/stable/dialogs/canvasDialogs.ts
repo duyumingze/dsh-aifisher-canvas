@@ -85,7 +85,7 @@ export function CanvasOverlays(
   );
 }
 
-export { CanvasCompareNode, CanvasCompositeNode } from '../nodes/canvasImageNodes';
+export { CanvasCompareNode, CanvasCompositeNode, CanvasColorGradeNode, CanvasJunctionNode } from '../nodes/canvasImageNodes';
 
 export { CanvasMiniMaxNode } from '../nodes/canvasMiniMaxNode';
 
