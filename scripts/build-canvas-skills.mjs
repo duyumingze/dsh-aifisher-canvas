@@ -8,11 +8,15 @@
  *      description 末尾追加画布版标记，供模型在选择技能时看到。
  *   ② 正文末尾追加 docs/skill-canvas-adapter-*.md 的适配层（该层自带「本节优先」裁决）。
  *
+ * 源的 name 不在 kebab-case 时可在条目上写 `name` 覆盖（MOKE 出的原件用 MOKEAIGC-V017
+ * 这类版本号式名字，直接当技能名既不好用、也不符合 provider 的命名校验）。
+ *
  * 用法：
  *   node scripts/build-canvas-skills.mjs                 # 输出到 .dsh-tmp/skills（暂存）
  *   node scripts/build-canvas-skills.mjs --out <dir>     # 输出到指定目录（如 ~/.dsh/skills）
  *
- * 源文件路径可用环境变量覆盖：XIAOMO_STORYBOARD_SRC / XIAOMO_ASSETS_SRC。
+ * 源文件路径可用环境变量覆盖：
+ *   XIAOMO_STORYBOARD_SRC / XIAOMO_ASSETS_SRC / MOKE_WORLDBUILDING_SRC。
  */
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -22,15 +26,23 @@ const ROOT = path.resolve(import.meta.dirname, '..');
 const SOURCES = [
   {
     src: process.env.XIAOMO_STORYBOARD_SRC
-      ?? 'E:/AllAssets/Skill/小墨skill/小墨个人分镜SKILL6.0（画面优化）.md',
+      ?? 'E:/AllAssets/Skill/原件/小墨skill/小墨个人分镜SKILL6.0（画面优化）.md',
     adapter: 'docs/skill-canvas-adapter-storyboard.md',
     suffix: '（画布版：文末追加 canvas-shots/v1 机读块，镜头标题「镜头 NN」，设计约束全保留、自检不输出）',
   },
   {
     src: process.env.XIAOMO_ASSETS_SRC
-      ?? 'E:/AllAssets/Skill/小墨skill/小墨个人资产提取SKILL.md',
+      ?? 'E:/AllAssets/Skill/原件/小墨skill/小墨个人资产提取SKILL.md',
     adapter: 'docs/skill-canvas-adapter-assets.md',
     suffix: '（画布版：文末追加 canvas-shots/v1 锁定块，产出锚点·角色NN/场景NN 定版提示词）',
+  },
+  {
+    // MOKE 藏经阁原件：name 是 MOKEAIGC-V017（版本号式），这里归一成跨版本稳定的技能名
+    src: process.env.MOKE_WORLDBUILDING_SRC
+      ?? 'E:/AllAssets/Skill/原件/MOKE/worldbuilding-moke-v17.md',
+    adapter: 'docs/skill-canvas-adapter-worldbuilding.md',
+    name: 'worldbuilding-moke',
+    suffix: '（画布版：文末追加 canvas-shots/v1 机读块，九张概览落成「镜头 NN」、默认不挂锚点、锚点命名与分镜/资产技能共用）',
   },
 ];
 
@@ -63,6 +75,19 @@ function unquote(value) {
   return value;
 }
 
+/**
+ * 把值写成 YAML 双引号标量，转义反斜杠与双引号。
+ *
+ * 不转义的代价很隐蔽：源件的 description 里常有直双引号（MOKE 的 v17 就写着
+ * 「视觉展开产出的是"电影剧照式"图像提示词」），直接拼成 `description: "…"…"` 会在第一个
+ * 内层引号处提前收尾，整条 frontmatter 解析失败 —— DSH 不报错，只是该技能**静默地从
+ * 技能目录里消失**（磁盘文件还在、画布的扫盘接口也还能看到它）。
+ */
+function yamlQuote(value) {
+  if (/[\r\n]/.test(value)) fail(`description 含换行，无法写成单行 YAML 标量：${value.slice(0, 40)}…`);
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
 function buildOne(entry, outDir) {
   const absSrc = path.resolve(entry.src);
   let text;
@@ -73,7 +98,7 @@ function buildOne(entry, outDir) {
   }
   const label = path.basename(absSrc);
   const { meta, body } = splitFrontmatter(text.replace(/^\uFEFF/, ''), label);
-  const name = unquote(readField(meta, 'name', label));
+  const name = entry.name ?? unquote(readField(meta, 'name', label));
   const description = unquote(readField(meta, 'description', label));
   const adapter = readFileSync(path.join(ROOT, entry.adapter), 'utf8').trim();
 
@@ -82,7 +107,7 @@ function buildOne(entry, outDir) {
   const frontmatter = [
     '---',
     `name: ${name}`,
-    `description: "${description}${entry.suffix}"`,
+    `description: ${yamlQuote(`${description}${entry.suffix}`)}`,
     '---',
     '',
   ].join('\n');

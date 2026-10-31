@@ -57,7 +57,12 @@ export function CanvasTextNodeContent(props: CanvasTextNodeContentProps) {
   const [reading, setReading] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [pendingImport, setPendingImport] = useState<{ name: string; text: string } | null>(null);
+  // `document` 是 Markdown 解析出来的富文档（v1.87）；其它格式没有这一项，按纯文本落。
+  const [pendingImport, setPendingImport] = useState<{
+    name: string;
+    text: string;
+    document?: unknown;
+  } | null>(null);
   const [editorHost] = useState(() => {
     const element = document.createElement('div');
     element.className = 'af-text-editor-host';
@@ -152,7 +157,8 @@ export function CanvasTextNodeContent(props: CanvasTextNodeContentProps) {
     setEditing(true);
   };
   const closeFullscreen = () => changeFullscreen(false);
-  const importText = (text: string, mode: 'append' | 'replace') => {
+  // v1.87：`rich` 有值时按富文档落库（Markdown 导入），否则仍是纯文本逐行成段。
+  const importText = (text: string, mode: 'append' | 'replace', rich?: unknown) => {
     if (!active.current) return;
     const latest = current.current;
     if (nodeGenerating(latest.node)) {
@@ -160,7 +166,9 @@ export function CanvasTextNodeContent(props: CanvasTextNodeContentProps) {
       return;
     }
     const previous = latest.node.textContent || '';
-    const incoming = textDocumentFromPlainText(text);
+    const incoming = rich
+      ? resolveTextDocument(text, rich)
+      : textDocumentFromPlainText(text);
     const document =
       mode === 'append' && previous.length > 0
         ? {
@@ -189,7 +197,7 @@ export function CanvasTextNodeContent(props: CanvasTextNodeContentProps) {
       const imported = await readTextNodeFile(file, controller.signal);
       if (!active.current || controller.signal.aborted || reader.current !== controller) return;
       if ((current.current.node.textContent || '').length) setPendingImport(imported);
-      else importText(imported.text, 'replace');
+      else importText(imported.text, 'replace', imported.document);
     } catch (failure) {
       if (active.current && !controller.signal.aborted && reader.current === controller) {
         setError(failure instanceof Error ? failure.message : '文本导入失败，原文未改变。');
@@ -472,7 +480,7 @@ export function CanvasTextNodeContent(props: CanvasTextNodeContentProps) {
                 type="button"
                 className="af-text-header-button"
                 disabled={generating}
-                onClick={() => importText(pendingImport.text, 'replace')}
+                onClick={() => importText(pendingImport.text, 'replace', pendingImport.document)}
               >
                 替换正文
               </button>
@@ -480,7 +488,7 @@ export function CanvasTextNodeContent(props: CanvasTextNodeContentProps) {
                 type="button"
                 className="af-text-header-button af-text-primary"
                 disabled={generating}
-                onClick={() => importText(pendingImport.text, 'append')}
+                onClick={() => importText(pendingImport.text, 'append', pendingImport.document)}
               >
                 追加到末尾
               </button>

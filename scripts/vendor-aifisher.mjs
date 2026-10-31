@@ -4695,6 +4695,185 @@ if (versionAligned) {
   fs.writeFileSync(VENDOR_PKG_PATH, `${JSON.stringify(vendorPkg, null, 2)}\n`);
 }
 
+// ---------------------------------------------------------------- 3.13) Markdown → 文本节点（v1.87）
+
+/**
+ * 用户 2026-11-01 原话：「现在画布里的文本节点不兼容 .md 格式的文件，导入 .md 文件内容
+ * 格式完全不正确。可以做一个能直接拖入 .md 文件到画布生成文本节点」。
+ *
+ * 病根：上游「导入文本」把文件送去 host 的 `/agent/drama/script` 解析，拿回来的是**纯文本**
+ * —— `## 标题`、`- 列表`、`**加粗**` 全成了字面量，节点里自然「格式完全不正确」。
+ *
+ * 四处小改动（都不动上游的 DOM 结构，也不改 tiptap schema）：
+ *   ① textDocument.ts **末尾追加** `textDocumentFromMarkdown()` 与 `isMarkdownFileName()`。
+ *      源码单独存在 `scripts/vendor-patches/text-document-markdown.ts`：两三处正则里全是
+ *      反斜杠，塞进模板字符串会被吃掉一层，单独成文件才能原样追加、也方便单独读。
+ *      （vendor 里不能新增文件 —— 3.9 段要求覆盖文件必须对应已存在的上游文件。）
+ *   ② textNodeImport.ts：`.md/.markdown` 走**本机**解析（`file.text()` + 上面的转换器），
+ *      不再交给 host 拉纯文本；其它文档（docx/csv…）原路不变。
+ *   ③ CanvasTextNodeContent.tsx：「导入文本」把解析出的富文档一起交给 importText，
+ *      追加模式也照用（拿 resolveTextDocument 现成的那条路）。
+ *   ④ canvasNodeState.ts：`fisherai:add-canvas-node` 接受 `detail.textPatch` —— 拖入时
+ *      节点一建出来就带正文，不会先空一帧再被填。
+ *
+ * 落库口径不变：textContent（纯文本镜像）与 textRichContent（tiptap 文档）必须由
+ * createTextDocumentPatch 一起产出，否则 resolveTextDocument 校验不过会退回纯段落。
+ */
+const MARKDOWN_TEXT_PATCHES = [
+  {
+    file: 'src/stable/text/textNodeImport.ts',
+    from: "import { readAgentDocument } from '../agent/agentDocuments';",
+    to:
+      "import { readAgentDocument } from '../agent/agentDocuments';\n" +
+      '// dsh-aifisher-canvas v1.87：Markdown 在本机解析成富文档（host 那条路只给回纯文本）。\n' +
+      'import {\n  createTextDocumentPatch,\n  isMarkdownFileName,\n  textDocumentFromMarkdown,\n} from \'./textDocument\';',
+    why: 'Markdown 走本机解析：补 import',
+  },
+  {
+    file: 'src/stable/text/textNodeImport.ts',
+    from: '): Promise<{ name: string; text: string }> {',
+    to: '): Promise<{ name: string; text: string; document?: unknown }> {',
+    why: 'Markdown 走本机解析：返回值带上富文档',
+  },
+  {
+    file: 'src/stable/text/textNodeImport.ts',
+    from:
+      "  const document = await readAgentDocument(file, signal, { preserveWhitespace: true });\n" +
+      "  if (signal.aborted) throw new DOMException('已取消', 'AbortError');\n" +
+      "  if (!document.text.trim()) throw new Error('文档中没有可导入的正文。');\n" +
+      '  return { name: document.name, text: document.text };',
+    to:
+      '  // dsh-aifisher-canvas v1.87：`.md/.markdown` 不走 host 解析（那条路只会给回纯文本，\n' +
+      '  // 标题/列表/加粗全变成字面量），本机把正文读成 Markdown 再转成节点富文档。\n' +
+      '  if (isMarkdownFileName(file.name)) {\n' +
+      '    // FileReader 而不是 Blob.text()：老环境与回归用的 jsdom 都没有 File.text()。\n' +
+      '    const source = await new Promise<string>((resolve, reject) => {\n' +
+      '      const reader = new FileReader();\n' +
+      "      reader.onload = () => resolve(String(reader.result ?? ''));\n" +
+      "      reader.onerror = () => reject(new Error('文档读取失败'));\n" +
+      '      reader.readAsText(file);\n' +
+      '    });\n' +
+      "    if (signal.aborted) throw new DOMException('已取消', 'AbortError');\n" +
+      "    if (!source.trim()) throw new Error('文档中没有可导入的正文。');\n" +
+      '    const patch = createTextDocumentPatch(textDocumentFromMarkdown(source));\n' +
+      '    return { name: file.name, text: patch.textContent, document: patch.textRichContent };\n' +
+      '  }\n' +
+      "  const document = await readAgentDocument(file, signal, { preserveWhitespace: true });\n" +
+      "  if (signal.aborted) throw new DOMException('已取消', 'AbortError');\n" +
+      "  if (!document.text.trim()) throw new Error('文档中没有可导入的正文。');\n" +
+      '  return { name: document.name, text: document.text };',
+    why: 'Markdown 走本机解析：读完就转富文档',
+  },
+  {
+    file: 'src/stable/text/CanvasTextNodeContent.tsx',
+    from: "  const [pendingImport, setPendingImport] = useState<{ name: string; text: string } | null>(null);",
+    to:
+      '  // `document` 是 Markdown 解析出来的富文档（v1.87）；其它格式没有这一项，按纯文本落。\n' +
+      '  const [pendingImport, setPendingImport] = useState<{\n' +
+      '    name: string;\n' +
+      '    text: string;\n' +
+      '    document?: unknown;\n' +
+      '  } | null>(null);',
+    why: '导入文本：待确认的导入带上富文档',
+  },
+  {
+    file: 'src/stable/text/CanvasTextNodeContent.tsx',
+    from: "  const importText = (text: string, mode: 'append' | 'replace') => {",
+    to:
+      "  // v1.87：`rich` 有值时按富文档落库（Markdown 导入），否则仍是纯文本逐行成段。\n" +
+      "  const importText = (text: string, mode: 'append' | 'replace', rich?: unknown) => {",
+    why: '导入文本：接收富文档',
+  },
+  {
+    file: 'src/stable/text/CanvasTextNodeContent.tsx',
+    from: '    const incoming = textDocumentFromPlainText(text);',
+    to:
+      '    const incoming = rich\n' +
+      '      ? resolveTextDocument(text, rich)\n' +
+      '      : textDocumentFromPlainText(text);',
+    why: '导入文本：有富文档就按富文档（含 schema 校验）',
+  },
+  {
+    file: 'src/stable/text/CanvasTextNodeContent.tsx',
+    from: "      else importText(imported.text, 'replace');",
+    to: "      else importText(imported.text, 'replace', imported.document);",
+    why: '导入文本：把富文档带进去',
+  },
+  {
+    file: 'src/stable/text/CanvasTextNodeContent.tsx',
+    from: "                onClick={() => importText(pendingImport.text, 'replace')}",
+    to: "                onClick={() => importText(pendingImport.text, 'replace', pendingImport.document)}",
+    why: '导入确认框：替换正文也要带富文档',
+  },
+  {
+    file: 'src/stable/text/CanvasTextNodeContent.tsx',
+    from: "                onClick={() => importText(pendingImport.text, 'append')}",
+    to: "                onClick={() => importText(pendingImport.text, 'append', pendingImport.document)}",
+    why: '导入确认框：追加到末尾也要带富文档',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeState.ts',
+    from: '        place?: boolean;\n      }>).detail;',
+    to: '        place?: boolean;\n        /** 拖入文本文件时一起带来的正文（textContent + textRichContent）。 */\n        textPatch?: Partial<CanvasNode>;\n      }>).detail;',
+    why: '建节点事件：接受正文补丁',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeState.ts',
+    from: '      let node = createCanvasNode(runtime, detail.type, { x: point.x, y: point.y }, undefined);',
+    to:
+      '      let node = createCanvasNode(runtime, detail.type, { x: point.x, y: point.y }, undefined);\n' +
+      '      // dsh-aifisher-canvas v1.87：拖入 .md/.txt 时把正文一起写进去（同一个 updateCanvasNode，\n' +
+      '      // 与节点里手改走同一条路）。镜像文本与富文档的一致性由调用方的\n' +
+      '      // createTextDocumentPatch 保证 —— 这里只负责贴上去。\n' +
+      '      if (detail.textPatch && node.type === \'Text\') {\n' +
+      '        const applied = updateCanvasNode([node], node.id, detail.textPatch, runtime);\n' +
+      '        if (applied[0]) node = applied[0];\n' +
+      '      }',
+    why: '建节点事件：建完立刻带正文',
+  },
+];
+
+{
+  const problems = [];
+  for (const patch of MARKDOWN_TEXT_PATCHES) {
+    const target = path.join(VENDOR, patch.file);
+    if (!fs.existsSync(target)) {
+      problems.push(`${patch.file}（文件不存在）`);
+      continue;
+    }
+    const original = fs.readFileSync(target, 'utf8');
+    const hits = original.split(patch.from).length - 1;
+    if (hits !== 1) {
+      problems.push(`${patch.file}: ${patch.why} —— 锚点命中 ${hits} 次（预期 1 次）`);
+      continue;
+    }
+    fs.writeFileSync(target, original.split(patch.from).join(patch.to));
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `[vendor] Markdown 文本节点补丁没对齐（上游可能改了写法，请核对）：\n  - ${problems.join('\n  - ')}`,
+    );
+  }
+
+  const snippetPath = path.join(REPO, 'scripts', 'vendor-patches', 'text-document-markdown.ts');
+  const textDocumentTarget = path.join(VENDOR, 'src/stable/text/textDocument.ts');
+  if (!fs.existsSync(snippetPath)) {
+    throw new Error(`[vendor] 找不到 Markdown 转换器源码：${snippetPath}`);
+  }
+  if (!fs.existsSync(textDocumentTarget)) {
+    throw new Error('[vendor] Markdown 转换器没找到落点：src/stable/text/textDocument.ts');
+  }
+  const snippet = fs.readFileSync(snippetPath, 'utf8').trimEnd();
+  const before = fs.readFileSync(textDocumentTarget, 'utf8');
+  if (before.includes('textDocumentFromMarkdown')) {
+    throw new Error('[vendor] textDocument.ts 里已经有 textDocumentFromMarkdown（重复追加）');
+  }
+  fs.writeFileSync(textDocumentTarget, `${before.trimEnd()}\n\n${snippet}\n`);
+  console.log(
+    `[vendor] Markdown 文本节点：${MARKDOWN_TEXT_PATCHES.length} 处锚点 + 转换器追加（${snippet.split('\n').length} 行）`,
+  );
+}
+
 // ---------------------------------------------------------------- 
 console.log(
   [

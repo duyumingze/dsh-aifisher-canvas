@@ -6,10 +6,10 @@
 一块专业级 AI 创作无限画布 —— 你说一句话，DSH 原生 Agent 在画布上替你搭好整条流水线；<br>
 而按下「生成」的那一下（费用授权），永远由你自己按。</p>
 
-**Version**: v1.86 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
+**Version**: v1.87 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v1.86.0-5eead4?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.87.0-5eead4?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/Node-%E2%89%A522.19-3c873a?style=flat-square" alt="node">
   <img src="https://img.shields.io/badge/React-19-61dafb?style=flat-square" alt="react">
   <img src="https://img.shields.io/badge/TypeScript-5.8-3178c6?style=flat-square" alt="typescript">
@@ -143,6 +143,7 @@
 - 多选图片自动折叠成叠图，不展开也能在卡片上翻页查看
 - 两步式智能扩图：整页工作台先按目标比例画出「扩图画面」（原图落位、待补区斜纹标注），再生成你自己的扩图节点，提示词参考图自动填好，生成由你自己触发
 - 内置图片裁剪、宫格切分、标注蒙版、尺寸调整工具，不用跳出去用其他软件
+- **文本节点直接吃 Markdown**：把 `.md` / `.txt` 从系统里拖到画布上，指针处就落一个排好版的文本节点（标题 / 嵌套清单 / 表格 / 代码块 / 加粗），节点里的「导入文本」也按 Markdown 解析；正文给模型读的是**去掉记号的干净纯文本**，屏幕上看到的是排版（见 [docs/markdown-text-nodes.md](docs/markdown-text-nodes.md)）
 - **换肤与界面缩放**：玻璃面板皮肤（与调色合成器同一套视觉语言）、80 / 90 / 100 / 110 / 125 / 150% 六档缩放、生成中的噪波点阵——都不改画布内容本身
 
 ### 项目库与设置页
@@ -255,10 +256,10 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
 | 架构 | 双 bundle：host 半进程内加载，client 半浏览器独立运行，跨 bundle 通过全局桥通信 |
 | 与 DSH 的边界 | 画布会把「从系统拖进来的文件」事件止步在自己的容器上（`containFileDrags`）。宿主把「拖入即可添加附件」的全屏提示层挂在 `document` 的 dragenter/dragleave 计数上，而画布的 `onDrop` 会 `stopPropagation` —— 不拦住的话宿主永远收不到那次 drop，计数停在 1，整屏遮罩再也退不掉（真机踩过）。同理，任何一次鼠标点击都会补一次 dragleave，把已经卡住的遮罩解开 |
 | Agent 契约 | [docs/canvas-agent-contract.md](docs/canvas-agent-contract.md) —— `canvas_control` 每类 operation 的字段、`configure` 的硬约束、生成授权边界与错误码速查。**要让 AI 正确操作画布，先喂它这份文档** |
-| 测试 | 类型门禁（`pnpm typecheck`）+ 54 套 jsdom 契约测试（3000+ 项）+ 真机浏览器视觉校验（`browser-check` / `verify-live-*`） |
+| 测试 | 类型门禁（`pnpm typecheck`）+ 55 套 jsdom 契约测试（3000+ 项）+ 真机浏览器视觉校验（`browser-check` / `verify-live-*`） |
 
 <details>
-<summary><b>实现细节与版本日志（v1.58 – v1.86）</b> —— 每个版本改了什么、踩了什么坑</summary>
+<summary><b>实现细节与版本日志（v1.58 – v1.87）</b> —— 每个版本改了什么、踩了什么坑</summary>
 
 ### 数据与保存
 
@@ -292,6 +293,10 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
 - 打开画布 = 新项目库 + 旧版设置移除 v1.85（2026-10-31）：① **首屏换了**：打开「无限画布」直接进项目库，vendor 那张旧看板留在底下当「没有项目」的占位、被 `html.afg-page-open` 藏起来；带恢复标记的刷新仍回到上次的画布；项目库是首屏时不给关。② **旧设置对话框整块移除**：老对话框里的面板改成页内宿主 —— 开源服务（ComfyUI 整页）、闭源服务、自定义通道、项目数据目录、下载目录、检查更新，设置页新增第三个分区「服务与通道」。③ **窄画布 hero 修版**：会话栏展开时画布 ~950px，hero 固定 344+300 会把中间挤成叠字，改用容器查询两列 / 单列。
 - 打开画布后点一次就进项目 v1.86（2026-10-31）：用户「打开无限画布后要点击两次才能进入画布，第一次点击好像才正式激活项目管理器」。根因是**项目库关得太早**：点「打开画布」只派发 `fisherai:open-project`，vendor 还要走一次 `loadProject` 才把 view 切成 canvas；这中间项目库先 `closeCanvasPage()`，首屏看门看到「底下还是旧看板 + 页面层一屏都没开」就判定「用户回到了项目库」，立刻把项目库**重新挂一份**，第二次点才进得去。现在**项目库等画布底盘 `#canvas-background` 出现再关**（60ms 轮询 / 6s 超时，等不到就留着页面并提示），首屏看门另按 `fisherai:open-project` 加 5s 窗口不自动开项目库。新增 `scripts/test-canvas-home.mjs`（12 项，jsdom 必须给 `/workflows/<id>` 加 200ms 延迟才复现）与 `scripts/verify-live-home-click.mjs`（CDP 真鼠标，10 项）。
 
+### 文本节点 / Markdown（v1.87）
+
+- 拖入 `.md` 直接成节点 v1.87（2026-11-01）：用户「现在画布里的文本节点不兼容 .md 格式的文件，导入 .md 文件内容格式完全不正确。可以做一个能直接拖入 .md 文件到画布生成文本节点」。两个病根：① 画布 `onDrop` 的唯一去处是 `upload()`，`classifyMedia()` 只认图片/视频/音频，`.md` 直接被弹「无法识别的文件类型」；② 文本节点的「导入文本」把文件送 host 的 `/agent/drama/script` 解析，拿回的是**纯文本**，`##`／`-`／`**` 全成了字面量。现在 ① 在 **window 捕获阶段**接管画布范围内的文本文件（`md markdown mdx …` 走 Markdown，`txt csv json yaml srt …` 按行成段，单份 2 MB 上限，空文件只提示不建节点，多份斜向错开），落点换算与节点搜索同一套，节点以指针为中心；② 新增 `textDocumentFromMarkdown()` 转换器（源码 `scripts/vendor-patches/text-document-markdown.ts`，构建期追加到 vendor 的 `text/textDocument.ts`）把标题 1–3 / 嵌套清单 / 有序清单 `start` / 引用 / 围栏代码块 / 分隔线 / 管道表格 / 加粗·斜体·删除线·行内代码 / 链接取文字 / 转义 / 硬换行 / front matter 丢弃 / CRLF 翻成 tiptap 文档，「导入文本」的 `.md` 也改走本机 FileReader + 同一个转换器（替换 / 追加与确认框都带富文档）。落库仍是 `createTextDocumentPatch()` 一次算出的 `textContent`（干净纯文本，给模型读）+ `textRichContent`（排版）。vendor 补丁 11 处锚点 + 1 段追加，新增 `scripts/test-canvas-markdown.mjs` 48 项。说明见 [docs/markdown-text-nodes.md](docs/markdown-text-nodes.md)。
+
 </details>
 
 ---
@@ -303,6 +308,7 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
 | [`使用说明.md`](使用说明.md) | 一步步上手：三条通道、节点、生成、调色、导出 |
 | [`docs/canvas-agent-contract.md`](docs/canvas-agent-contract.md) | `canvas_control` 完整契约 —— **要让 AI 正确操作画布，先喂它这份** |
 | [`docs/page-layer.md`](docs/page-layer.md) | 项目库 / 设置页这层页面怎么挂进画布 |
+| [`docs/markdown-text-nodes.md`](docs/markdown-text-nodes.md) | 文本节点怎么吃 Markdown：拖入、导入、`textContent` / `textRichContent` 两条口径 |
 | [`docs/storage-and-migration.md`](docs/storage-and-migration.md) | 数据目录、项目归档与迁移 |
 | [`README.dev.md`](README.dev.md) | 开发约束：vendor 补丁机制、双 React bundle 隔离、画布几何的 dpr 约束 |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | 怎么提交、怎么跑回归、CI 跑哪几套 |

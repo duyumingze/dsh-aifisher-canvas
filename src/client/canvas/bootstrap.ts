@@ -93,6 +93,8 @@ import { installNodeFramework } from '../../../vendor/aifisher/src/stable/nodes/
 import { installCanvasUiScale } from './uiScale';
 import { installCanvasGenerationDots } from './genDots';
 import { installCompositorBridge } from './compositor/bridge';
+// v1.87：拖入 .md / .txt 直接生成文本节点（Markdown 在本机翻成富文档）。
+import { installCanvasTextFileDrop } from './textDrop';
 import { installImageModeAdapter } from '../../../vendor/aifisher/src/stable/generation/imageMode';
 import { installVideoModeAdapter } from '../../../vendor/aifisher/src/stable/generation/videoMode';
 import { installMidjourneyReferenceAdapter } from '../../../vendor/aifisher/src/stable/generation/midjourneyReferences';
@@ -892,6 +894,8 @@ const INSTALLERS: Installer[] = [
   { name: 'installCanvasKnife', install: installCanvasKnife },
   // ---- v1.70：调色节点（Color Grade）→ 全屏合成器（Shift+A 加效果、Shift+点击接预览）----
   { name: 'installCanvasCompositor', install: installCanvasCompositorSupport },
+  // ---- v1.87：拖入 .md / .txt → 文本节点（Markdown 在本机转富文档，不再走 host 拉纯文本）----
+  { name: 'installCanvasTextFileDrop', install: installCanvasTextFileDrop },
 ];
 
 /** 已装成功的模块名（诊断用）。 */

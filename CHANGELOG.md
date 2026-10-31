@@ -3,22 +3,63 @@
 > 只记**对外可见的行为变化**与踩过的坑，实现细节看 `git log`。
 > 版本从 v1.45 起才有完整记录；更早的按主题合并。
 
-## 未发布 · 文档：新版插件介绍（78 秒宣传片 + 截图 + 文档地图）— 2026-10-31
+## v1.87.0 — 2026-11-01
 
-README 重写成一份能直接当落地页用的介绍，代码零改动：
+### 文本节点：拖入 .md / .txt 直接生成节点
 
-- **宣传片**《同一块画布》78 秒（1920×1080、带音轨）进库：`docs/media/same-canvas-78s.mp4`
-  （`+faststart`），顶部海报可点播，另附 14 秒循环 GIF（第 02 场「它的手」）和五张分场静帧；
-  分场表把片子里出现的 `read / recipe / configure / connect / preview / progress`、
-  「6 项生成已准备 · 在画布内批准」、9 节点 / 6 镜头都对回真实行为。
-- **界面图换成 v1.81 之后的玻璃面板皮肤**（原来是 v1.70 旧皮肤的截图），并补上调色合成器、
-  生成中噪波点阵两张。
-- 新增「一分钟看懂：它和前一种 AI 画布差在哪」对照表、调色合成器 / 项目库与设置页两节、
-  **文档地图**（使用说明 / Agent 契约 / 页面层 / 存储迁移 / 开发约束 / 贡献 / 日志）。
-- v1.58–v1.86 的实现细节与版本日志收进 README 的折叠块（`<details>`），首屏只留产品介绍。
-- `package.json` 补齐 `description` / `keywords` / `repository` / `homepage` / `bugs` / `license`，
-  GitHub 仓库页与 npm 元数据不再是空的。
-- `pnpm check:contract` 21 项仍全绿（README 版本行保留 `**Version**: v1.86` 供机器对账）。
+用户原话（2026-11-01）：「现在画布里的文本节点不兼容 .md 格式的文件，导入 .md 文件内容格式完全不正确。可以做一个能直接拖入 .md 文件到画布生成文本节点」。
+
+两处病根，一起修：
+
+- **拖文件只有一个去处**：画布 `onDrop` → `upload()`，`classifyMedia()` 只认图片/视频/音频，
+  `.md` 直接被当「无法识别的文件类型」弹一句，什么都没发生。
+- **「导入文本」把 Markdown 当纯文本**：`readTextNodeFile()` 把文件送去 host 的
+  `/agent/drama/script` 解析，拿回来的是纯文本，`## 标题`／`- 列表`／`**加粗**` 全是字面量 ——
+  这就是「格式完全不正确」。
+
+改动：
+
+- **拖入即建节点**（新 `src/client/canvas/textDrop.ts`，`installCanvasTextFileDrop`）：在
+  **window 捕获阶段**拦 `drop`，只接管画布范围内的文本文件（`md markdown mdx …` 走 Markdown，
+  `txt csv json yaml srt …` 按行成段），图片/视频/音频与画布外的拖入一律放行。落点换算沿用
+  节点搜索那套（`#canvas-viewport-content` 的 translate3d/scale + `#canvas-background` 原点），
+  节点以指针为中心；单份上限 2 MB，空文件给底部提示不建节点，多份斜向错开。
+- **建节点出口带正文**：`fisherai:add-canvas-node` 的 detail 多一个
+  `textPatch: { textContent, textRichContent }`，vendor 的桥先 `createCanvasNode` 再走同一个
+  `updateCanvasNode` 贴上去（与节点里手改同一条写路径），不会先空一帧再被填。
+- **Markdown → 富文档**：新增转换器 `textDocumentFromMarkdown()`（源码在
+  `scripts/vendor-patches/text-document-markdown.ts`，构建期追加到 vendor 的
+  `text/textDocument.ts` 末尾）。支持标题 1–3、嵌套清单 / 有序清单（带 `start`）、引用、
+  围栏代码块、分隔线、管道表格、加粗/斜体/删除线/行内代码、链接取文字、转义、硬换行、
+  丢弃 front matter、CRLF。刻意不做：链接与图片地址（schema 里没有这两类节点）、HTML 块、
+  脚注、公式、`===` 下划线标题。
+- **「导入文本」也按 Markdown 解析**：`.md/.markdown` 在本机用 `FileReader` 读原文再转
+  富文档（不再经 host），替换 / 追加与那个确认框都把富文档带上；docx 等其它文档原路不变。
+- **落库口径不变**：`textContent`（纯文本镜像）与 `textRichContent`（tiptap 文档）永远由
+  `createTextDocumentPatch()` 一起产出 —— 屏幕上看到排版，模型读到干净文字，少了镜像就会
+  退回纯段落（详见 `docs/markdown-text-nodes.md`）。
+- **vendor 补丁**：`scripts/vendor-aifisher.mjs` 新增 3.13 段（11 处锚点 + 1 段追加，每条锚点
+  断言命中 1 次）。转换器不写在模板字符串里，是因为里面全是 `\s`/`\d` 这类正则，塞进模板
+  字符串会被吃掉一层反斜杠。
+- **回归**：新增 `scripts/test-canvas-markdown.mjs` 48 项（转换器纯函数 + jsdom 真画布拖入 +
+  空文件提示 + 空节点导入 + 补丁/产物标记），已进 `pnpm test` 与 `run-all-regressions.mjs`。
+  踩坑记一笔：jsdom 既没有 `File.text()` 也没有 `HTMLDialogElement.showModal()`，所以本机读取
+  统一用 `FileReader`，而「已有正文 → 替换/追加」那条对话框路径只能在真机走（回归里改测
+  空节点的直接导入）。
+- 文档：新增 `docs/markdown-text-nodes.md`；`使用说明.md` 补 4.7 节与操作表一行。
+
+### 技能：worldbuilding-moke 接入画布
+
+用户原话（2026-11-01）：「将这个skill适配一下画布」。
+
+小墨那两个技能的适配层（`docs/skill-canvas-adapter-*.md` + `build-canvas-skills.mjs` 生成）现在有第三个接入方：
+
+- **新增 `docs/skill-canvas-adapter-worldbuilding.md`**：九张世界概览 → `shots` 1–9（标题 `镜头 01 居民·盐工` 这种）；机读层只出**中文压缩版**（正文的中英双语两版照旧保留给人看）；MJ 的相机打头句压成中文「电影剧照质感：Arri 65mm＋Cooke 变形宽银幕＋模拟胶片颗粒」，负面串压成一条中文禁项；画幅交给节点 `aspectRatio`，不进提示词；「仅设定」时不输出机读块。
+- **默认不挂锚点**（`locks: []`）。理由不是省事：画布覆盖率口径是「每个镜头都**全部**锚点覆盖」，给世界概览挂一张人物定妆锚点，`consistency op:"lock"` 会把那张脸当参考图连进地景、动物、建筑镜头，画面被带歪。只有同一居民/地点真重复出现时才建锁（`锚点·居民NN` / `锚点·场景NN` / `道具·NN` / 模式 B 的 `锚点·生物NN`），编号与 `character-analyzer`、`storyboard-director` **共用一套命名空间**（同一地点只允许一个锚点，后续技能沿用同一 label）。反过来，模式 C（同一画面 9 种拍法）就该九条全引用同一批 locks —— 那才是覆盖率的理想形态。
+- **`build-canvas-skills.mjs`**：条目支持 `name` 覆盖 —— MOKE 原件的 `name: MOKEAIGC-V017` 是版本号式，不是 kebab-case（会被校验打回），归一成 `worldbuilding-moke` 后跨版本稳定；源路径可用 `MOKE_WORLDBUILDING_SRC` 覆盖。
+- **踩坑并修掉**：description 拼进 `description: "…"` 双引号标量时，源件里那句 `视觉展开产出的是"电影剧照式"…` 的**直双引号**会在第一个内层引号处提前收尾，整条 frontmatter 解析失败 —— DSH 不报错，只是该技能**静默地从技能目录里消失**（磁盘文件还在，画布 `GET /api/aifisher/skills` 的扫盘结果也还列着它，唯独 `available_skills` 里没有）。现在 `yamlQuote()` 转义 `\` 与 `"`，值里有换行直接 fail。
+- **验证**：正文与 MOKE 原件**字节级一致**（只重写了 frontmatter + 末尾追加适配层）；重建后本会话技能目录立即出现 `worldbuilding-moke`（description 带「画布版」标记）；两份既有技能的重建产物与 `E:\AllAssets\Skill\画布技能\` 暂存副本哈希一致，唯一差异是 DSH 里装的那份多一行 `disable-model-invocation: false`（技能面板开关写的）—— 所以没有覆盖它们，只装了新的这一份。
+
 
 ## 未发布 · v1.86.0 打开画布后点一次就进项目（不再点两次）— 2026-10-31
 

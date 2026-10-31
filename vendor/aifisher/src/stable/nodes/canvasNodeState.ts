@@ -69,6 +69,8 @@ export function attachCanvasNodeCreateBridge(
         comfyMode?: string;
         point?: { x?: number; y?: number };
         place?: boolean;
+        /** 拖入文本文件时一起带来的正文（textContent + textRichContent）。 */
+        textPatch?: Partial<CanvasNode>;
       }>).detail;
       if (!detail || typeof detail.type !== 'string' || detail.type.length === 0) return;
       const point = detail.point;
@@ -77,6 +79,13 @@ export function attachCanvasNodeCreateBridge(
       (window as { __DSH_NODE_CREATE_CALLS__?: number }).__DSH_NODE_CREATE_CALLS__ =
         ((window as { __DSH_NODE_CREATE_CALLS__?: number }).__DSH_NODE_CREATE_CALLS__ ?? 0) + 1;
       let node = createCanvasNode(runtime, detail.type, { x: point.x, y: point.y }, undefined);
+      // dsh-aifisher-canvas v1.87：拖入 .md/.txt 时把正文一起写进去（同一个 updateCanvasNode，
+      // 与节点里手改走同一条路）。镜像文本与富文档的一致性由调用方的
+      // createTextDocumentPatch 保证 —— 这里只负责贴上去。
+      if (detail.textPatch && node.type === 'Text') {
+        const applied = updateCanvasNode([node], node.id, detail.textPatch, runtime);
+        if (applied[0]) node = applied[0];
+      }
       if (detail.comfyMode && node.type === 'ComfyUI') {
         const updated = updateCanvasNode([node], node.id, { comfyMode: detail.comfyMode }, runtime);
         if (updated[0]) node = updated[0];

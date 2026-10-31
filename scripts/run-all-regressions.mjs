@@ -66,6 +66,8 @@ const order = [
   'test-canvas-pages.mjs',
   // v1.86：首屏「点一次就进画布」（别让看门把项目库弹回来）
   'test-canvas-home.mjs',
+  // v1.87：拖入 .md/.txt → 文本节点（Markdown 本机转富文档）
+  'test-canvas-markdown.mjs',
   'test-canvas-workflow-library.mjs',
   'test-canvas-shadcn-ui.mjs',
   'verify-canvas-ui.mjs',

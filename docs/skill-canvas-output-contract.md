@@ -132,4 +132,16 @@ locks 定妆/定版节点（生成出图）
 ## 9. 演进
 
 改动 schema 时升 `schema` 版本（`canvas-shots/v2`），并同步：
-`docs/skill-canvas-adapter-storyboard.md`、`docs/skill-canvas-adapter-assets.md`、`scripts/build-canvas-skills.mjs`。
+`docs/skill-canvas-adapter-storyboard.md`、`docs/skill-canvas-adapter-assets.md`、
+`docs/skill-canvas-adapter-worldbuilding.md`、`scripts/build-canvas-skills.mjs`。
+
+## 10. 已知的接入方
+
+| 技能 | 机读形态 | 锚点 |
+| --- | --- | --- |
+| `storyboard-director` | `locks` + `shots`（每镜一图/视频） | 引用角色/场景锚点 |
+| `character-analyzer` | 只有 `locks`（`shots: []`） | 产出 `锚点·角色NN` / `锚点·场景NN` / `道具·NN` |
+| `worldbuilding-moke` | 九张世界概览 → `shots` 1–9 | **默认不挂**，只在同一居民/地点重复出现时挂；编号与上面两个技能共用 |
+
+`worldbuilding-moke` 的源件来自 MOKE 藏经阁（name 是 `MOKEAIGC-V017` 这类版本号），由
+`build-canvas-skills.mjs` 的 `name` 覆盖归一成 `worldbuilding-moke`，跨版本稳定。
