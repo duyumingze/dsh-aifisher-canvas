@@ -1,27 +1,29 @@
 {
   "name": "dsh-aifisher-canvas",
   "version": "1.86.0",
-  "description": "渡雨鸣泽 · 无限画布：把专业级 AI 创作无限画布做成 DeepSeek Harness 插件，由 DSH 原生 Agent 通过 canvas_control 直接接管画布",
+  "description": "把专业 AI 创作无限画布做成 DSH 插件：DSH 原生 Agent 通过 canvas_control 直接接管画布（建节点、连线、填参、整理素材），支持本地 ComfyUI 与多云端生成。",
   "keywords": [
     "dsh",
     "deepseek-harness",
     "plugin",
     "canvas",
-    "aifisher",
     "infinite-canvas",
     "comfyui",
-    "ai-art",
-    "storyboard"
+    "image-generation",
+    "video-generation",
+    "storyboard",
+    "agent"
   ],
-  "homepage": "https://github.com/duyumingze/dsh-aifisher-canvas#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/duyumingze/dsh-aifisher-canvas.git"
+    "url": "https://github.com/duyumingze/dsh-aifisher-canvas.git"
   },
+  "homepage": "https://github.com/duyumingze/dsh-aifisher-canvas#readme",
   "bugs": {
     "url": "https://github.com/duyumingze/dsh-aifisher-canvas/issues"
   },
   "license": "SEE LICENSE IN LICENSE",
+  "packageManager": "pnpm@11.28.5",
   "private": true,
   "type": "module",
   "main": "lib/index.js",
@@ -29,7 +31,9 @@
     "lib",
     "public",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md"
   ],
   "engines": {
     "node": ">=22.19",
@@ -63,6 +67,8 @@
     "clean": "node scripts/clean.mjs",
     "typecheck": "node scripts/typecheck.mjs",
     "build": "node scripts/clean.mjs && node scripts/vendor-aifisher.mjs && node scripts/build-canvas-css.mjs && node node_modules/tsdown/dist/run.js",
+    "build:offline": "node scripts/clean.mjs && node scripts/build-canvas-css.mjs && node node_modules/tsdown/dist/run.js",
+    "check:contract": "node scripts/check-contract-sync.mjs",
     "sync:shadcn": "node scripts/sync-shadcn-ui.mjs",
     "verify:ui": "node scripts/verify-canvas-ui.mjs",
     "test:canvas-ui": "node scripts/test-canvas-shadcn-ui.mjs",
