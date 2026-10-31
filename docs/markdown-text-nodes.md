@@ -1,8 +1,10 @@
-# 文本节点与 Markdown（v1.87）
+# 文本节点与 Markdown（v1.87，v1.89 补预览与去重）
 
-> 对象：`dsh-aifisher-canvas` v1.87.0
+> 对象：`dsh-aifisher-canvas` v1.89.0
 > 用户原话（2026-11-01）：「现在画布里的文本节点不兼容 .md 格式的文件，导入 .md 文件内容
 > 格式完全不正确。可以做一个能直接拖入 .md 文件到画布生成文本节点」。
+> 后续（同日）：「现在能直接拖入.md文件了，但是会生成两个一样的节点；还有做一个文本节点
+> 全屏预览的功能」。
 
 ## 一、两份数据，一条铁律
 
@@ -46,7 +48,47 @@ marks 只有 `bold` `italic` `underline` `strike` `code`。没有 link、没有 
   `textPatch: { textContent, textRichContent }`；vendor 的建节点桥先 `createCanvasNode`，
   再走同一个 `updateCanvasNode` 把正文贴上去 —— 与节点里手改是同一条写路径。
 - 排查读数：`window.__FISHERAI_CANVAS_TEXT_DROP__`
-  （`drops` / `created` / `skipped` / `lastFile` / `lastKind` / `lastChars` / `lastError` / `lastPoint`）。
+  （`drops` / `created` / `skipped` / `duplicateEvents` / `duplicateFiles` / `repeatGestures` /
+  `lastFileCount` / `lastFile` / `lastKind` / `lastChars` / `lastError` / `lastPoint`）。
+
+### 一个手势只落一个节点（v1.89）
+
+用户 2026-11-01 报「拖一次生成两个一样的节点」。三条可能的路，各挡一层；判重容器一律挂在
+**window** 上（`__FISHERAI_CANVAS_TEXT_DROP_GUARD__` / `__FISHERAI_CANVAS_TEXT_DROP_REPEATS__`），
+不是模块变量 —— 万一产物被加载了两份，两边看到的也是同一份记录：
+
+| 病灶 | 挡法 | 读数 |
+|---|---|---|
+| 同一个 `drop` 事件被两个监听器各处理一遍 | 事件级 `WeakSet` 认领，第二个人直接退出 | `duplicateEvents` |
+| `dataTransfer.files` 里同一份文件出现两次（压缩包视图 / 带虚拟文件的拖放源） | 按 `名字+大小+lastModified` 折叠 | `duplicateFiles` |
+| 同一个手势派发出两个 `drop` 事件（对象不同、内容一样） | 600ms 内「文件身份 + 落点(8px)」同签名跳过 | `repeatGestures` |
+
+最后一层在 vendor 的建节点桥里（v1.89 补丁）：detail 可以带 `createKey`，**只有带它的调用**
+才参与去重（10s 窗口，`__FISHERAI_CANVAS_CREATE_DUPES__` 计数）—— Shift+A、`canvas_control`
+批量建节点这些入口不带它，仍然允许「同一位置、同样内容建两个」。
+
+## 三、全屏预览（v1.89）
+
+`src/client/canvas/textPreview.ts`，由 `bootstrap.ts` 的 `installCanvasTextPreview` 装配；
+样式在 `styles.ts` 里随画布那份 `<style>` 一起注入（`canvasTextPreviewStyleText()`）。
+
+- **入口**：文本节点头部的按钮条（`.af-text-primary-tools`，与「导入文本」并排）里注入一个
+  只放图标的 `.af-text-header-button`（`aria-label` / `title` = 「全屏预览正文」）—— 文本卡
+  默认 252px 宽，那条按钮条只有 76% 宽度，放不下第四个带字按钮。上游只在**单选这个节点**
+  时才渲染那一条（`canvasScene.tsx` 的 `showControls`），与「导入文本」同一个前提，所以不
+  额外做常驻入口。
+- **内容**：打开时 `cloneNode` 节点里已经渲染好的 `.af-text-editor-document`（tiptap 的
+  `editorProps.attributes.class`），洗掉 `contenteditable` / `spellcheck` / `data-pm-slice` /
+  `.ProseMirror-trailingbreak` / `.is-empty` 之后塞进浮层 —— 不新建 tiptap 实例、不改节点数据、
+  不进编辑态，所以排版与卡片逐像素同源。拿不到编辑器 DOM 时退回 `textContent` 逐行成段。
+- **浮层**：`.af-text-preview`（fixed inset 0，z 12100）＝ 顶部一条（标题 / `N 字 · 只读` /
+  `A−` `A+`（13–30px，默认 16）/ 复制全文 / 关闭）+ 正文（沿用 `.af-text-editor-document`
+  那套排版，居中一栏，`max-width: 900px`，`line-height: 1.85`）。Esc / 点空白 / 关闭按钮退出；
+  浮层内的 `pointerdown` / `wheel` / `contextmenu` / `dblclick` 全部 stopPropagation，不漏给画布。
+- **React 重渲染会带走注入的按钮**：MutationObserver（rAF 节流）扫 `[data-node-id]`，
+  缺按钮就补回去；与 `canvasGrid` / `knife` 同一路数，不碰 vendor 树。
+- 排查读数：`window.__FISHERAI_CANVAS_TEXT_PREVIEW__`
+  （`opened` / `closed` / `buttons` / `lastChars` / `lastTitle` / `lastFont` / `open` / `lastError`）。
 
 ## 三、节点自己的「导入文本」
 
@@ -93,20 +135,20 @@ vendor 里也不能新增文件（3.9 段的覆盖机制要求目标文件已存
 不支持（按普通文字处理，不会报错）：HTML 块与行内标签（`<br>` 除外）、脚注、数学公式、
 setext 标题（`===` 下划线式）、表格单元格内换行、嵌套表格。
 
-## 五、vendor 补丁清单（`scripts/vendor-aifisher.mjs` 3.13 段，11 处锚点 + 1 段追加）
+## 六、vendor 补丁清单（`scripts/vendor-aifisher.mjs` 3.13 段，13 处锚点 + 1 段追加）
 
 | 文件 | 改什么 |
 |---|---|
 | `stable/text/textDocument.ts` | 末尾追加 `textDocumentFromMarkdown()` / `isMarkdownFileName()` |
 | `stable/text/textNodeImport.ts` | 补 import；返回值加 `document?: unknown`；`.md` 走本机 FileReader + 转换器 |
 | `stable/text/CanvasTextNodeContent.tsx` | `pendingImport` 带 `document`；`importText(text, mode, rich?)`；三处调用点把富文档带上（含确认框的「替换正文 / 追加到末尾」） |
-| `stable/nodes/canvasNodeState.ts` | `fisherai:add-canvas-node` 的 detail 接受 `textPatch`，建完立即 `updateCanvasNode` |
+| `stable/nodes/canvasNodeState.ts` | detail 接受 `textPatch`（建完立即 `updateCanvasNode`）与 `createKey`（同一次手势只建一个节点） |
 
 每条锚点都断言「命中 1 次」，上游改了写法就地构建失败，不会静默失效。
 
-## 六、回归
+## 七、回归
 
-`scripts/test-canvas-markdown.mjs`（48 项，已进 `pnpm test` 与 `run-all-regressions.mjs`）：
+`scripts/test-canvas-markdown.mjs`（70 项，已进 `pnpm test` 与 `run-all-regressions.mjs`）：
 
 - **A 转换器**：块类型、标题层级、行内 marks、两级清单、`attrs.start`、引用、围栏代码、
   表格、整篇镜像文案、front matter、CRLF、硬换行、空单元格/空标题/四层嵌套不炸 schema、
@@ -114,4 +156,8 @@ setext 标题（`===` 下划线式）、表格单元格内换行、嵌套表格�
 - **B 真画布（jsdom）**：拖到画布外不接管；拖 `.md` 进画布 → 文本节点出现且富文档正确、
   镜像里没有记号、以指针为中心；空文件给提示且不建节点；空文本节点上「导入文本」按
   Markdown 解析（heading + bulletList）。
+- **B6 去重**：同一个事件派发两次、同一份文件出现两次、两个事件同文件同落点 → 都只建一个；
+  带同一个 `createKey` 的两次建节点请求只落一个，而不带的照旧建两个。
+- **B7 预览**：选中文本节点 → 头部出现入口 → 点开浮层 → 正文/富格式/标题字数都在 →
+  `A+` 调字号 → Esc 关闭且不留残壳。
 - **C 补丁与产物**：四处 vendor 改动仍在、`lib/canvas/canvas-app.js` 里带模块标记。

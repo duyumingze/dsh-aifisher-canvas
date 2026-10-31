@@ -554,6 +554,235 @@ title: 渡口分镜
   }
 }
 
+// ---- B6. 一次拖拽只落一个节点（用户 2026-11-01：「会生成两个一样的节点」）
+
+{
+  /** 只造事件、不派发 —— 同一个事件对象要能被派发两次，验「两个监听器各处理一遍」。 */
+  function makeDropEvent(files, x, y) {
+    const event = new window.Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { files, types: ['Files'], dropEffect: 'none' },
+    });
+    Object.defineProperty(event, 'clientX', { value: x });
+    Object.defineProperty(event, 'clientY', { value: y });
+    return event;
+  }
+
+  const before = (await textNodes()).length;
+  const guard = window.__FISHERAI_CANVAS_TEXT_DROP_GUARD__;
+  check('拖入判重容器挂在 window 上（两个监听器看到的同一份）', Boolean(guard) && Boolean(guard.events));
+
+  /** 落到后端要等自动保存：先等到「多了一个」，再等一会儿看会不会多出第二个。 */
+  async function settleCount(target, timeout = 9000) {
+    await waitFor(async () => (await textNodes()).length >= target, timeout);
+    await settle(1800);
+    return (await textNodes()).length;
+  }
+
+  const twice = makeDropEvent([makeMarkdown('重复事件.md', '# 一份正文\n\n- 只该有一个节点\n')], 300, 200);
+  canvasBackground().dispatchEvent(twice);
+  canvasBackground().dispatchEvent(twice);
+  check(
+    '同一个 drop 事件被派发两次也只建一个节点',
+    (await settleCount(before + 1)) === before + 1,
+    `${(await textNodes()).length}/${before + 1}`,
+  );
+  check(
+    '诊断读数：第二次被挡（duplicateEvents=1）',
+    window.__FISHERAI_CANVAS_TEXT_DROP__.duplicateEvents === 1,
+    JSON.stringify(window.__FISHERAI_CANVAS_TEXT_DROP__),
+  );
+
+  const sameFile = makeMarkdown('同一份.md', '## 同一份文件\n\n正文\n');
+  const beforeTwin = (await textNodes()).length;
+  canvasBackground().dispatchEvent(makeDropEvent([sameFile, sameFile], 520, 320));
+  check(
+    'files 里同一份文件出现两次也只建一个节点',
+    (await settleCount(beforeTwin + 1)) === beforeTwin + 1,
+    `${(await textNodes()).length}/${beforeTwin + 1}`,
+  );
+  check(
+    '诊断读数：重复的那份被折叠（duplicateFiles=1、lastFileCount=2）',
+    window.__FISHERAI_CANVAS_TEXT_DROP__.duplicateFiles === 1 &&
+      window.__FISHERAI_CANVAS_TEXT_DROP__.lastFileCount === 2,
+    JSON.stringify(window.__FISHERAI_CANVAS_TEXT_DROP__),
+  );
+
+  // 两个**不同**的 drop 事件、同一份文件、同一个落点、相隔不到 600ms：仍只该建一个。
+  const quick = makeMarkdown('快速两下.md', '# 快速两下\n\n正文\n');
+  const beforeQuick = (await textNodes()).length;
+  canvasBackground().dispatchEvent(makeDropEvent([quick], 640, 360));
+  await settle(120);
+  canvasBackground().dispatchEvent(makeDropEvent([quick], 640, 360));
+  check(
+    '同一个手势派发出两个 drop 事件（同文件同落点）也只建一个节点',
+    (await settleCount(beforeQuick + 1)) === beforeQuick + 1,
+    `${(await textNodes()).length}/${beforeQuick + 1}`,
+  );
+  check(
+    '诊断读数：第二个事件被 600ms 同签名挡掉（repeatGestures=1）',
+    window.__FISHERAI_CANVAS_TEXT_DROP__.repeatGestures === 1,
+    JSON.stringify(window.__FISHERAI_CANVAS_TEXT_DROP__),
+  );
+
+  // 建节点桥自己的最后一层：带同一个 createKey 的两次请求只落一个节点。
+  const beforeKey = (await textNodes()).length;
+  const patch = {
+    textContent: '桥去重',
+    textRichContent: { document: { type: 'doc', content: [{ type: 'paragraph', content: [{ type: 'text', text: '桥去重' }] }] } },
+  };
+  for (let index = 0; index < 2; index += 1) {
+    window.dispatchEvent(
+      new window.CustomEvent('fisherai:add-canvas-node', {
+        detail: { type: 'Text', point: { x: 760, y: 420 }, textPatch: patch, createKey: 'test-create-key-1' },
+      }),
+    );
+  }
+  check(
+    '建节点桥按 createKey 去重：同一次手势只落一个节点',
+    (await settleCount(beforeKey + 1)) === beforeKey + 1 &&
+      (window.__FISHERAI_CANVAS_CREATE_DUPES__ ?? 0) >= 1,
+    `${(await textNodes()).length}/${beforeKey + 1} dupes=${window.__FISHERAI_CANVAS_CREATE_DUPES__ ?? 0}`,
+  );
+
+  const beforePlain = (await textNodes()).length;
+  for (let index = 0; index < 2; index += 1) {
+    window.dispatchEvent(
+      new window.CustomEvent('fisherai:add-canvas-node', {
+        detail: { type: 'Text', point: { x: 900, y: 520 } },
+      }),
+    );
+  }
+  check(
+    '不带 createKey 的建节点请求照旧（Shift+A / agent 批量建节点不受影响）',
+    (await settleCount(beforePlain + 2)) === beforePlain + 2,
+    `${(await textNodes()).length}/${beforePlain + 2}`,
+  );
+}
+
+// ---- B7. 文本节点全屏预览（v1.89）
+
+{
+  const report = window.__FISHERAI_CANVAS_TEXT_PREVIEW__;
+  check(
+    '画布挂载后装了「文本节点全屏预览」的桥（诊断读数）',
+    Boolean(report) && report.open === false && report.opened === 0,
+    JSON.stringify(report ?? null),
+  );
+
+  const withText = (await textNodes()).find((node) => (node.textContent ?? '').includes('渡口'));
+  check('有一个带正文的文本节点可以做预览', Boolean(withText), String(withText?.id ?? ''));
+
+  /**
+   * 入口按钮挂在节点头部的按钮条里，而上游只在「单选这个节点」时才渲染那一条
+   * （canvasScene.tsx 的 showControls）—— 和「导入文本」同一个前提，所以先选中它。
+   */
+  async function selectNode(id) {
+    const element = window.document.querySelector(`[data-node-id="${id}"]`);
+    if (!element) return false;
+    const options = {
+      bubbles: true,
+      cancelable: true,
+      clientX: 60,
+      clientY: 60,
+      button: 0,
+      buttons: 1,
+      pointerId: 1,
+      pointerType: 'mouse',
+      isPrimary: true,
+    };
+    for (const type of ['pointerdown', 'pointerup', 'mousedown', 'mouseup', 'click']) {
+      element.dispatchEvent(new window.MouseEvent(type, options));
+    }
+    return (
+      (await waitFor(async () => element.getAttribute('data-node-selected') === 'true', 8000)) === true
+    );
+  }
+
+  if (withText) {
+    check('点一下文本节点就选中它（头部按钮条随之出现）', await selectNode(withText.id));
+  }
+
+  const button = withText
+    ? await waitFor(
+        () =>
+          window.document.querySelector(
+            `[data-node-id="${withText.id}"] .af-text-primary-tools [data-af-text-preview-button]`,
+          ),
+        6000,
+      )
+    : null;
+  check(
+    '文本节点头部多了一个「全屏预览」入口（和「导入文本」并排）',
+    Boolean(button) &&
+      (button.getAttribute('aria-label') ?? '').includes('全屏预览') &&
+      (button.getAttribute('title') ?? '').includes('全屏预览'),
+    String(button?.getAttribute('title') ?? ''),
+  );
+
+  const overlayOf = () => window.document.querySelector('.af-text-preview');
+  check('没有点开之前浮层不在页面上', overlayOf() === null);
+
+  if (button && withText) {
+    button.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+    await settle(300);
+    const overlay = overlayOf();
+    const documentBody = overlay?.querySelector('[data-af-text-preview-document]');
+    check('点一下就在页面上打开全屏预览浮层', Boolean(overlay), String(overlay?.className ?? ''));
+    check(
+      '浮层里是节点正文（标题文字原样在，不是空白壳）',
+      Boolean(documentBody) && /渡口 · 10 秒/.test(documentBody.textContent ?? ''),
+      String(documentBody?.textContent ?? '').slice(0, 60),
+    );
+    check(
+      '浮层的渲染结构沿用画布编辑器那套（字号/排版与卡片一致）',
+      Boolean(overlay?.querySelector('.af-text-editor.af-text-preview-editor .af-text-editor-document')),
+    );
+    check(
+      '标题与字数从节点上读出来（不是写死的文案）',
+      /渡口/.test(overlay?.querySelector('.af-text-preview-title')?.textContent ?? '') ||
+        /字/.test(overlay?.querySelector('[data-af-text-preview-meta]')?.textContent ?? ''),
+      `${overlay?.querySelector('.af-text-preview-title')?.textContent} / ${overlay?.querySelector('[data-af-text-preview-meta]')?.textContent}`,
+    );
+    check(
+      '富文档的格式也跟着进了预览（标题 / 清单 / 表格都还在）',
+      Boolean(documentBody?.querySelector('h1')) &&
+        Boolean(documentBody?.querySelector('ul')) &&
+        Boolean(documentBody?.querySelector('table')),
+      JSON.stringify({
+        h1: Boolean(documentBody?.querySelector('h1')),
+        ul: Boolean(documentBody?.querySelector('ul')),
+        table: Boolean(documentBody?.querySelector('table')),
+      }),
+    );
+    check(
+      '诊断读数：打开一次、字数与标题对得上',
+      report?.open === true && report?.opened === 1 && (report?.lastChars ?? 0) > 10,
+      JSON.stringify(report ?? null),
+    );
+
+    const bigger = overlay?.querySelector('[data-af-text-preview-font]');
+    const larger = overlay?.querySelector('[data-act="larger"]');
+    larger?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await settle(120);
+    check(
+      '「A+」能把预览字号调大一档',
+      bigger?.textContent === '字号 18' && report?.lastFont === 18,
+      `${bigger?.textContent} / ${report?.lastFont}`,
+    );
+
+    window.document.dispatchEvent(
+      new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+    );
+    await settle(200);
+    check(
+      'Esc 关掉预览浮层（页面里不留残壳）',
+      overlayOf() === null && report?.open === false && report?.closed === 1,
+      JSON.stringify({ open: report?.open, closed: report?.closed }),
+    );
+  }
+}
+
 // ---------------------------------------------------------------- C. 产物与 vendor 补丁
 
 {

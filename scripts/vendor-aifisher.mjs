@@ -4831,6 +4831,54 @@ const MARKDOWN_TEXT_PATCHES = [
       '      }',
     why: '建节点事件：建完立刻带正文',
   },
+  {
+    file: 'src/stable/nodes/canvasNodeState.ts',
+    from: '        textPatch?: Partial<CanvasNode>;\n      }>).detail;',
+    to: '        textPatch?: Partial<CanvasNode>;\n        /** 同一次手势的稳定标识：带它时才做「一次只建一个」去重（v1.89）。 */\n        createKey?: string;\n      }>).detail;',
+    why: '建节点事件：接受去重键',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeState.ts',
+    from:
+      '      const point = detail.point;\n' +
+      '      if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return;',
+    to:
+      '      const point = detail.point;\n' +
+      '      if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return;\n' +
+      '      // dsh-aifisher-canvas v1.89：同一次「建节点」只落一个节点。\n' +
+      '      // 拖入文本文件时落点与正文完全一致，一旦这次手势被处理了两遍（监听器装了两份 /\n' +
+      '      // dataTransfer.files 给了重复的一份），画布上就会叠出两张一模一样的卡。\n' +
+      '      // 只有带 createKey 的调用方参与去重 —— Shift+A、agent 批量建节点这些入口不受影响，\n' +
+      '      // 它们本来就允许「同一位置、同样内容建两个」。\n' +
+      '      if (typeof detail.createKey === \'string\' && detail.createKey.length > 0) {\n' +
+      '        const guardHolder = window as unknown as {\n' +
+      '          __FISHERAI_CANVAS_CREATE_KEYS__?: Map<string, number>;\n' +
+      '          __FISHERAI_CANVAS_CREATE_DUPES__?: number;\n' +
+      '        };\n' +
+      '        const guard =\n' +
+      '          guardHolder.__FISHERAI_CANVAS_CREATE_KEYS__ ??\n' +
+      '          (guardHolder.__FISHERAI_CANVAS_CREATE_KEYS__ = new Map<string, number>());\n' +
+      '        const guardNow = Date.now();\n' +
+      '        const seenAt = guard.get(detail.createKey);\n' +
+      '        if (seenAt !== undefined && guardNow - seenAt < 10000) {\n' +
+      '          guardHolder.__FISHERAI_CANVAS_CREATE_DUPES__ =\n' +
+      '            (guardHolder.__FISHERAI_CANVAS_CREATE_DUPES__ ?? 0) + 1;\n' +
+      '          return;\n' +
+      '        }\n' +
+      '        guard.set(detail.createKey, guardNow);\n' +
+      '        if (guard.size > 128) {\n' +
+      '          for (const entry of Array.from(guard.entries())) {\n' +
+      '            if (guardNow - entry[1] >= 10000) guard.delete(entry[0]);\n' +
+      '          }\n' +
+      '          while (guard.size > 128) {\n' +
+      '            const oldest = guard.keys().next();\n' +
+      '            if (oldest.done) break;\n' +
+      '            guard.delete(oldest.value);\n' +
+      '          }\n' +
+      '        }\n' +
+      '      }',
+    why: '建节点事件：同一次手势只建一个节点',
+  },
 ];
 
 {

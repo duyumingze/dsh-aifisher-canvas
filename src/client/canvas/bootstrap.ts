@@ -95,6 +95,7 @@ import { installCanvasGenerationDots } from './genDots';
 import { installCompositorBridge } from './compositor/bridge';
 // v1.87：拖入 .md / .txt 直接生成文本节点（Markdown 在本机翻成富文档）。
 import { installCanvasTextFileDrop } from './textDrop';
+import { installCanvasTextPreview } from './textPreview';
 import { installImageModeAdapter } from '../../../vendor/aifisher/src/stable/generation/imageMode';
 import { installVideoModeAdapter } from '../../../vendor/aifisher/src/stable/generation/videoMode';
 import { installMidjourneyReferenceAdapter } from '../../../vendor/aifisher/src/stable/generation/midjourneyReferences';
@@ -896,6 +897,8 @@ const INSTALLERS: Installer[] = [
   { name: 'installCanvasCompositor', install: installCanvasCompositorSupport },
   // ---- v1.87：拖入 .md / .txt → 文本节点（Markdown 在本机转富文档，不再走 host 拉纯文本）----
   { name: 'installCanvasTextFileDrop', install: installCanvasTextFileDrop },
+  // ---- v1.89：文本节点全屏预览（只读，入口在节点头部的按钮条里）----
+  { name: 'installCanvasTextPreview', install: installCanvasTextPreview },
 ];
 
 /** 已装成功的模块名（诊断用）。 */

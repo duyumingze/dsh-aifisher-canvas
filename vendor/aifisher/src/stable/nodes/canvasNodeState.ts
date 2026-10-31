@@ -71,10 +71,44 @@ export function attachCanvasNodeCreateBridge(
         place?: boolean;
         /** 拖入文本文件时一起带来的正文（textContent + textRichContent）。 */
         textPatch?: Partial<CanvasNode>;
+        /** 同一次手势的稳定标识：带它时才做「一次只建一个」去重（v1.89）。 */
+        createKey?: string;
       }>).detail;
       if (!detail || typeof detail.type !== 'string' || detail.type.length === 0) return;
       const point = detail.point;
       if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
+      // dsh-aifisher-canvas v1.89：同一次「建节点」只落一个节点。
+      // 拖入文本文件时落点与正文完全一致，一旦这次手势被处理了两遍（监听器装了两份 /
+      // dataTransfer.files 给了重复的一份），画布上就会叠出两张一模一样的卡。
+      // 只有带 createKey 的调用方参与去重 —— Shift+A、agent 批量建节点这些入口不受影响，
+      // 它们本来就允许「同一位置、同样内容建两个」。
+      if (typeof detail.createKey === 'string' && detail.createKey.length > 0) {
+        const guardHolder = window as unknown as {
+          __FISHERAI_CANVAS_CREATE_KEYS__?: Map<string, number>;
+          __FISHERAI_CANVAS_CREATE_DUPES__?: number;
+        };
+        const guard =
+          guardHolder.__FISHERAI_CANVAS_CREATE_KEYS__ ??
+          (guardHolder.__FISHERAI_CANVAS_CREATE_KEYS__ = new Map<string, number>());
+        const guardNow = Date.now();
+        const seenAt = guard.get(detail.createKey);
+        if (seenAt !== undefined && guardNow - seenAt < 10000) {
+          guardHolder.__FISHERAI_CANVAS_CREATE_DUPES__ =
+            (guardHolder.__FISHERAI_CANVAS_CREATE_DUPES__ ?? 0) + 1;
+          return;
+        }
+        guard.set(detail.createKey, guardNow);
+        if (guard.size > 128) {
+          for (const entry of Array.from(guard.entries())) {
+            if (guardNow - entry[1] >= 10000) guard.delete(entry[0]);
+          }
+          while (guard.size > 128) {
+            const oldest = guard.keys().next();
+            if (oldest.done) break;
+            guard.delete(oldest.value);
+          }
+        }
+      }
       const { runtime, setNodes, setSelected } = current();
       (window as { __DSH_NODE_CREATE_CALLS__?: number }).__DSH_NODE_CREATE_CALLS__ =
         ((window as { __DSH_NODE_CREATE_CALLS__?: number }).__DSH_NODE_CREATE_CALLS__ ?? 0) + 1;

@@ -1,4 +1,4 @@
-﻿<p align="center"><img src="public/brand/duyumingze-lockup-h.svg" width="380" alt="渡雨鸣泽"></p>
+<p align="center"><img src="public/brand/duyumingze-lockup-h.svg" width="380" alt="渡雨鸣泽"></p>
 
 <h1 align="center">dsh-aifisher-canvas</h1>
 
@@ -6,10 +6,10 @@
 一块专业级 AI 创作无限画布 —— 你说一句话，DSH 原生 Agent 在画布上替你搭好整条流水线；<br>
 而按下「生成」的那一下（费用授权），永远由你自己按。</p>
 
-**Version**: v1.88 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
+**Version**: v1.89 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v1.88.0-5eead4?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.89.0-5eead4?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/Node-%E2%89%A522.19-3c873a?style=flat-square" alt="node">
   <img src="https://img.shields.io/badge/React-19-61dafb?style=flat-square" alt="react">
   <img src="https://img.shields.io/badge/TypeScript-5.8-3178c6?style=flat-square" alt="typescript">
@@ -144,6 +144,7 @@
 - 两步式智能扩图：整页工作台先按目标比例画出「扩图画面」（原图落位、待补区斜纹标注），再生成你自己的扩图节点，提示词参考图自动填好，生成由你自己触发
 - 内置图片裁剪、宫格切分、标注蒙版、尺寸调整工具，不用跳出去用其他软件
 - **文本节点直接吃 Markdown**：把 `.md` / `.txt` 从系统里拖到画布上，指针处就落一个排好版的文本节点（标题 / 嵌套清单 / 表格 / 代码块 / 加粗），节点里的「导入文本」也按 Markdown 解析；正文给模型读的是**去掉记号的干净纯文本**，屏幕上看到的是排版（见 [docs/markdown-text-nodes.md](docs/markdown-text-nodes.md)）
+- **文本节点全屏预览**：选中文本节点 → 头部「全屏预览」把整篇摊开只读（标题/清单/表格原样），可调字号、复制全文，`Esc` 关闭；一个拖拽手势只落**一个**节点（同一事件重复触发 / 文件重复 / 手势重复三种情况都挡掉）
 - **换肤与界面缩放**：玻璃面板皮肤（与调色合成器同一套视觉语言）、80 / 90 / 100 / 110 / 125 / 150% 六档缩放、生成中的噪波点阵——都不改画布内容本身
 
 ### 项目库与设置页
@@ -259,7 +260,7 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
 | 测试 | 类型门禁（`pnpm typecheck`）+ 55 套 jsdom 契约测试（3000+ 项）+ 真机浏览器视觉校验（`browser-check` / `verify-live-*`） |
 
 <details>
-<summary><b>实现细节与版本日志（v1.58 – v1.87）</b> —— 每个版本改了什么、踩了什么坑</summary>
+<summary><b>实现细节与版本日志（v1.58 – v1.89）</b> —— 每个版本改了什么、踩了什么坑</summary>
 
 ### 数据与保存
 
@@ -296,6 +297,10 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
 ### 文本节点 / Markdown（v1.87）
 
 - 拖入 `.md` 直接成节点 v1.87（2026-11-01）：用户「现在画布里的文本节点不兼容 .md 格式的文件，导入 .md 文件内容格式完全不正确。可以做一个能直接拖入 .md 文件到画布生成文本节点」。两个病根：① 画布 `onDrop` 的唯一去处是 `upload()`，`classifyMedia()` 只认图片/视频/音频，`.md` 直接被弹「无法识别的文件类型」；② 文本节点的「导入文本」把文件送 host 的 `/agent/drama/script` 解析，拿回的是**纯文本**，`##`／`-`／`**` 全成了字面量。现在 ① 在 **window 捕获阶段**接管画布范围内的文本文件（`md markdown mdx …` 走 Markdown，`txt csv json yaml srt …` 按行成段，单份 2 MB 上限，空文件只提示不建节点，多份斜向错开），落点换算与节点搜索同一套，节点以指针为中心；② 新增 `textDocumentFromMarkdown()` 转换器（源码 `scripts/vendor-patches/text-document-markdown.ts`，构建期追加到 vendor 的 `text/textDocument.ts`）把标题 1–3 / 嵌套清单 / 有序清单 `start` / 引用 / 围栏代码块 / 分隔线 / 管道表格 / 加粗·斜体·删除线·行内代码 / 链接取文字 / 转义 / 硬换行 / front matter 丢弃 / CRLF 翻成 tiptap 文档，「导入文本」的 `.md` 也改走本机 FileReader + 同一个转换器（替换 / 追加与确认框都带富文档）。落库仍是 `createTextDocumentPatch()` 一次算出的 `textContent`（干净纯文本，给模型读）+ `textRichContent`（排版）。vendor 补丁 11 处锚点 + 1 段追加，新增 `scripts/test-canvas-markdown.mjs` 48 项。说明见 [docs/markdown-text-nodes.md](docs/markdown-text-nodes.md)。
+
+### 文本节点（v1.89）
+
+- 全屏预览 + 拖入去重 v1.89（2026-11-01）：用户「现在能直接拖入.md文件了，但是会生成两个一样的节点；还有做一个文本节点全屏预览的功能」。① **一个手势只落一个节点**：同一个 `drop` 事件被处理两遍（事件级 `WeakSet` 认领）、`dataTransfer.files` 里同一份文件出现两次（按名字+大小+lastModified 折叠）、同一个手势派发出两个事件（600ms 内「文件身份+落点」同签名跳过）—— 判重容器都挂 `window`（产物被加载两份也共用一份记录）；最后一层在 vendor 的建节点桥里按 `createKey` 去重（10s 窗口），**只有拖入会带它**，Shift+A / `canvas_control` 批量建节点照旧「同位置同内容也能建两个」。读数是 `__FISHERAI_CANVAS_TEXT_DROP__` 的 `duplicateEvents / duplicateFiles / repeatGestures`。② **只读全屏预览**（`src/client/canvas/textPreview.ts`）：入口注进节点头部的 `.af-text-primary-tools`（与「导入文本」并排，上游只在单选时渲染那条按钮条），打开时把节点里**已渲染的正文 DOM** 克隆进浮层并洗掉 `contenteditable` / ProseMirror 私有属性 —— 不新建 tiptap、不改节点数据、不进编辑态，排版与卡片同源；浮层带 `A−`/`A+`（13–30px）、复制全文、`Esc`/点空白/关闭按钮退出，滚轮/按键/拖动不漏给底下画布。React 重渲染会带走注入的按钮，MutationObserver（rAF 节流）补回来。回归 `scripts/test-canvas-markdown.mjs` 48 → 70 项。
 
 </details>
 
