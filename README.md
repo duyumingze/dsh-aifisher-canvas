@@ -333,3 +333,5 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
 ## 🤝 贡献
 
 欢迎提交 Issue 和 PR。修改代码前请阅读 `README.dev.md` 中的开发约束章节，了解 vendor 补丁机制、双 React bundle 隔离规则和画布几何的 dpr 约束，避免踩历史踩过的坑。
+
+AI 参与的提交怎么署名（`Co-authored-by:` trailer 的写法与边界）见 [`CONTRIBUTING.md` §7 AI 协作与署名](CONTRIBUTING.md#7-ai-协作与署名)。

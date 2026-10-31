@@ -125,3 +125,28 @@ node scripts/verify-live-canvas-bundle.mjs
 2. 在 `CHANGELOG.md` 顶部加一节（对外可见的行为变化 + 踩过的坑）。
 3. `pnpm build`（有上游源码时）或 `pnpm build:offline` → 跑全量 `pnpm test`。
 4. 提交并推送；把 `lib/` 同步到实际安装目录（如果用 junction 安装就同步到那个目录）。
+
+---
+
+## 7. AI 协作与署名
+
+这个仓库大量由 DSH 原生 Agent 参与编写。想把 AI 记进提交历史，用 Git 的 co-author trailer，
+放在提交信息**末尾**、与正文空一行、一人一行：
+
+```
+feat: 画布调色面板支持拖拽压线插入
+
+Co-authored-by: DeepSeek Harness Agent <agent@localhost>
+```
+
+约定：
+
+- **只在真有 AI 参与的提交上加**。署名是事实声明，不是装饰；没参与就不写。
+- **占位邮箱**用 `agent@localhost` 这类不存在的地址即可。不要填任何人的真实邮箱，
+  也不要用别人的账号邮箱冒充。
+- 没有绑定 GitHub 账号时，GitHub 会在提交页显示**名字 + 默认头像**，该提交**不计入**
+  仓库的 Contributors 人数图（贡献图只认已与账号关联的邮箱）。这是署名，不是协作者权限。
+- GitHub 的 Collaborator 必须是账号；AI 没有账号，**不要**为它开一个账号再加权限。
+- 已经推送的提交**不要改写作者**（改作者等于改 commit hash）；要补署名就补在下一个提交里。
+- 不想动提交历史时，也可以在 `README.md` 的致谢里写一行，效果一样是“公开署名”。
+
