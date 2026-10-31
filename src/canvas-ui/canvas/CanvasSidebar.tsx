@@ -34,8 +34,9 @@ import {
 import { buttonVariants } from '@/ui/button';
 import { Separator } from '@/ui/separator';
 import { cn } from '@/lib/utils';
+import { openCanvasPage } from './CanvasPagesStore';
 
-type Runtime = Pick<typeof ReactTypes, 'createElement'>;
+type Runtime = Pick<typeof ReactTypes, 'createElement' | 'useEffect'>;
 
 interface Props {
   onAddClick: ReactTypes.MouseEventHandler;
@@ -53,8 +54,6 @@ interface Props {
   onWorkflowNodesClick?(): void;
   onHistoryClick: ReactTypes.MouseEventHandler;
   onAssetsClick: ReactTypes.MouseEventHandler;
-  onSettingsClick?(): void;
-  onToolsOpen?(): void;
   /** 打开「搜索节点」面板（Shift+A 的鼠标入口）。 */
   onSearchClick?(): void;
   currentUserName?: string;
@@ -74,6 +73,11 @@ export function CanvasSidebar(
   const Tooltip = components.Tooltip as ReactTypes.ComponentType<Record<string, unknown>>;
   const name = props.currentUserName ?? '协作者';
 
+  /**
+   * v1.85：侧栏「设置」按钮直接开页面层的设置页；旧版 vendor 设置对话框已从界面移除
+   * （原来这里会给它登记一个 opener，现在连插座一起删掉了 —— 三块只在旧对话框里的面板
+   * 已搬进设置页：开源服务 / 闭源服务在「服务与通道」，下载与数据目录在「项目与数据」）。
+   */
   const railClass =
     'absolute left-4 top-1/2 z-50 flex -translate-y-1/2 flex-col items-center gap-1 ' +
     'rounded-full border border-border bg-surface-raised/90 p-1.5 shadow-lg backdrop-blur-sm ' +
@@ -195,10 +199,15 @@ export function CanvasSidebar(
         ),
       ),
       actionButton('历史', h(HistoryIcon, { key: 'i' }), props.onHistoryClick),
-      actionButton('设置', h(SettingsIcon, { key: 'i' }), () => {
-        props.onToolsOpen?.();
-        props.onSettingsClick?.();
-      }),
+      actionButton(
+        '设置',
+        h(SettingsIcon, { key: 'i' }),
+        () => {
+          // v1.84：侧栏「设置」打开页面层设置页（不是 vendor 弹层）；v1.85 起旧弹层已移除。
+          openCanvasPage('settings');
+        },
+        { 'data-fisherai-open-settings-page': 'true' },
+      ),
     ),
     h(Separator, { key: 'sep2', orientation: 'horizontal', className: 'my-1 w-6' }),
     h(

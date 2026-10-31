@@ -228,6 +228,18 @@ function button(label: string, className = BUTTON): HTMLButtonElement {
   return node;
 }
 
+/**
+ * `<option>`（v1.85）。不用 `new Option(...)`：那依赖 `Option` 这个浏览器全局，
+ * jsdom 的测试宿主只灌了常用全局，没灌它 —— 面板被挂进新设置页之后，回归里
+ * 第一帧就抛「Option is not defined」（browser-check 里没事，只有 jsdom 炸）。
+ */
+function optionElement(label: string, value: string): HTMLOptionElement {
+  const node = document.createElement('option');
+  node.textContent = label;
+  node.value = value;
+  return node;
+}
+
 /** 模型 ID → 媒体类型（与 host 的 guessChannelModelKind 同一套启发式，界面里可改）。 */
 export function guessKind(id: string): ChannelKind {
   const value = id.toLowerCase();
@@ -523,7 +535,7 @@ export function mountCloudChannelPanel(host: HTMLElement): () => void {
     // 注意：这里**不能**用 INPUT（它带 w-full，会占满一行并把后面的按钮顶到下一行）
     const allKind = el('select', `${INPUT_BASE} w-40 shrink-0`) as HTMLSelectElement;
     allKind.setAttribute('data-fisherai-channel-mark-kind', '');
-    for (const kind of KIND_ORDER) allKind.append(new Option(KIND_LABELS[kind], kind));
+    for (const kind of KIND_ORDER) allKind.append(optionElement(KIND_LABELS[kind], kind));
     const markAll = button('把下面列出的都标为');
     markAll.addEventListener('click', () => {
       for (const id of visible) {
@@ -604,7 +616,7 @@ export function mountCloudChannelPanel(host: HTMLElement): () => void {
 
       const kindSelect = el('select', `${INPUT_BASE} w-24 shrink-0`) as HTMLSelectElement;
       kindSelect.setAttribute('data-fisherai-channel-model-kind', id);
-      for (const kind of KIND_ORDER) kindSelect.append(new Option(KIND_LABELS[kind], kind));
+      for (const kind of KIND_ORDER) kindSelect.append(optionElement(KIND_LABELS[kind], kind));
       kindSelect.value = current?.kind ?? guessKind(id);
       kindSelect.disabled = !checked;
       kindSelect.addEventListener('change', () => {
@@ -762,9 +774,9 @@ export function mountCloudChannelPanel(host: HTMLElement): () => void {
     dialectField.append(el('span', LABEL, '请求方言'));
     const dialectSelect = el('select', INPUT) as HTMLSelectElement;
     dialectSelect.setAttribute('data-fisherai-channel-dialect', draft.id || draft.key);
-    dialectSelect.append(new Option('自动（按地址判定）', ''));
+    dialectSelect.append(optionElement('自动（按地址判定）', ''));
     for (const dialect of ['openai', 'modelscope', 'workfisher'] as const) {
-      dialectSelect.append(new Option(DIALECT_LABELS[dialect], dialect));
+      dialectSelect.append(optionElement(DIALECT_LABELS[dialect], dialect));
     }
     dialectSelect.value = draft.dialect;
     const dialectHint = el('span', MUTED, dialectHintText(draft));

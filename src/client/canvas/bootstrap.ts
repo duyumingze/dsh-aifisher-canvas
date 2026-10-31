@@ -89,6 +89,9 @@ import { installCanvasAutoSave } from '../../../vendor/aifisher/src/stable/persi
 import { installCanvasSession } from '../../../vendor/aifisher/src/stable/persistence/canvasSession';
 import { installStableDesignSystem } from '../../../vendor/aifisher/src/stable/design/designSystem';
 import { installNodeFramework } from '../../../vendor/aifisher/src/stable/nodes/nodeFramework';
+// v1.81：画布换肤（方案 C 玻璃面板）配套的两个新模块 —— 界面缩放与生成中噪波点阵。
+import { installCanvasUiScale } from './uiScale';
+import { installCanvasGenerationDots } from './genDots';
 import { installCompositorBridge } from './compositor/bridge';
 import { installImageModeAdapter } from '../../../vendor/aifisher/src/stable/generation/imageMode';
 import { installVideoModeAdapter } from '../../../vendor/aifisher/src/stable/generation/videoMode';
@@ -105,6 +108,14 @@ import { installPromptExpand } from '../../../vendor/aifisher/src/stable/prompt/
 import { installPromptAssistant } from '../../../vendor/aifisher/src/stable/prompt/promptAssistant';
 import { installProjectDashboardChrome } from '../../../vendor/aifisher/src/stable/navigation/projectDashboardChrome';
 import { installMediaDownloadFileName } from '../../../vendor/aifisher/src/stable/media/mediaDownloadFileName';
+import { mountMediaDownloadSettings } from '../../../vendor/aifisher/src/stable/media/mediaDownloadSettings';
+import { mountLocalRuntimeSettings } from '../../../vendor/aifisher/src/stable/local/localRuntimeSettings';
+import { mountSourceSettings } from '../../../vendor/aifisher/src/stable/generation/sourceSettings';
+import { createSourceSettingsClient } from '../../../vendor/aifisher/src/stable/generation/sourceSettingsClient';
+import { createLocalRuntimeClient } from '../../../vendor/aifisher/src/stable/local/localRuntimeClient';
+import { mountLocalUpdateSettings } from '../../../vendor/aifisher/src/stable/update/localUpdateSettings';
+import { readLocalUser } from '../../../vendor/aifisher/src/stable/profile/localUser';
+import { preferenceStorage } from '../../../vendor/aifisher/src/stable/persistence/preferenceStore';
 import { installLocalRuntimeClient } from '../../../vendor/aifisher/src/stable/local/localRuntimeClient';
 import { installComfyLogPanel } from '../../../vendor/aifisher/src/stable/local/comfyLogPanel';
 import type { AgentModelAvailabilityBridge } from '../../../vendor/aifisher/src/stable/generation/agentModelAvailability';
@@ -325,6 +336,112 @@ function installCanvasEffectsSupport(): { dispose: () => void } {
  */
 function installCanvasDataDirSupport(): { dispose: () => void } {
   return { dispose: registerCanvasDataDirPanel() };
+}
+
+/**
+ * 旧版设置对话框里那几块面板的**页内挂载点**（v1.85）。
+ *
+ * 背景：用户 2026-10-31「移除设置里的旧版设置」——vendor 那个「设置」对话框
+ * （个人设置 / 画布外观 / 开源服务 / 闭源服务 / 存储 / 关于）从界面上去掉，
+ * 但里面这几块面板只存在于那个对话框里，直接删掉会让配置没地方改。
+ * 所以把 vendor 自己的 mount 函数借过来，改成由页面层设置页给宿主 div：
+ *
+ *   `__FISHERAI_MOUNT_SOURCE_SETTINGS__`        闭源服务（AIFISHER API / RH / 直连 / 即梦）
+ *   `__FISHERAI_MOUNT_LOCAL_RUNTIME_SETTINGS__` 开源服务（本机 ComfyUI：目录 / 启动 / 扩展 / 日志）
+ *   `__FISHERAI_MOUNT_DOWNLOAD_SETTINGS__`      下载目录与「每次询问保存位置」
+ *   `__FISHERAI_MOUNT_UPDATE_SETTINGS__`        关于 / 检查更新
+ *
+ * 这几块都是**原生 DOM** mount（不是 vendor React 组件），所以塞进我们自己的页面不会
+ * 踩两份 React 的 #130；样式沿用 vendor 的类与 --af-* 令牌，放在页面的 .afs-host 里。
+ * 云通道面板（CloudChannelPanel）本来就走全局挂载点，不需要这里再包一层。
+ */
+interface SettingsMountHolder {
+  __FISHERAI_MOUNT_SOURCE_SETTINGS__?: (host: HTMLElement) => (() => void) | null;
+  __FISHERAI_MOUNT_LOCAL_RUNTIME_SETTINGS__?: (host: HTMLElement) => (() => void) | null;
+  __FISHERAI_MOUNT_DOWNLOAD_SETTINGS__?: (host: HTMLElement) => (() => void) | null;
+  __FISHERAI_MOUNT_UPDATE_SETTINGS__?: (host: HTMLElement) => (() => void) | null;
+}
+
+/** 挂不上的面板返回 null（页面显示「不可用」），不让它把整页设置带崩。 */
+function guardedMount(name: string, mount: (host: HTMLElement) => (() => void) | void) {
+  return (host: HTMLElement): (() => void) | null => {
+    try {
+      const dispose = mount(host);
+      return typeof dispose === 'function' ? dispose : null;
+    } catch (error) {
+      console.error(`[aifisher-canvas] 挂载设置面板失败：${name}`, error);
+      return null;
+    }
+  };
+}
+
+function installCanvasSettingsHosts(): { dispose: () => void } {
+  const holder = globalThis as unknown as SettingsMountHolder;
+  holder.__FISHERAI_MOUNT_SOURCE_SETTINGS__ = guardedMount('闭源服务', (host) =>
+    mountSourceSettings(host, createSourceSettingsClient()),
+  );
+  holder.__FISHERAI_MOUNT_LOCAL_RUNTIME_SETTINGS__ = guardedMount('开源服务', (host) =>
+    mountLocalRuntimeSettings(
+      host,
+      window.__FISHERAI_LOCAL_RUNTIME__ ?? createLocalRuntimeClient(),
+    ),
+  );
+  holder.__FISHERAI_MOUNT_DOWNLOAD_SETTINGS__ = guardedMount('下载目录', (host) =>
+    mountMediaDownloadSettings(host, installMediaDownloadFileName()),
+  );
+  holder.__FISHERAI_MOUNT_UPDATE_SETTINGS__ = guardedMount('关于/更新', (host) =>
+    mountLocalUpdateSettings(host),
+  );
+  return {
+    dispose() {
+      delete holder.__FISHERAI_MOUNT_SOURCE_SETTINGS__;
+      delete holder.__FISHERAI_MOUNT_LOCAL_RUNTIME_SETTINGS__;
+      delete holder.__FISHERAI_MOUNT_DOWNLOAD_SETTINGS__;
+      delete holder.__FISHERAI_MOUNT_UPDATE_SETTINGS__;
+    },
+  };
+}
+
+/**
+ * 「个人资料」的读写桥（v1.85，随旧设置对话框一起搬进设置页）。
+ *
+ * 昵称与头像都是 vendor 的本地偏好：头像走 `__FISHERAI_LOCAL_PROFILE__`（装配层已装），
+ * 昵称在偏好存储的 `fisherai-collab-user` 里。这里只暴露读/写，存储键与 vendor 的
+ * `useLocalUser` 保持一致（vendor 没导出这个常量，所以这里抄了一份，见 localUser.ts）。
+ *
+ * 注意：vendor 的 useLocalUser 是**组件内的 useState**，不会订阅存储 —— 改完昵称要等
+ * 下次画布挂载才在协作头像上用新名字（设置页会照实写这句提示，不假装即时生效）。
+ */
+const LOCAL_USER_KEY = 'fisherai-collab-user';
+
+interface LocalUserBridge {
+  __FISHERAI_LOCAL_USER__?: {
+    get(): { id: string; no: string; name: string };
+    setName(value: string): { id: string; no: string; name: string };
+  };
+}
+
+function installLocalUserBridge(): { dispose: () => void } {
+  const holder = window as unknown as LocalUserBridge;
+  const bridge: NonNullable<LocalUserBridge['__FISHERAI_LOCAL_USER__']> = {
+    get: () => readLocalUser(),
+    setName(value: string) {
+      const name = String(value ?? '').slice(0, 64);
+      const next = { ...readLocalUser(), name };
+      try {
+        preferenceStorage().setItem(LOCAL_USER_KEY, JSON.stringify(next));
+      } catch (error) {
+        console.error('[aifisher-canvas] 保存昵称失败', error);
+      }
+      return next;
+    },
+  };
+  holder.__FISHERAI_LOCAL_USER__ = bridge;
+  return {
+    dispose() {
+      if (holder.__FISHERAI_LOCAL_USER__ === bridge) delete holder.__FISHERAI_LOCAL_USER__;
+    },
+  };
 }
 
 /**
@@ -720,6 +837,9 @@ const INSTALLERS: Installer[] = [
   { name: 'installCanvasAutoSave', install: installCanvasAutoSave },
   { name: 'installMediaNodeSizing', install: installMediaNodeSizing },
   { name: 'installStableDesignSystem', install: () => installStableDesignSystem().observe() },
+  // ---- v1.81：界面缩放（chrome 整体 80–150%）与生成中噪波圆点阵（方案 C 皮肤配套）----
+  { name: 'installCanvasUiScale', install: installCanvasUiScale },
+  { name: 'installCanvasGenerationDots', install: installCanvasGenerationDots },
   // ---- UI 补全（v1.1）：上游 main.ts 里单独一行的那些 ----
   { name: 'installProjectDashboardChrome', install: installProjectDashboardChrome },
   { name: 'installNodeFramework', install: installNodeFramework },
@@ -764,6 +884,9 @@ const INSTALLERS: Installer[] = [
   { name: 'installProjectArchiveSupport', install: installProjectArchiveSupport },
   // ---- v1.43：设置 → 存储 → 项目数据目录（缓存目录可自定义，重启 DSH 生效）----
   { name: 'installCanvasDataDirSupport', install: installCanvasDataDirSupport },
+  // ---- v1.85：旧版设置对话框里的面板改由页面层设置页给宿主（闭源/开源服务、下载目录、关于）+ 个人资料桥 ----
+  { name: 'installCanvasSettingsHosts', install: installCanvasSettingsHosts },
+  { name: 'installLocalUserBridge', install: installLocalUserBridge },
   // ---- v1.49：切刀（Ctrl + 右键拖拽，划过的连线断开）----
   //     手势/预览在 src/client/canvas/knife.ts；断开由 vendor 补丁 3.8t 的桥落地
   { name: 'installCanvasKnife', install: installCanvasKnife },

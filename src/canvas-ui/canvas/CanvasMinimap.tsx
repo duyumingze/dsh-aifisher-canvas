@@ -174,11 +174,13 @@ export function CanvasMinimap(react: Runtime, props: Props, measure: NodeMeasure
             width: Math.max(1, node.width * scene.scale),
             height: Math.max(1, node.height * scene.scale),
             rx: 2,
-            // 语义色：普通节点用次要文字色，视频节点用 info，避免硬编码蓝紫。
+            // 语义色（设计稿第 6 节）：文本=白 17% / 图片=紫 50% / 视频=琥珀 46%。
             fill:
               node.type === 'Video'
-                ? 'var(--af-info)'
-                : 'color-mix(in srgb, var(--af-text-secondary) 70%, transparent)',
+                ? 'rgba(245, 194, 107, .46)'
+                : node.type === 'Image'
+                  ? 'rgba(139, 124, 246, .5)'
+                  : 'rgba(255, 255, 255, .17)',
           }),
       ),
     ),

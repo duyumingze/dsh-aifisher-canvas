@@ -21,7 +21,11 @@ import { createElement } from '@/lib/react';
 import {
   ArrowLeft as ArrowLeftIcon,
   Check as CheckIcon,
+  Crop as CropIcon,
+  Layers as LayersIcon,
   LoaderCircle as LoaderCircleIcon,
+  Paintbrush as PaintbrushIcon,
+  Scan as ScanIcon,
   X as XIcon,
 } from 'lucide-react';
 
@@ -34,13 +38,9 @@ import {
   fitInside,
   loadWorkbenchImage,
   sizeLabel,
-  WORKBENCH_DIVIDER_CLASS,
-  WORKBENCH_FOOTER_CLASS,
   WORKBENCH_HEADER_CLASS,
-  WORKBENCH_HINT_CLASS,
   WORKBENCH_ROOT_CLASS,
   WORKBENCH_STAGE_CLASS,
-  WORKBENCH_TOOLBAR_CLASS,
   type CropOutput,
   type WorkbenchHandle,
   type WorkbenchRect,
@@ -59,6 +59,10 @@ export interface CropStageProps {
   onApply(output: CropOutput): void;
   /** 返回图片编辑首页（也用 Esc / ✕）。 */
   onClose(): void;
+  /** 左侧工具条切换（设计稿里四个工具常驻）；不传时其余工具置灰。 */
+  onSwitchTool?(tool: 'crop' | 'mask' | 'brush' | 'compose'): void;
+  /** 顶栏 ✕：直接关掉整个工作台；不传时退回 onClose。 */
+  onCloseStudio?(): void;
 }
 
 const RATIOS: Array<{ value: string; label: string }> = [
@@ -348,31 +352,18 @@ export function ImageCropStage(react: Runtime, props: CropStageProps) {
         type: 'button',
         variant: 'ghost',
         size: 'icon-sm',
+        className: 'afw-iconbtn',
         'aria-label': '返回图片编辑',
         title: '返回图片编辑',
         onClick: () => props.onClose(),
       },
-      h(ArrowLeftIcon, { className: 'size-4' }),
+      h(ArrowLeftIcon, {}),
     ),
-    h('span', { className: 'text-[13px] font-medium' }, '图片编辑 · 裁剪'),
-    h('span', { className: WORKBENCH_HINT_CLASS }, '拖动空白处新建选区 · 拖把手改大小 · 拖选区内部移动'),
+    h('span', { className: 'afw-title' }, '图片编辑 · 裁剪'),
+    h('span', { className: 'afw-sub' }, '拖动空白处新建选区 · 拖把手改大小 · 拖选区内部移动'),
     h('div', { className: 'min-w-0 flex-1' }),
-    h(
-      Button,
-      {
-        type: 'button',
-        size: 'sm',
-        'aria-label': props.saveLabel,
-        'data-fisherai-image-save': 'crop',
-        disabled: saving || !loaded || !crop,
-        onClick: () => void applyCrop(),
-        className: 'h-8 gap-1.5 text-xs',
-      },
-      saving
-        ? h(LoaderCircleIcon, { className: 'size-3.5 animate-spin' })
-        : h(CheckIcon, { className: 'size-3.5' }),
-      saving ? '裁切中…' : props.saveLabel,
-    ),
+    h('span', { className: 'afw-badge' }, ratioLabel === 'Original' ? '原图比例' : ratioLabel),
+    h('span', { className: 'afw-sep' }),
     h(
       Button,
       {
@@ -380,51 +371,45 @@ export function ImageCropStage(react: Runtime, props: CropStageProps) {
         type: 'button',
         variant: 'ghost',
         size: 'icon-sm',
+        className: 'afw-iconbtn',
         'aria-label': '关闭裁剪',
-        title: '返回（Esc）',
-        onClick: () => props.onClose(),
+        title: '关闭图片编辑（Esc）',
+        onClick: () => (props.onCloseStudio ? props.onCloseStudio() : props.onClose()),
       },
-      h(XIcon, { className: 'size-4' }),
+      h(XIcon, {}),
     ),
   );
 
-  const toolbar = h(
-    'div',
-    { className: WORKBENCH_TOOLBAR_CLASS },
-    h(
-      'div',
-      { role: 'group', 'aria-label': '裁剪比例', className: 'flex items-center gap-0.5' },
-      ...RATIOS.map((option) =>
-        h(
-          'button',
-          {
-            key: option.value,
-            type: 'button',
-            'data-fisherai-crop-ratio': option.value,
-            'aria-pressed': ratioLabel === option.value,
-            disabled: saving || !loaded,
-            onClick: () => selectRatio(option.value),
-            className: cn(
-              'h-7 rounded-md border px-2 text-[11px] transition-colors',
-              ratioLabel === option.value
-                ? 'border-border bg-[var(--af-hover)] text-foreground'
-                : 'border-transparent text-muted-foreground hover:bg-[var(--af-hover)] hover:text-foreground',
-            ),
+  // 左侧工具条：裁剪高亮，其余工具交给 studio 切（设计稿里四个工具常驻）。
+  const railTools: Array<{ value: 'crop' | 'mask' | 'brush' | 'compose'; label: string; icon: unknown }> = [
+    { value: 'crop', label: '裁剪', icon: CropIcon },
+    { value: 'mask', label: '蒙版', icon: ScanIcon },
+    { value: 'brush', label: '笔刷', icon: PaintbrushIcon },
+    { value: 'compose', label: '组合', icon: LayersIcon },
+  ];
+  const rail = h(
+    'nav',
+    { className: 'afw-rail', 'aria-label': '编辑工具' },
+    ...railTools.map((tool) => {
+      const Icon = tool.icon as ReactTypes.ComponentType<{ className?: string }>;
+      const active = tool.value === 'crop';
+      return h(
+        'button',
+        {
+          key: tool.value,
+          type: 'button',
+          className: 'afw-tool',
+          title: active ? '裁剪（当前）' : `切换到${tool.label}`,
+          'aria-label': tool.label,
+          'aria-pressed': active,
+          disabled: saving || (!active && !props.onSwitchTool),
+          onClick: () => {
+            if (!active) props.onSwitchTool?.(tool.value);
           },
-          option.label,
-        ),
-      ),
-    ),
-    h('div', { className: WORKBENCH_DIVIDER_CLASS }),
-    h(
-      'span',
-      { className: WORKBENCH_HINT_CLASS },
-      ratioLabel === 'Original'
-        ? '按原图比例'
-        : ratioLabel === 'Free'
-          ? '自由比例'
-          : `锁定 ${ratioLabel}`,
-    ),
+        },
+        h(Icon, {}),
+      );
+    }),
   );
 
   const stage = h(
@@ -433,7 +418,7 @@ export function ImageCropStage(react: Runtime, props: CropStageProps) {
     h(
       'div',
       {
-        className: 'af-wb-image relative overflow-hidden rounded-[3px]',
+        className: 'afw-stage-img relative overflow-hidden rounded-[3px]',
         style: {
           width: display.width || 1,
           height: display.height || 1,
@@ -463,6 +448,14 @@ export function ImageCropStage(react: Runtime, props: CropStageProps) {
         onPointerLeave: () => setHover(null),
       }),
     ),
+    loaded && selectionPixels
+      ? h(
+          'span',
+          { className: 'afw-size-chip', style: { left: 18, bottom: 16 } },
+          sizeLabel(selectionPixels),
+          h('span', { style: { opacity: 0.55 } }, '选区'),
+        )
+      : null,
     !loaded && !error
       ? h(
           'div',
@@ -476,44 +469,116 @@ export function ImageCropStage(react: Runtime, props: CropStageProps) {
       : null,
   );
 
-  const footer = h(
-    'footer',
-    { className: WORKBENCH_FOOTER_CLASS },
-    h('span', { className: WORKBENCH_HINT_CLASS }, '原图'),
+  const inspector = h(
+    'aside',
+    { className: 'afw-insp', 'aria-label': '裁剪参数' },
     h(
-      'span',
-      {
-        className: 'font-mono text-[11px] tabular-nums text-muted-foreground',
-        'data-fisherai-image-dimensions': 'source',
-      },
-      sizeLabel(source),
-    ),
-    h('div', { className: WORKBENCH_DIVIDER_CLASS }),
-    h('span', { className: WORKBENCH_HINT_CLASS }, '选区'),
-    h(
-      'span',
-      {
-        className: 'font-mono text-[11px] tabular-nums text-muted-foreground',
-        'data-fisherai-image-dimensions': 'selection',
-      },
-      sizeLabel(selectionPixels),
-    ),
-    h('div', { className: 'min-w-0 flex-1' }),
-    error
-      ? h(
-          'span',
-          {
-            role: 'alert',
-            'data-fisherai-image-status': 'error',
-            className: 'max-w-[46ch] truncate text-[11px] text-[var(--af-danger)]',
-          },
-          error,
-        )
-      : h(
-          'span',
-          { role: 'status', 'data-fisherai-image-status': 'idle', className: WORKBENCH_HINT_CLASS },
-          '裁切后会作为一次编辑应用，保存时生成新图片',
+      'div',
+      { className: 'afw-insp-head' },
+      h(CropIcon, { className: 'size-4 text-[#5eead4]' }),
+      h(
+        'div',
+        { className: 'min-w-0' },
+        h('h2', {}, '裁剪'),
+        h(
+          'div',
+          { className: 'afw-sub' },
+          ratioLabel === 'Original'
+            ? '按原图比例'
+            : ratioLabel === 'Free'
+              ? '自由比例'
+              : `锁定 ${ratioLabel}`,
         ),
+      ),
+    ),
+    h(
+      'div',
+      { className: 'afw-insp-body' },
+      h(
+        'div',
+        { className: 'afw-sect' },
+        h('div', { className: 'afw-sect-t' }, '比例', h('span', { className: 'r' }, '锁定')),
+        h(
+          'div',
+          { className: 'afw-chips', role: 'group', 'aria-label': '裁剪比例' },
+          ...RATIOS.map((option) =>
+            h(
+              'button',
+              {
+                key: option.value,
+                type: 'button',
+                'data-fisherai-crop-ratio': option.value,
+                'aria-pressed': ratioLabel === option.value,
+                disabled: saving || !loaded,
+                onClick: () => selectRatio(option.value),
+              },
+              option.label,
+            ),
+          ),
+        ),
+      ),
+      h(
+        'div',
+        { className: 'afw-sect' },
+        h('div', { className: 'afw-sect-t' }, '输出尺寸', h('span', { className: 'r' }, '源图像素')),
+        h(
+          'div',
+          { className: 'afw-kv' },
+          h('span', {}, '选区'),
+          h('b', { 'data-fisherai-image-dimensions': 'selection' }, sizeLabel(selectionPixels)),
+        ),
+        h(
+          'div',
+          { className: 'afw-kv' },
+          h('span', {}, '原图'),
+          h('b', { 'data-fisherai-image-dimensions': 'source' }, sizeLabel(source)),
+        ),
+        h('div', { className: 'afw-note' }, '选区之外的像素会被裁掉；应用后回到图片编辑，可继续别的工具。'),
+      ),
+      h(
+        'div',
+        { className: 'afw-sect' },
+        error
+          ? h(
+              'span',
+              { role: 'alert', 'data-fisherai-image-status': 'error', className: 'afw-alert' },
+              error,
+            )
+          : h(
+              'span',
+              { role: 'status', 'data-fisherai-image-status': 'idle', className: 'afw-status' },
+              loaded ? '拖空白处新建选区 · 双击应用' : '正在载入图片…',
+            ),
+      ),
+    ),
+    h(
+      'footer',
+      { className: 'afw-insp-foot' },
+      h(
+        Button,
+        {
+          type: 'button',
+          'aria-label': props.saveLabel,
+          'data-fisherai-image-save': 'crop',
+          disabled: saving || !loaded || !crop,
+          onClick: () => void applyCrop(),
+        },
+        saving
+          ? h(LoaderCircleIcon, { className: 'size-3.5 animate-spin' })
+          : h(CheckIcon, { className: 'size-3.5' }),
+        saving ? '裁切中…' : props.saveLabel,
+      ),
+      h(
+        Button,
+        {
+          type: 'button',
+          variant: 'ghost',
+          className: 'afw-ghost',
+          onClick: () => props.onClose(),
+        },
+        '返回',
+      ),
+    ),
   );
 
   return h(
@@ -536,9 +601,7 @@ export function ImageCropStage(react: Runtime, props: CropStageProps) {
       className: WORKBENCH_ROOT_CLASS,
     },
     header,
-    toolbar,
-    stage,
-    footer,
+    h('div', { className: 'afw-body' }, rail, h('div', { className: 'afw-main' }, stage), inspector),
   );
 }
 

@@ -1,2 +1,8 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Binary media assets (promo video / GIF / stills) — no EOL normalization
+*.mp4 binary
+*.gif binary
+*.jpg binary
+*.png binary

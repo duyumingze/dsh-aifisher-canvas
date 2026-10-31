@@ -34,6 +34,13 @@ import { CanvasWorkflowLibrary } from './CanvasWorkflowLibrary';
 import { ComfyWorkflowConfig } from './ComfyWorkflowConfig';
 import type { CanvasViewport } from '../../../vendor/aifisher/src/stable/canvas/canvasNavigation';
 import type { MinimapNode } from '../../../vendor/aifisher/src/stable/dialogs/minimapGeometry';
+import {
+  currentUiScale,
+  resetUiScale,
+  stepUiScale,
+  subscribeUiScale,
+  uiScaleChangedAt,
+} from '../../client/canvas/uiScale';
 
 type Runtime = Pick<
   typeof ReactTypes,
@@ -79,6 +86,7 @@ const SHORTCUTS: Array<[string, string]> = [
   ['搜索节点（仿 Blender）', 'Shift + A'],
   ['平移画布', '中键拖拽 / Alt+滚轮'],
   ['缩放画布', '滚轮 / Ctrl+滚轮'],
+  ['界面大小', 'Ctrl + = / − / 0'],
   ['聚焦选中/全部', 'F'],
   ['自动排列', 'L'],
   ['保存工作流', 'Ctrl + S'],
@@ -221,6 +229,79 @@ export function CanvasViewportControls(
 
   const [helpOpen, setHelpOpen] = react.useState(false);
 
+  /**
+   * 界面缩放胶囊（v1.81，设计稿第四节）。
+   *
+   * 状态在 src/client/canvas/uiScale.ts（localStorage + Ctrl 快捷键 + CSS 变量），
+   * 这里只订阅它的变更时间戳触发重渲染 —— 组件里不存第二份 scale，
+   * 免得「快捷键改了但胶囊读数不动」。
+   */
+  const [uiScaleTick, setUiScaleTick] = react.useState(uiScaleChangedAt());
+  react.useEffect(() => subscribeUiScale(() => setUiScaleTick(uiScaleChangedAt())), []);
+  const [showScaleTip, setShowScaleTip] = react.useState(false);
+  react.useEffect(() => {
+    if (!uiScaleTick) return;
+    setShowScaleTip(true);
+    const timer = setTimeout(() => setShowScaleTip(false), 1600);
+    return () => clearTimeout(timer);
+  }, [uiScaleTick]);
+  const uiPercent = Math.round(currentUiScale() * 100);
+  const uiScaleCapsule =
+    view === 'canvas'
+      ? h(
+          'div',
+          {
+            'data-af-ui-scale': 'true',
+            role: 'group',
+            'aria-label': '界面缩放',
+            className: 'af-uity',
+          },
+          h('span', { className: 'af-uity-label' }, '界面'),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'af-uity-btn',
+              'aria-label': '缩小界面',
+              title: '缩小界面（Ctrl + −）',
+              onClick: () => stepUiScale(-1),
+            },
+            '−',
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'af-uity-value',
+              'aria-label': `界面缩放 ${uiPercent}%`,
+              title: '恢复 100%',
+              onClick: () => resetUiScale(),
+            },
+            `${uiPercent}%`,
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'af-uity-btn',
+              'aria-label': '放大界面',
+              title: '放大界面（Ctrl + =）',
+              onClick: () => stepUiScale(1),
+            },
+            '+',
+          ),
+          h(
+            'div',
+            {
+              className: cn('af-uity-tip', showScaleTip && 'is-show'),
+              role: 'status',
+              'aria-live': 'polite',
+            },
+            'Ctrl + = / − 调界面大小，画布内容不受影响',
+          ),
+        )
+      : null;
+
   react.useEffect(() => {
     setHelpOpen(false);
   }, [documentEpoch, view]);
@@ -246,6 +327,7 @@ export function CanvasViewportControls(
     'div',
     {
       ref: zoomControlsRef,
+      'data-af-zoom-bar': 'true',
       // 保留 vendor 的定位串（真机断言按它判断「控件没跑出画布」）
       className:
         'absolute bottom-6 left-6 h-[42px] z-50 flex items-center gap-1.5 rounded-lg border ' +
@@ -316,6 +398,7 @@ export function CanvasViewportControls(
             {
               'aria-label': '快捷键说明',
               title: '快捷键说明',
+              'data-af-help-btn': 'true',
               className: cn(
                 'absolute bottom-6 left-[260px] z-50 flex h-[42px] w-[42px] items-center justify-center',
                 'text-muted-foreground transition-colors hover:text-foreground',
@@ -537,6 +620,7 @@ export function CanvasViewportControls(
       : null,
     zoomBar,
     helper,
+    uiScaleCapsule,
     gridPanel,
     nodeSearch,
     workflowConfig,

@@ -305,7 +305,14 @@ interface MergeHit {
   point: { x: number; y: number };
 }
 
-interface MergeDrag {
+/**
+ * 划选手势（右键）：
+ *   - merge = Shift+右键：同源连线收进一个转接点（Blender 的 reroute）；
+ *   - cut   = Ctrl/Meta+右键：划过的连线直接断开（和主画布 knife.ts 同一个手势）。
+ * 两者共用采样 / 命中 / 浮层，只是松手时做的事不同。
+ */
+interface StrokeDrag {
+  mode: 'merge' | 'cut';
   stroke: Array<{ x: number; y: number }>;
   path: SVGPathElement;
   hint: SVGPathElement;
@@ -377,7 +384,7 @@ interface Session {
   edited: boolean;
   destroyed: boolean;
   linkDrag: LinkDrag | null;
-  mergeDrag: MergeDrag | null;
+  strokeDrag: StrokeDrag | null;
   nodeDrag: NodeDrag | null;
   panDrag: PanDrag | null;
   marquee: MarqueeDrag | null;
@@ -579,7 +586,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   const hintbar = document.createElement('div');
   hintbar.className = 'cg-hintbar';
   hintbar.textContent =
-    '左键空白拖=框选 · 中键/空格=平移 · 滚轮=缩放 · Shift+A=搜索添加节点 · 拖节点压线松手=插入连线 · 滑块 Shift=微调 · Shift+右键划过连线=合并加转接 · Delete=删除 · Ctrl+Z=撤销 / Ctrl+Shift+Z=重做';
+    '空白拖=框选 · 中键/空格=平移 · 滚轮=缩放 · Shift+A=添加节点 · 拖节点压线=插入连线 · 双击连线=断开 · Ctrl+右键划过=断开 · Shift+右键划过=合线 · Delete=删除 · Ctrl+Z=撤销';
   stage.append(edgeLayer, world, hintbar);
 
   // 右下角缩放读数：和顶栏「适应视图」同一个动作，顺手可点。
@@ -651,7 +658,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     edited: false,
     destroyed: false,
     linkDrag: null,
-    mergeDrag: null,
+    strokeDrag: null,
     nodeDrag: null,
     panDrag: null,
     marquee: null,
@@ -2120,6 +2127,59 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     input.select?.();
   };
 
+  /**
+   * 菜单与落点跟着指针：Shift+A 和顶栏「+ 添加节点」都走这里。
+   *
+   * 用户 2026-10-30：「添加节点的时候节点位置不会以鼠标为中心点」。以前这两个入口都把
+   * 新节点丢在 stage 正中，跟鼠标在哪无关；现在先取指针在 stage 里的最后位置，
+   * 指针不在 stage 上（例如刚点顶栏按钮）才回落到正中。
+   */
+  const openAddMenuAtPointer = (): void => {
+    const rect = stage.getBoundingClientRect();
+    // jsdom 里没有布局（rect 全 0），有指针记录就认为它落在 stage 上
+    const hasBox = rect.width > 1 && rect.height > 1;
+    const pointerInside =
+      !!stagePointer &&
+      (!hasBox ||
+        (stagePointer.x >= rect.left - 1 &&
+          stagePointer.x <= rect.right + 1 &&
+          stagePointer.y >= rect.top - 1 &&
+          stagePointer.y <= rect.bottom + 1));
+    if (stagePointer && pointerInside) {
+      openAddMenu(
+        { x: stagePointer.x + 14, y: stagePointer.y + 14 },
+        toWorld(stagePointer.x, stagePointer.y),
+      );
+      return;
+    }
+    openAddMenu(
+      { x: rect.left + rect.width / 2 - 90, y: rect.top + 80 },
+      toWorld(rect.left + rect.width / 2, rect.top + rect.height / 2),
+    );
+  };
+
+  /**
+   * 新建节点的落点：**以指针为中心**（用户 2026-10-30：「添加节点的时候节点位置不会以
+   * 鼠标为中心点」）。
+   *
+   * 宽度有常量表（nodeWidthOf），高度只能等节点渲染出来量 —— 所以先按一个估高落位，
+   * renderNodes() 之后再用真实 offsetHeight 对齐一次。jsdom 里量不到高度，就用估算值
+   * （回归只断言横向中心；纵向由 browser-check 在真浏览器里验）。
+   */
+  const DEFAULT_NODE_HEIGHT_GUESS = 180;
+  const centerNodeOn = (id: string, center: { x: number; y: number }): void => {
+    const node = session_.graph.nodes.find((item) => item.id === id);
+    if (!node) return;
+    const element = nodeElement(id);
+    const height = element?.offsetHeight || DEFAULT_NODE_HEIGHT_GUESS;
+    node.x = center.x - nodeWidthOf(node.kind) / 2;
+    node.y = center.y - height / 2;
+    if (element) {
+      element.style.left = `${node.x}px`;
+      element.style.top = `${node.y}px`;
+    }
+  };
+
   const addNode = (kind: CompositorKind, point?: { x: number; y: number }): void => {
     const rect = stage.getBoundingClientRect();
     const center =
@@ -2131,7 +2191,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       id: newCompositorId(kind),
       kind,
       x: center.x - nodeWidthOf(kind) / 2,
-      y: center.y - 40,
+      y: center.y - DEFAULT_NODE_HEIGHT_GUESS / 2,
       // 深拷贝数组参数（曲线控制点），别把 NODE_SPECS 里的默认表改掉
       params: Object.fromEntries(
         Object.entries(NODE_SPECS[kind].defaults || {}).map(([key, value]) => [
@@ -2145,6 +2205,8 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     session_.edited = true;
     commitHistory(before);
     renderNodes();
+    // 量到真实高度后把卡片摆正到指针中心
+    centerNodeOn(node.id, center);
     renderEdges();
     selectNode(node.id);
     schedule();
@@ -2429,14 +2491,14 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
 
   const onStagePointerDown = (event: PointerEvent): void => {
     const target = event.target as HTMLElement;
-    // Shift + 右键 = 划选合并：同源连线收进一个转接点（Blender 的 reroute 手感）。
+    // 右键划选：Shift = 合并加转接点，Ctrl/Meta = 断开（和主画布 knife.ts 同一套手势）。
     // 必须在「只认 stage/world」之前判：指针压在一条连线上时命中的是 `.cg-edge-hit`，
     // 以前那个判断直接把起手吞掉，用户看到的就是「划过线段不建转接点」。
-    if (event.button === 2 && event.shiftKey) {
+    if (event.button === 2 && (event.shiftKey || event.ctrlKey || event.metaKey)) {
       event.preventDefault();
       closeMenu();
       stopPlacement();
-      beginMerge(event);
+      beginStroke(event, event.shiftKey ? 'merge' : 'cut');
       return;
     }
     // 连线层 pointer-events: none（只有线上的 hit path 可点），所以空白处只会命中 stage / world
@@ -2538,8 +2600,8 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       applyPreviewView();
       return;
     }
-    if (session_.mergeDrag) {
-      updateMergeStroke(event);
+    if (session_.strokeDrag) {
+      updateStroke(event);
       return;
     }
     if (session_.nodeDrag) {
@@ -2581,8 +2643,8 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       previewBox.classList.remove('cg-preview-panning');
       return;
     }
-    if (session_.mergeDrag) {
-      finishMerge();
+    if (session_.strokeDrag) {
+      finishStroke();
       return;
     }
     if (session_.nodeDrag) {
@@ -2616,20 +2678,34 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     applyView();
   };
 
-  const onEdgeClick = (event: MouseEvent): void => {
-    const target = event.target as HTMLElement;
-    const hit = target.closest<SVGPathElement>('.cg-edge-hit');
-    if (!hit) return;
-    event.stopPropagation();
-    const edge = session_.graph.edges.find((item) => item.id === hit.dataset.edgeId);
-    if (!edge) return;
+  /**
+   * 断开一条连线（双击 / Ctrl+右键划线共用）。
+   *
+   * 用户 2026-10-30：「画布里的调色面板左键单点就断开连线了，修改一下，可以双击断开
+   * 或者 ctrl+鼠标右键划线断开」。以前单击就断 —— 想点空白处或拖框选时手一抖压到线
+   * 就把线弄没了。现在单击什么都不做，只有**双击**和 **Ctrl+右键划过**才断开。
+   */
+  const removeEdgeById = (edgeId: string): boolean => {
+    if (!session_.graph.edges.some((item) => item.id === edgeId)) return false;
     const before = cloneHistorySnapshot();
-    session_.graph = { ...session_.graph, edges: session_.graph.edges.filter((item) => item.id !== edge.id) };
+    session_.graph = {
+      ...session_.graph,
+      edges: session_.graph.edges.filter((item) => item.id !== edgeId),
+    };
     session_.edited = true;
     commitHistory(before);
     renderEdges();
     schedule();
-    session_.toast('已断开连线');
+    return true;
+  };
+
+  const onEdgeDoubleClick = (event: MouseEvent): void => {
+    const target = event.target as HTMLElement | null;
+    const hit = target?.closest?.<SVGPathElement>('.cg-edge-hit');
+    if (!hit) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (removeEdgeById(hit.dataset.edgeId || '')) session_.toast('已断开连线（双击）');
   };
 
   // ---- 串线（把节点拖到一条连线上松手就插进去）---------------------------
@@ -2879,7 +2955,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     return null;
   };
 
-  const updateMergeHits = (drag: MergeDrag): void => {
+  const updateStrokeHits = (drag: StrokeDrag): void => {
     drag.hits.clear();
     const hints: string[] = [];
     for (const edge of session_.graph.edges) {
@@ -2894,25 +2970,30 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     drag.hint.setAttribute('opacity', hints.length ? '1' : '0');
   };
 
-  const beginMerge = (event: PointerEvent): void => {
+  const strokeClass = (mode: StrokeDrag['mode']): string =>
+    mode === 'cut' ? 'cg-cutting' : 'cg-merging';
+
+  const beginStroke = (event: PointerEvent, mode: StrokeDrag['mode']): void => {
     const rect = stage.getBoundingClientRect();
     const hint = document.createElementNS(SVG_NS, 'path');
-    hint.setAttribute('class', 'cg-merge-hint');
+    // 与主画布切刀同一套配色：合并=绿（收束），断开=红（切断）
+    hint.setAttribute('class', mode === 'cut' ? 'cg-cut-hint' : 'cg-merge-hint');
     hint.setAttribute('opacity', '0');
     const path = document.createElementNS(SVG_NS, 'path');
     path.setAttribute('class', 'cg-merge-stroke');
     edgeLayer.append(hint, path);
-    session_.mergeDrag = {
+    session_.strokeDrag = {
+      mode,
       stroke: [{ x: event.clientX - rect.left, y: event.clientY - rect.top }],
       path,
       hint,
       hits: new Map(),
     };
-    stage.classList.add('cg-merging');
+    stage.classList.add(strokeClass(mode));
   };
 
-  const updateMergeStroke = (event: PointerEvent): void => {
-    const drag = session_.mergeDrag;
+  const updateStroke = (event: PointerEvent): void => {
+    const drag = session_.strokeDrag;
     if (!drag) return;
     const rect = stage.getBoundingClientRect();
     const point = { x: event.clientX - rect.left, y: event.clientY - rect.top };
@@ -2923,19 +3004,34 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       'd',
       drag.stroke.map((item, index) => `${index ? 'L' : 'M'} ${item.x} ${item.y}`).join(' '),
     );
-    updateMergeHits(drag);
+    updateStrokeHits(drag);
   };
 
-  const finishMerge = (): void => {
-    const drag = session_.mergeDrag;
+  const finishStroke = (): void => {
+    const drag = session_.strokeDrag;
     if (!drag) return;
-    session_.mergeDrag = null;
-    stage.classList.remove('cg-merging');
+    session_.strokeDrag = null;
+    stage.classList.remove(strokeClass(drag.mode));
     drag.path.remove();
     drag.hint.remove();
     const hits = [...drag.hits.values()];
     if (!hits.length) return;
     const before = cloneHistorySnapshot();
+    // Ctrl/Meta+右键划过：只断线，不建节点（用户 2026-10-30 要的「划线断开」）
+    if (drag.mode === 'cut') {
+      const removed = new Set(hits.map((hit) => hit.edge.id));
+      session_.graph = {
+        ...session_.graph,
+        edges: session_.graph.edges.filter((edge) => !removed.has(edge.id)),
+      };
+      session_.edited = true;
+      commitHistory(before);
+      renderEdges();
+      setSelection([]);
+      schedule();
+      session_.toast(`已断开 ${removed.size} 条连线`);
+      return;
+    }
     interface Group {
       fromNode: string;
       fromPort: number;
@@ -2995,11 +3091,11 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     session_.toast(`已合并 ${hits.length} 条线 · 新增 ${created.length} 个转接点`);
   };
 
-  const cancelMerge = (): void => {
-    const drag = session_.mergeDrag;
+  const cancelStroke = (): void => {
+    const drag = session_.strokeDrag;
     if (!drag) return;
-    session_.mergeDrag = null;
-    stage.classList.remove('cg-merging');
+    session_.strokeDrag = null;
+    stage.classList.remove(strokeClass(drag.mode));
     drag.path.remove();
     drag.hint.remove();
   };
@@ -3014,8 +3110,8 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
         closeMenu();
         return;
       }
-      if (session_.mergeDrag) {
-        cancelMerge();
+      if (session_.strokeDrag) {
+        cancelStroke();
         return;
       }
       // 在数字框里按 Esc 只是退出输入，别顺手把整个调色面板关掉/保存
@@ -3068,11 +3164,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     }
     if (event.key.toLowerCase() === 'a' && event.shiftKey) {
       event.preventDefault();
-      const rect = stage.getBoundingClientRect();
-      openAddMenu(
-        { x: rect.left + rect.width / 2 - 90, y: rect.top + 80 },
-        toWorld(rect.left + rect.width / 2, rect.top + rect.height / 2),
-      );
+      openAddMenuAtPointer();
       return;
     }
     if (event.key.toLowerCase() === 't') {
@@ -3097,11 +3189,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     const act = (event.target as HTMLElement).closest<HTMLElement>('[data-act]')?.dataset.act;
     if (!act) return;
     if (act === 'add') {
-      const rect = stage.getBoundingClientRect();
-      openAddMenu(
-        { x: rect.left + rect.width / 2 - 90, y: rect.top + 80 },
-        toWorld(rect.left + rect.width / 2, rect.top + rect.height / 2),
-      );
+      openAddMenuAtPointer();
       return;
     }
     if (act === 'scopes') {
@@ -3242,7 +3330,8 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     },
     { signal, passive: true },
   );
-  stage.addEventListener('click', onEdgeClick, { signal });
+  // 连线只认「双击断开」与「Ctrl+右键划过断开」：单击什么都不做（避免误触把线弄丢）
+  stage.addEventListener('dblclick', onEdgeDoubleClick, { signal });
   // 上方预览：滚轮缩放 / 拖动平移 / 双击复位
   previewBox.addEventListener('wheel', onPreviewWheel, { passive: false, signal });
   previewBox.addEventListener('pointerdown', onPreviewPointerDown, { signal });
@@ -3351,6 +3440,8 @@ export function compositorReport(): Record<string, unknown> {
       clipHighlight: Number(session.scope.clipHighlight.toFixed(4)),
     },
     placing: session.placement ? session.placement.id : null,
+    /** 进行中的右键划选：merge / cut / null（回归用）。 */
+    stroke: session.strokeDrag ? session.strokeDrag.mode : null,
     history: {
       canUndo: !!session.history.past.length || !!session.history.pending,
       canRedo: !!session.history.future.length,

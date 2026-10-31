@@ -1,6 +1,8 @@
 import type { Dispatch, SetStateAction } from 'react';
 import { installNodeFramework } from './nodeFramework';
 import { newNodeDimensions } from './nodeCreationDimensions';
+// dsh-aifisher-canvas 追加：建节点要以指针为中心，尺寸跟画布同一套规则
+import { nodeHeight, nodeWidth } from './canvasNodeRules';
 import { installStableCanvasClipboard } from '../canvas/canvasClipboard';
 import { connectCanvasNodes, type CanvasConnectionNode } from '../canvas/canvasConnections';
 import type { CanvasViewport } from '../canvas/canvasNavigation';
@@ -236,6 +238,9 @@ export function createNodeOperations(options: NodeOperationsOptions, runtime: No
     const point = worldPoint(x, y, viewport);
     if (!point) return undefined;
     const created = createCanvasNode(runtime, type, point, projectId);
+    // 用户 2026-10-30：「添加节点的时候节点位置不会以鼠标为中心点」
+    created.x -= nodeWidth(created) / 2;
+    created.y -= nodeHeight(created) / 2;
     setNodes((nodes) => {
       const parent = nodes.find((node) => node.id === parentId);
       if (parent) {
@@ -347,6 +352,8 @@ export function createNodeMenuOperations(
         return;
       }
       const created = createCanvasNode(runtime, type, point, projectId);
+      created.x -= nodeWidth(created) / 2;
+      created.y -= nodeHeight(created) / 2;
       const ids = [
         ...new Set(menu.sourceNodeIds?.length ? menu.sourceNodeIds : [menu.sourceNodeId]),
       ];

@@ -354,6 +354,63 @@ const ANCHORED_SHELL_PATCHES = [
   console.log(`[vendor] 画布外壳 fixed→absolute：${ANCHORED_SHELL_PATCHES.length} 处`);
 }
 
+// ---------------------------------------------------------------- 3.7b) 扩图面板 → 工作台式大浮层
+//
+// 用户拍板 A：按页面稿把扩图做成工作台。面板本体在 vendor 的 canvasMediaToolbar.tsx 里，
+// 这里不改逻辑，只把「节点下方 520px 小气泡」放大成「舞台 + 参数」两栏，并交给
+// src/client/canvas/workbenchSkin.ts 的 .af-outpaint-page 补视觉。
+//
+// ⚠️ v1.83 起这一段已经是【兜底】而不是主路径：真正的整页扩图在
+// src/canvas-ui/canvas/CanvasOutpaintStudio.tsx（兄弟图层 + portal 到 .af-canvas-mount），
+// 工具条通过 __FISHERAI_CANVAS_OUTPAINT_PAGE__.open(node) 交给它；桥没挂上才回落到这里的
+// 大浮层。注意 3.9 段的整文件覆盖（scripts/patches/aifisher 里的 canvasMediaToolbar.tsx）
+// 在正则改写**之后**执行，会把这里的 880 类名覆盖回 520 —— 那段仍然保留是为了让
+// 「没有整页桥」的宿主里也有一个能用的面板，不要再往这里加视觉。
+const OUTPAINT_PAGE_PATCHES = [
+  {
+    file: 'src/stable/nodes/canvasMediaToolbar.tsx',
+    from: 'className="absolute top-full left-1/2 -translate-x-1/2 mt-3 w-[520px] max-w-[calc(100vw-40px)] rounded-xl border border-[var(--af-border-control)] bg-[var(--af-input)] text-[var(--af-text)] shadow-xl z-30 animate-in fade-in duration-200 motion-reduce:animate-none"',
+    to: 'className="af-outpaint-page absolute top-full left-1/2 -translate-x-1/2 mt-3 w-[880px] max-w-[calc(100vw-40px)] rounded-2xl border border-[var(--af-border-control)] bg-[var(--af-input)] text-[var(--af-text)] shadow-2xl z-30 animate-in fade-in duration-200 motion-reduce:animate-none"',
+    why: '扩图面板从节点气泡放大成工作台两栏',
+  },
+  {
+    file: 'src/stable/nodes/canvasMediaToolbar.tsx',
+    from: '<div className="flex gap-4 px-4 pb-2 pt-3">',
+    to: '<div className="af-outpaint-body flex gap-5 px-5 pb-3 pt-4">',
+    why: '舞台与参数区拉开间距',
+  },
+  {
+    file: 'src/stable/nodes/canvasMediaToolbar.tsx',
+    from: '<div className="w-[184px] shrink-0">',
+    to: '<div className="af-outpaint-stage w-[52%] max-w-[520px] shrink-0">',
+    why: '预览从 184px 缩略图放大成舞台',
+  },
+];
+
+{
+  const missing = [];
+  for (const patch of OUTPAINT_PAGE_PATCHES) {
+    const target = path.join(VENDOR, patch.file);
+    if (!fs.existsSync(target)) {
+      missing.push(`${patch.file}（文件不存在）`);
+      continue;
+    }
+    const original = fs.readFileSync(target, 'utf8');
+    const hits = original.split(patch.from).length - 1;
+    if (hits !== 1) {
+      missing.push(`${patch.file}: "${patch.from.slice(0, 60)}…" 命中 ${hits} 次（预期 1 次）`);
+      continue;
+    }
+    fs.writeFileSync(target, original.split(patch.from).join(patch.to));
+  }
+  if (missing.length > 0) {
+    // 这一批只服务「扩图工作台」：锚点没对上就告警跳过，别把 vendor 流水线的其它补丁一起拖死。
+    console.warn(`[vendor] 扩图工作台补丁跳过（锚点没对上）：\n  - ${missing.join('\n  - ')}`);
+  } else {
+    console.log(`[vendor] 扩图工作台：${OUTPAINT_PAGE_PATCHES.length} 处`);
+  }
+}
+
 // ---------------------------------------------------------------- 3.8) 本地工作流节点的入口（两处一行改写）
 
 /**
@@ -964,6 +1021,20 @@ export function attachCanvasNodeCreateBridge(
         const updated = updateCanvasNode([node], node.id, { comfyMode: detail.comfyMode }, runtime);
         if (updated[0]) node = updated[0];
       }
+      // 用户 2026-10-30：「添加节点的时候节点位置不会以鼠标为中心点」—— 以前节点的左上角
+      // 直接贴着指针，卡片整个往右下铺开。现在按画布自己的尺寸规则（nodeWidth/nodeHeight，
+      // Junction 圆点、文本、ComfyUI 都覆盖）反推左上角，让卡片的**中心**落在指针上。
+      const width = nodeWidth(node);
+      const height = nodeHeight(node);
+      node = { ...node, x: point.x - width / 2, y: point.y - height / 2 };
+      (window as { __DSH_NODE_CREATE_CENTER__?: unknown }).__DSH_NODE_CREATE_CENTER__ = {
+        type: node.type,
+        point: { x: point.x, y: point.y },
+        width,
+        height,
+        x: node.x,
+        y: node.y,
+      };
       setNodes((nodes) => [...nodes, node]);
       setSelected([node.id]);
       if (detail.place === true) {
@@ -1115,22 +1186,100 @@ function attachPointerPlacement(
   // 桥接函数插在 workflowNode() 判定函数之前（同文件、模块作用域，能用到 createCanvasNode）
   const helperAnchor = 'function workflowNode(';
   const helperHits = original.split(helperAnchor).length - 1;
-  if (anchorHits !== 1 || helperHits !== 1) {
+  // 「以指针为中心放节点」要用画布自己的尺寸规则（nodeWidth / nodeHeight）
+  const importAnchor = `import { installNodeFramework } from './nodeFramework';`;
+  const importHits = original.split(importAnchor).length - 1;
+  if (anchorHits !== 1 || helperHits !== 1 || importHits !== 1) {
     throw new Error(
       `[vendor] 节点搜索建节点出口没对齐：useCanvasNodes 的 effect 锚点命中 ${anchorHits} 次（预期 1 次）、` +
-        `函数插入锚点命中 ${helperHits} 次（预期 1 次）—— 上游可能改了这段写法，请核对`,
+        `函数插入锚点命中 ${helperHits} 次（预期 1 次）、` +
+        `nodeFramework 导入锚点命中 ${importHits} 次（预期 1 次）—— 上游可能改了这段写法，请核对`,
     );
   }
   const patched = original
+    .split(importAnchor)
+    .join(
+      `${importAnchor}\n// dsh-aifisher-canvas 追加：新建节点要以指针为中心，尺寸跟画布同一套规则。\nimport { nodeHeight, nodeWidth } from './canvasNodeRules';`,
+    )
     .split(helperAnchor)
     .join(NODE_CREATE_BRIDGE_HELPER + helperAnchor)
     .split(NODE_CREATE_BRIDGE_ANCHOR)
     .join(NODE_CREATE_BRIDGE_CODE);
   fs.writeFileSync(target, patched);
-  console.log('[vendor] 节点搜索：fisherai:add-canvas-node 建节点出口 1 处（完整 runtime）');
+  console.log(
+    '[vendor] 节点搜索：fisherai:add-canvas-node 建节点出口 1 处（完整 runtime）+ 落点以指针为中心',
+  );
 }
 
-// ---------------------------------------------------------------- 3.8g) 自配 OpenAI 通道的模型进画布可选清单
+// ---------------------------------------------------------------- 3.8f-2) 右键菜单建节点也以指针为中心
+
+/**
+ * 用户 2026-10-30：「添加节点的时候节点位置不会以鼠标为中心点，主画布和调色画布都有这个问题」。
+ *
+ * 画布上「添加节点」有两条 vendor 自己的入口：右键菜单直接建（`createNodeOperations.addNode`）、
+ * 从端口拖出选择类型（`handleSelectTypeFromMenu` 的 node-connector 分支）。两条都把
+ * **左上角**放在菜单坐标上，卡片整个往右下铺开，看起来就不在鼠标上。
+ *
+ * 这里按画布自己的尺寸规则（canvasNodeRules 的 nodeWidth / nodeHeight，Junction 圆点、文本、
+ * ComfyUI 工作流都对得上）反推左上角，让卡片中心落在指针上。
+ * 与 3.8f 里搜索面板建节点的那段是同一套语义。
+ *
+ * agent 的 create 不走这里（`canvasNodeState.createAgentNode` 直接调 createCanvasNode，
+ * 显式坐标原样保留），所以对话建节点的落位契约不受影响。
+ */
+const NODE_CENTER_PATCHES = [
+  {
+    from: `import { newNodeDimensions } from './nodeCreationDimensions';`,
+    to: `import { newNodeDimensions } from './nodeCreationDimensions';
+// dsh-aifisher-canvas 追加：建节点要以指针为中心，尺寸跟画布同一套规则
+import { nodeHeight, nodeWidth } from './canvasNodeRules';`,
+    why: '右键菜单 / 端口拖出建出来的节点也要以指针为中心',
+  },
+  {
+    from: `    const created = createCanvasNode(runtime, type, point, projectId);
+    setNodes((nodes) => {`,
+    to: `    const created = createCanvasNode(runtime, type, point, projectId);
+    // 用户 2026-10-30：「添加节点的时候节点位置不会以鼠标为中心点」
+    created.x -= nodeWidth(created) / 2;
+    created.y -= nodeHeight(created) / 2;
+    setNodes((nodes) => {`,
+    why: '右键菜单直接建节点：左上角贴着指针 → 改为中心落在指针上',
+  },
+  {
+    from: `      const created = createCanvasNode(runtime, type, point, projectId);
+      const ids = [`,
+    to: `      const created = createCanvasNode(runtime, type, point, projectId);
+      created.x -= nodeWidth(created) / 2;
+      created.y -= nodeHeight(created) / 2;
+      const ids = [`,
+    why: '端口拖出选择节点类型：同上，中心落在指针上',
+  },
+];
+
+{
+  const file = 'src/stable/nodes/canvasNodeOperations.ts';
+  const target = path.join(VENDOR, file);
+  if (!fs.existsSync(target)) {
+    throw new Error(`[vendor] 建节点落点补丁没对齐：${file} 不存在`);
+  }
+  let source = fs.readFileSync(target, 'utf8');
+  const problems = [];
+  for (const patch of NODE_CENTER_PATCHES) {
+    const hits = source.split(patch.from).length - 1;
+    if (hits !== 1) {
+      problems.push(`${patch.why} —— 锚点命中 ${hits} 次（预期 1 次）`);
+      continue;
+    }
+    source = source.split(patch.from).join(patch.to);
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `[vendor] 建节点落点补丁没对齐（上游可能改了写法，请核对）：\n  - ${problems.join('\n  - ')}`,
+    );
+  }
+  fs.writeFileSync(target, source);
+  console.log('[vendor] 建节点落点：右键菜单 / 端口拖出 2 处（卡片中心落在指针上）');
+}// ---------------------------------------------------------------- 3.8g) 自配 OpenAI 通道的模型进画布可选清单
 
 /**
  * v1.11「多通道 + 每通道多模型」（用户原话「OpenAI通道我希望可以配置好几个，并且可以选择多条单独模型」）。

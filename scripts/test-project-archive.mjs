@@ -535,7 +535,31 @@ check('从路径导入也在 host 上多出一个项目', await waitForProjectCo
 console.log('\n=== B7. 项目看板头部的「导入项目」 ===');
 const backButton = await waitFor(() => $('[data-fisherai-back-to-library]'), 12000);
 check('回到项目库的按钮在（准备切看板）', Boolean(backButton));
+/**
+ * v1.84：顶栏这个按钮改成打开**页面层项目库**（用户 2026-10-30 要的「项目管理页」），
+ * 不再直接 `onBack()` 退出画布。vendor 那个看板仍然存在，只是入口换成品牌下拉里的
+ * 「退出项目」。所以这一段先验新行为，再用下拉进看板。
+ */
 click(backButton);
+const projectsPage = await waitFor(() => $('[data-fisherai-page="projects"]'), 12000);
+check('顶栏「项目库」打开页面层项目库（v1.84）', Boolean(projectsPage));
+window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+await settle(200);
+check('Esc 关掉项目库页面', !$('[data-fisherai-page="projects"]'));
+{
+  const trigger = $('[aria-label="项目菜单"]');
+  trigger?.dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, button: 0 }));
+  trigger?.click();
+  const menu = await waitFor(() => $('[data-slot="dropdown-menu-content"]'), 8000);
+  const exitItem = menu
+    ? [...menu.querySelectorAll('[role="menuitem"]')].find((node) =>
+        String(node.textContent ?? '').includes('退出项目'),
+      )
+    : null;
+  check('项目菜单里有「退出项目」（进 vendor 看板的入口）', Boolean(exitItem));
+  exitItem?.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+  exitItem?.dispatchEvent(new window.MouseEvent('pointerup', { bubbles: true, cancelable: true }));
+}
 const importButton = await waitFor(() => $('[data-fisherai-project-import="true"]'), 15000);
 check('看板头部有「导入项目」按钮', Boolean(importButton),
   `dashboards=${$$('div.min-h-screen').length} settings=${$$('[data-fisherai-dashboard-settings]').length}`);

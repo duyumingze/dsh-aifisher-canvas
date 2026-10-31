@@ -490,33 +490,27 @@ function pointerEvent(type, offsetX, offsetY, options = {}) {
 
 /**
  * v1.27 用户要求的第二件事：「在设置里做一个开关」。
- * 这里真开设置对话框 → 切「画布外观」→ 找我们那块「画布互动」面板 → 点开关，
- * 验四件事：vendor 设置页里真的挂上了、点一下网格层立刻跟着关、关掉后指针完全不再画、
- * 再点一下恢复（并且关掉设置对话框后面板不残留）。
+ * v1.85 起开关在页面层设置页的「外观与主题」里（旧版 vendor 设置对话框已移除）。
+ * 这里真开设置页 → 找「光标辉光」那颗按钮 → 点开关，
+ * 验四件事：开关读数变了、点一下网格层立刻跟着关、关掉后指针完全不再画、
+ * 再点一下恢复（并且关掉设置页后面板不残留）。
  */
 {
   window.dispatchEvent(new window.CustomEvent('fisherai:open-settings'));
-  const dialog = await waitFor(async () => doc.querySelector('[data-fisherai-settings="true"]'));
-  check('设置对话框打开了', !!dialog);
+  const settingsPage = await waitFor(async () => doc.querySelector('[data-fisherai-page="settings"]'));
+  check('设置页打开了（页面层，不是旧对话框）', !!settingsPage);
+  check('旧版设置对话框没有出现', doc.querySelector('[data-fisherai-settings="true"]') === null);
 
-  const appearanceTab = dialog?.querySelector('[data-fisherai-settings-section="appearance"]');
-  check('设置里还有「画布外观」分区', !!appearanceTab);
-  appearanceTab?.click();
-  const effectsPanel = await waitFor(async () => doc.querySelector('[data-fisherai-canvas-effects]'));
-  check('「画布外观」页里挂上了「画布互动」面板（vendor 补丁的宿主 div + 我们注册的全局）',
-    !!effectsPanel);
-  check('面板确实挂在 vendor 给的宿主 div 里',
-    effectsPanel?.parentElement?.getAttribute('data-fisherai-settings-page') === 'appearance',
-    effectsPanel?.parentElement?.getAttribute('data-fisherai-settings-page') ?? '(no parent attr)');
+  const appearanceSection = settingsPage?.querySelector('[data-fisherai-settings-section="appearance"]');
+  check('设置里还有「外观与主题」分区', !!appearanceSection);
 
-  const toggle = effectsPanel?.querySelector('[data-fisherai-canvas-effect="pointer-glow"]') ?? null;
-  check('开关是 role=switch 的可访问按钮（不只是个装饰方块）',
-    toggle?.getAttribute('role') === 'switch' && !!toggle?.getAttribute('aria-label'),
-    `${toggle?.getAttribute('role')} / ${toggle?.getAttribute('aria-label')}`);
-  check('默认开着：aria-checked=true 且面板状态 on',
-    toggle?.getAttribute('aria-checked') === 'true' &&
-      effectsPanel?.getAttribute('data-fisherai-canvas-effect-state') === 'on',
-    `${toggle?.getAttribute('aria-checked')} / ${effectsPanel?.getAttribute('data-fisherai-canvas-effect-state')}`);
+  const toggle = await waitFor(async () => doc.querySelector('[data-fisherai-settings-grid-glow]'));
+  check('「外观与主题」里有「光标辉光」开关（页面自己的按钮，不是旧对话框里的开关）',
+    !!toggle && toggle.getAttribute('aria-pressed') === 'true',
+    `${toggle?.getAttribute('data-fisherai-settings-grid-glow')} / aria-pressed=${toggle?.getAttribute('aria-pressed')}`);
+  check('开关有可读文案（光标辉光）',
+    /光标辉光/.test(String(toggle?.textContent ?? '')),
+    String(toggle?.textContent ?? '').slice(0, 40));
 
   const readStored = () => {
     try {
@@ -531,10 +525,9 @@ function pointerEvent(type, offsetX, offsetY, options = {}) {
   // ---- 关掉 ----
   toggle?.click();
   await settle(150);
-  check('点一下开关就关掉（aria-checked=false）',
-    toggle?.getAttribute('aria-checked') === 'false');
-  check('面板状态文案跟着变（off）',
-    effectsPanel?.getAttribute('data-fisherai-canvas-effect-state') === 'off');
+  check('点一下开关就关掉（读数 off / aria-pressed=false）',
+    toggle?.getAttribute('data-fisherai-settings-grid-glow') === 'off' &&
+      toggle?.getAttribute('aria-pressed') === 'false');
   check('关掉后写进本机 localStorage（pointerGlow=false）',
     readStored()?.pointerGlow === false, JSON.stringify(readStored()));
   check('网格层立刻收到（data-canvas-grid-interactive=off）',
@@ -561,7 +554,9 @@ function pointerEvent(type, offsetX, offsetY, options = {}) {
   canvasBackground.dispatchEvent(pointerEvent('pointermove', 200, 120));
   await settle(150);
   const onProbe = canvasApp.canvasGridReport();
-  check('再点一下恢复（aria-checked=true）', toggle?.getAttribute('aria-checked') === 'true');
+  check('再点一下恢复（读数 on / aria-pressed=true）',
+    toggle?.getAttribute('data-fisherai-settings-grid-glow') === 'on' &&
+      toggle?.getAttribute('aria-pressed') === 'true');
   check('恢复后指针互动又活了',
     onProbe?.variables?.maskX === '200px' && onProbe?.highlightOpacity === '1' &&
       onProbe?.pointer?.listening === true,
@@ -569,13 +564,14 @@ function pointerEvent(type, offsetX, offsetY, options = {}) {
   check('恢复后诊断读数说 interactive=on',
     onProbe?.interactive === 'on', String(onProbe?.interactive));
 
-  // ---- 面板的退订：关掉设置对话框不能把监听留在后台 ----
-  const closeButton = dialog?.querySelector('[aria-label="关闭设置"]');
-  check('设置对话框有关闭按钮', !!closeButton);
+  // ---- 关掉设置页：那一页的宿主面板不能留在后台 ----
+  const closeButton = settingsPage?.querySelector('[data-fisherai-page-close]');
+  check('设置页有关闭按钮（✕）', !!closeButton);
   closeButton?.click();
   await settle(350);
-  check('关掉设置对话框后「画布互动」面板跟着卸载（不残留 DOM）',
-    doc.querySelector('[data-fisherai-canvas-effects]') === null);
+  check('关掉设置页后页面与宿主面板一起卸载（不残留 DOM）',
+    doc.querySelector('[data-fisherai-page="settings"]') === null &&
+      doc.querySelector('[data-fisherai-cloud-channels]') === null);
 }
 
 // ---------------------------------------------------------------- 4) 诊断与卸载

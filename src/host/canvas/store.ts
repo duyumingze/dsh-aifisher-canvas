@@ -247,6 +247,25 @@ export function createCanvasStore(options: CanvasStoreOptions = {}) {
       return summary(doc);
     },
 
+    /**
+     * 只改几个标量字段（v1.84，项目库用）。
+     *
+     * 项目库要改的「归档状态 / 收藏 / 备注」都不属于画布内容，走 saveDocument 会要一份
+     * 完整文档（客户端手里没有）并且顺手把 revision 推一格 —— 那会让正在打开的画布
+     * 下一个 saved 撞 409。这里只合并字段、不碰 revision 与主体。
+     */
+    async patchDocument(
+      id: string,
+      patch: Record<string, unknown>,
+    ): Promise<CanvasProjectSummary | null> {
+      const doc = data.documents[id];
+      if (!doc) return null;
+      Object.assign(doc, patch);
+      doc.updatedAt = nowIso();
+      await persist();
+      return summary(doc);
+    },
+
     async deleteDocument(id: string): Promise<boolean> {
       if (!data.documents[id]) return false;
       delete data.documents[id];

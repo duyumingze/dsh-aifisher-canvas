@@ -742,17 +742,37 @@ if (button) {
   );
 
   // Shift+A 添加节点：参数控件在卡片里，节点跟着鼠标走、左键放下（和主画布一致）
+  // 用户 2026-10-30：「添加节点的时候节点位置不会以鼠标为中心点」——
+  // 菜单要贴着指针弹、卡片中心要落在指针上（以前固定在 stage 正中）。
   const known = new Set(report().nodes.map((node) => node.id));
+  const addPointer = { x: 500, y: 360 };
+  send('pointermove', stageElement, { clientX: addPointer.x, clientY: addPointer.y });
+  const viewBeforeAdd = report().view;
   doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'a', shiftKey: true, bubbles: true }));
   await settle(40);
   const menuItems = [...doc.querySelectorAll('.cg-menu-item')];
+  const menuBox = doc.querySelector('.cg-menu');
   check('Shift+A 打开节点菜单', menuItems.length > 0, `items=${menuItems.length}`);
+  check(
+    'Shift+A 菜单贴着指针弹出',
+    !!menuBox && Math.abs(parseInt(menuBox.style.left, 10) - (addPointer.x + 14)) <= 1,
+    `left=${menuBox?.style.left} top=${menuBox?.style.top}（指针 ${addPointer.x},${addPointer.y}）`,
+  );
   const contrastItem = menuItems.find((item) => item.textContent === '亮度/对比度');
   check('菜单里有「亮度/对比度」', !!contrastItem);
   contrastItem?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   await settle(40);
   const added = report().nodes.find((node) => !known.has(node.id));
   check('新节点进入跟随状态（placing）', !!added && report().placing === added.id, `placing=${report().placing}`);
+  {
+    // 亮度/对比度卡片宽 224（NODE_WIDTH），中心 = 左上角 + 112
+    const expectedCenterX = (addPointer.x - viewBeforeAdd.x) / viewBeforeAdd.scale;
+    check(
+      '新节点以指针为中心（卡片中心 = 指针的世界坐标）',
+      Math.abs((added?.x ?? 0) + 112 - expectedCenterX) <= 6,
+      JSON.stringify({ nodeX: added?.x, expectedCenterX, view: viewBeforeAdd }),
+    );
+  }
   check(
     '新节点的参数控件在卡片体内',
     (doc.querySelectorAll(`[data-node-id="${added?.id}"] .cg-param`).length ?? 0) === 2,
@@ -800,12 +820,20 @@ if (button) {
     `selection=${JSON.stringify(report().selection)}`,
   );
 
+  // 用户 2026-10-30：「画布里的调色面板左键单点就断开连线了」→ 改成双击断开。
   const hitPath = overlay?.querySelector('.cg-edge-hit');
   const wiresBeforeClick = report().edgeCount;
   hitPath?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   await settle(50);
   check(
-    '点连线断开一条',
+    '左键单击连线不再断开（误触不再丢线）',
+    report().edgeCount === wiresBeforeClick,
+    `edges=${report().edgeCount} (before=${wiresBeforeClick})`,
+  );
+  hitPath?.dispatchEvent(new window.MouseEvent('dblclick', { bubbles: true }));
+  await settle(50);
+  check(
+    '双击连线断开一条',
     report().edgeCount === wiresBeforeClick - 1,
     `edges=${report().edgeCount} (before=${wiresBeforeClick})`,
   );
@@ -1343,14 +1371,76 @@ if (button) {
   await settle(150);
   check('Ctrl+Z 把删掉的节点找回来', report().nodeCount === countBeforeDelete, `nodes=${report().nodeCount}`);
 
-  // ---- ④ 点线断开 → 撤销
+  // ---- ④ 双击线断开 → 撤销（用户 2026-10-30：单击不再断开）
   const edgesBefore = report().edgeCount;
   doc.querySelector('.cg-edge-hit')?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
   await settle(80);
-  check('点连线断开一条', report().edgeCount === edgesBefore - 1, `edges=${report().edgeCount}`);
+  check('单击连线不再断开', report().edgeCount === edgesBefore, `edges=${report().edgeCount}`);
+  doc.querySelector('.cg-edge-hit')?.dispatchEvent(new window.MouseEvent('dblclick', { bubbles: true }));
+  await settle(80);
+  check('双击连线断开一条', report().edgeCount === edgesBefore - 1, `edges=${report().edgeCount}`);
   press({ key: 'z', ctrlKey: true });
   await settle(150);
   check('Ctrl+Z 把断开的连线接回去', report().edgeCount === edgesBefore, `edges=${report().edgeCount}`);
+
+  // ---- ⑤ Ctrl+右键划过连线 = 断开（和主画布切刀同一套手势）
+  {
+    const cutTarget = doc.querySelector('.cg-edge')?.getAttribute('d') ?? '';
+    const numbers = cutTarget.match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
+    // 连线是 `M x0 y0 C x1 y1, x2 y2, x3 y3`：取 t=0.5 的那一点，划一道竖线穿过它
+    const onCurve =
+      numbers.length >= 8
+        ? {
+            x: (numbers[0] + 3 * numbers[2] + 3 * numbers[4] + numbers[6]) / 8,
+            y: (numbers[1] + 3 * numbers[3] + 3 * numbers[5] + numbers[7]) / 8,
+          }
+        : null;
+    if (!onCurve) check('找得到一条连线来划断', false, cutTarget.slice(0, 80));
+    else {
+      const edgesBeforeCut = report().edgeCount;
+      dispatch('pointerdown', stageElement, {
+        button: 2,
+        buttons: 2,
+        ctrlKey: true,
+        clientX: onCurve.x,
+        clientY: onCurve.y - 40,
+      });
+      dispatch('pointermove', window, {
+        buttons: 2,
+        ctrlKey: true,
+        clientX: onCurve.x,
+        clientY: onCurve.y,
+      });
+      dispatch('pointermove', window, {
+        buttons: 2,
+        ctrlKey: true,
+        clientX: onCurve.x,
+        clientY: onCurve.y + 40,
+      });
+      check(
+        'Ctrl+右键划过时进入断开模式（红色划线，不是合并）',
+        report().stroke === 'cut',
+        String(report().stroke),
+      );
+      dispatch('pointerup', window, {
+        button: 2,
+        buttons: 0,
+        ctrlKey: true,
+        clientX: onCurve.x,
+        clientY: onCurve.y + 40,
+      });
+      await settle(80);
+      check(
+        'Ctrl+右键划过连线后断开一条',
+        report().edgeCount === edgesBeforeCut - 1,
+        `edges=${report().edgeCount} (before=${edgesBeforeCut})`,
+      );
+      check('断开后划选状态已收起', report().stroke === null, String(report().stroke));
+      press({ key: 'z', ctrlKey: true });
+      await settle(150);
+      check('Ctrl+Z 把划断的连线接回去', report().edgeCount === edgesBeforeCut, `edges=${report().edgeCount}`);
+    }
+  }
 
   await discardClose();
   check('撤销这一轮结束后能正常关掉（放弃修改二次确认）', !doc.querySelector('.cg-root'));

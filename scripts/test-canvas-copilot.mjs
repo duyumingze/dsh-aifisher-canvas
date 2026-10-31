@@ -203,7 +203,27 @@ const projectId = 'copilot-proj';
     String(panel?.textContent ?? '').slice(0, 200),
   );
 
-  const dismiss = [...(panel?.querySelectorAll('button') ?? [])].find((button) =>
+  /**
+   * 2026-10-31 用户报障：「点击副驾后再次点击副驾不会关闭」。
+   * 胶囊是开关：开着时再点一次收起，再点一次又打开。
+   */
+  pill?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await settle(200);
+  check(
+    '再点一次胶囊收起副驾面板（胶囊是开关）',
+    window.document.querySelector('[data-fisherai-copilot="true"]') === null &&
+      Boolean(window.document.querySelector('[data-fisherai-copilot-pill="true"]')),
+    '',
+  );
+  pill?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await settle(200);
+  check(
+    '收起后再点胶囊又能打开面板',
+    Boolean(window.document.querySelector('[data-fisherai-copilot="true"]')),
+    '',
+  );
+
+  const dismiss = [...(window.document.querySelectorAll('[data-fisherai-copilot="true"] button'))].find((button) =>
     String(button.textContent).includes('不再提示'),
   );
   dismiss?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));

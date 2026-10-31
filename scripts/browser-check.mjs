@@ -1704,6 +1704,24 @@ const HOST_PAGE = `<!doctype html>
       const payload = {
         label: location.search || 'default',
         resourceEntry,
+        /**
+         * 画布首屏（v1.85）：打开画布不再停在 vendor 旧看板，而是直接进页面层项目库。
+         * 看板仍在底下（当「没有项目」的占位），但被 html.afg-page-open 规则藏起来。
+         */
+        home: (() => {
+          const page = document.querySelector('[data-fisherai-page="projects"]');
+          const dash = document.querySelector('[data-fisherai-project-dashboard="true"]');
+          return {
+            page: !!page,
+            title: String(page?.querySelector('.afg-crumb-title')?.textContent || ''),
+            hasClose: Boolean(page?.querySelector('[data-fisherai-page-close]')),
+            hasBack: Boolean(page?.querySelector('[data-fisherai-page-back]')),
+            dashboard: !!dash,
+            dashboardVisibility: dash ? getComputedStyle(dash).visibility : null,
+            cards: document.querySelectorAll('[data-fisherai-project-card]').length,
+            vendorSettingsDialog: Boolean(document.querySelector('[data-fisherai-settings="true"]')),
+          };
+        })(),
         sidebarRight: Math.round(sidebarRect.right),
         headerLeft: Math.round(document.querySelector('.af-canvas-header')?.getBoundingClientRect().left ?? -1),
         errors,
@@ -1758,6 +1776,8 @@ const HOST_PAGE = `<!doctype html>
         lastModel: lastModelSteps,
         /** v1.41：任务队列只在画布这一层（?qlayers=1 场景，见 buildQueueLayerScene） */
         queueLayers: queueLayerSteps,
+        /** v1.84：页面层项目库 / 设置（?xpages=projects|settings，见 buildPagesScene） */
+        pages: pagesSteps,
         /** v1.42：项目归档（?xarchive=1 场景，见 buildArchiveScene） */
         archive: archiveSteps,
         /** v1.49：切刀（?xknife=1 场景，见 buildKnifeScene） */
@@ -2607,6 +2627,11 @@ const HOST_PAGE = `<!doctype html>
           topDy: Math.round(createdBox.top - point.y),
           width: Math.round(createdBox.width),
         };
+        // 用户 2026-10-30：「添加节点的时候节点位置不会以鼠标为中心点」——真机比中心
+        searchSteps.nodeCenterDelta = {
+          dx: Math.round(createdBox.left + createdBox.width / 2 - point.x),
+          dy: Math.round(createdBox.top + createdBox.height / 2 - point.y),
+        };
         searchSteps.nodeCoversPointer =
           point.x >= createdBox.left - 20 &&
           point.x <= createdBox.right + 20 &&
@@ -2710,55 +2735,67 @@ const HOST_PAGE = `<!doctype html>
      */
     const dataDirScene = new URLSearchParams(location.search).get('ddir') === '1';
     const settingsProbe = { opened: false, sections: {} };
-    const readSection = (dialog, id) => {
-      const content = dialog.querySelector('[data-fisherai-settings-content="true"]');
-      const text = (content?.innerText ?? '').replace(/\\s+/g, ' ');
-      const alert = content?.querySelector('[role="alert"]');
+    /**
+     * 设置页（v1.85）：旧版 vendor 设置对话框已移除，fisherai:open-settings 被装配层
+     * 拦下来改开页面层设置页（[data-fisherai-page="settings"]）。所有分区**同时**渲染，
+     * 不再有 tab 切换 —— 左导航只是滚动锚点，所以读一段就拿那一节的 DOM。
+     */
+    const settingsRoot = () => document.querySelector('[data-fisherai-page="settings"]');
+    const readSection = (root, id) => {
+      const section = root?.querySelector('[data-fisherai-settings-section="' + id + '"]');
+      const text = (section?.innerText ?? '').replace(/\\s+/g, ' ');
+      const alert = section?.querySelector('[role="alert"]');
       // v1.13：旧的「自配云端端点（OpenAI 兼容）」单端点卡片已移除 —— 这一页不该再出现它。
       // 但「OpenAI 通道」面板的**说明文字**里会提到这张卡片的旧名字（那是故意的指路文案），
       // 所以不能拿整段文本 includes —— 要扣掉我们那块面板里的出现次数，剩下的才算「卡片还在」。
-      const panelEl = content?.querySelector('[data-fisherai-cloud-channels]');
+      const panelEl = section?.querySelector('[data-fisherai-cloud-channels]');
       const panelText = (panelEl?.innerText ?? '').replace(/\\s+/g, ' ');
       const occurrences = (haystack) => haystack.split('自配云端端点').length - 1;
       return {
-        hasContent: !!content,
+        hasContent: !!section,
         alertText: alert ? String(alert.textContent || '').slice(0, 160) : '',
         text: text.slice(0, 260),
         background: text.includes('背景'),
         comfyHeading: text.includes('ComfyUI'),
         gpuRow: text.includes('GPU'),
         legacyCard: occurrences(text) > occurrences(panelText),
-        legacySecretField: !!content?.querySelector('[data-fisherai-secret-field="AIFISHER_CLOUD_BASE_URL"]'),
+        legacySecretField: !!section?.querySelector('[data-fisherai-secret-field="AIFISHER_CLOUD_BASE_URL"]'),
         // v1.11：闭源服务页顶部那块「OpenAI 通道」多通道面板（我们自己挂的 DOM，不走 vendor 组件）
-        channelPanel: !!content?.querySelector('[data-fisherai-cloud-channels]'),
+        channelPanel: !!panelEl,
         channelHeading: text.includes('OpenAI 通道'),
-        downloadDir: content?.querySelector('[data-fisherai-download-directory]')?.textContent ?? '',
+        downloadDir: section?.querySelector('[data-fisherai-download-directory]')?.textContent ?? '',
         downloadSetting: text.includes('下载设置'),
-        // v1.27：画布外观页里的「画布互动」开关（我们自己挂的原生 DOM 面板）
-        effectsPanel: !!content?.querySelector('[data-fisherai-canvas-effects]'),
-        effectsSwitch: (() => {
-          const sw = content?.querySelector('[data-fisherai-canvas-effect="pointer-glow"]');
-          return sw
-            ? { role: sw.getAttribute('role'), ariaChecked: sw.getAttribute('aria-checked') }
-            : null;
-        })(),
+        // v1.27：「画布互动」开关（v1.85 起是设置页自己的格子按钮，不再是旧对话框里的开关）
+        gridGlow: section?.querySelector('[data-fisherai-settings-grid-glow]')?.getAttribute('data-fisherai-settings-grid-glow') ?? null,
+        profileName: section?.querySelector('[data-fisherai-settings-profile-name]')?.value ?? null,
+        hosts: Array.prototype.slice.call(section?.querySelectorAll('[data-fisherai-settings-host]') ?? []).map(function (node) {
+          return node.getAttribute('data-fisherai-settings-host');
+        }),
+        hostHeights: Array.prototype.slice.call(section?.querySelectorAll('[data-fisherai-settings-host]') ?? []).map(function (node) {
+          return Math.round(node.getBoundingClientRect().height);
+        }),
       };
     };
     const walkSettings = async () => {
-      if (!settingsScene) return;
+      if (!settingsScene && !effectsScene && !channelsScene && !dataDirScene) return;
       await wait(1500);
       window.dispatchEvent(new CustomEvent('fisherai:open-settings'));
-      await wait(900);
-      const dialog = document.querySelector('[data-fisherai-settings="true"]');
-      settingsProbe.opened = !!dialog;
-      if (!dialog) return;
+      await wait(1400);
+      const root = settingsRoot();
+      settingsProbe.opened = !!root;
+      settingsProbe.vendorDialog = !!document.querySelector('[data-fisherai-settings="true"]');
+      settingsProbe.advancedButton = !!document.querySelector('[data-fisherai-settings-advanced]');
+      if (!root) return;
+      const nav = (id) => {
+        const button = root.querySelector('[data-fisherai-settings-nav="' + id + '"]');
+        if (button) button.click();
+      };
       if (channelsScene) {
-        // 只切到「闭源服务」，等我们那块通道面板挂上，然后停在这一屏（页面最后一次状态 = 截图）
-        const tab = dialog.querySelector('[data-fisherai-settings-section="models"]');
-        if (tab) tab.click();
-        await until(() => dialog.querySelector('[data-fisherai-cloud-channels]'), 8000);
-        await wait(700);
-        const panelEl = dialog.querySelector('[data-fisherai-cloud-channels]');
+        // 只切到「服务与通道」，等我们那块通道面板挂上，然后停在这一屏（页面最后一次状态 = 截图）
+        nav('services');
+        await until(() => root.querySelector('[data-fisherai-cloud-channels]'), 12000);
+        await wait(900);
+        const panelEl = root.querySelector('[data-fisherai-cloud-channels]');
         if (panelEl) panelEl.scrollIntoView({ block: 'start' });
         await wait(500);
         const box = panelEl ? panelEl.getBoundingClientRect() : null;
@@ -2786,34 +2823,32 @@ const HOST_PAGE = `<!doctype html>
         return;
       }
       if (dataDirScene) {
-        // 只切到「存储」，等我们那块「项目数据目录」面板挂上，然后停在那一屏（截图 = 交付图）
-        const tab = dialog.querySelector('[data-fisherai-settings-section="storage"]');
-        if (tab) tab.click();
-        await until(() => dialog.querySelector('[data-fisherai-data-dir="panel"]'), 10000);
+        // 只切到「项目与数据」，等我们那块「项目数据目录」面板挂上，然后停在这一屏（截图 = 交付图）
+        nav('data');
+        await until(() => root.querySelector('[data-fisherai-data-dir="panel"]'), 12000);
         await wait(900);
-        const panelEl = dialog.querySelector('[data-fisherai-data-dir="panel"]');
+        const panelEl = root.querySelector('[data-fisherai-data-dir="panel"]');
         if (panelEl) panelEl.scrollIntoView({ block: 'center' });
         await wait(500);
         const box = panelEl ? panelEl.getBoundingClientRect() : null;
         settingsProbe.dataDirShot = {
           panel: !!panelEl,
           current: String(
-            dialog.querySelector('[data-fisherai-data-dir-current]')?.textContent || '',
+            root.querySelector('[data-fisherai-data-dir-current]')?.textContent || '',
           ),
           defaultDir: String(
-            dialog.querySelector('[data-fisherai-data-dir-default]')?.textContent || '',
+            root.querySelector('[data-fisherai-data-dir-default]')?.textContent || '',
           ),
           status: String(
-            dialog.querySelector('[data-fisherai-data-dir-status]')?.textContent || '',
+            root.querySelector('[data-fisherai-data-dir-status]')?.textContent || '',
           ),
           overridden: panelEl ? panelEl.getAttribute('data-fisherai-data-dir-overridden') : null,
           restart: panelEl ? panelEl.getAttribute('data-fisherai-data-dir-restart') : null,
-          input: String(dialog.querySelector('[data-fisherai-data-dir-input]')?.value || ''),
-          applyLabel: dialog
-            .querySelector('[data-fisherai-data-dir-apply]')
-            ? String(dialog.querySelector('[data-fisherai-data-dir-apply]').textContent || '')
+          input: String(root.querySelector('[data-fisherai-data-dir-input]')?.value || ''),
+          applyLabel: root.querySelector('[data-fisherai-data-dir-apply]')
+            ? String(root.querySelector('[data-fisherai-data-dir-apply]').textContent || '')
             : null,
-          resetDisabled: dialog.querySelector('[data-fisherai-data-dir-reset]')?.disabled ?? null,
+          resetDisabled: root.querySelector('[data-fisherai-data-dir-reset]')?.disabled ?? null,
           width: box ? Math.round(box.width) : 0,
           height: box ? Math.round(box.height) : 0,
           text: panelEl ? String(panelEl.innerText || '').replace(/\\s+/g, ' ').slice(0, 240) : '',
@@ -2821,171 +2856,169 @@ const HOST_PAGE = `<!doctype html>
         return;
       }
       if (effectsScene) {
-        // 只切到「画布外观」，等我们那块面板挂上，然后停在这一屏（页面最后一次状态 = 截图）
-        const tab = dialog.querySelector('[data-fisherai-settings-section="appearance"]');
-        if (tab) tab.click();
-        await until(() => dialog.querySelector('[data-fisherai-canvas-effect="pointer-glow"]'), 8000);
+        // 只停在「外观与主题」，量「画布网格 · 光标辉光」那颗开关（截图 = 交付图）
+        nav('appearance');
+        await until(() => root.querySelector('[data-fisherai-settings-grid-glow]'), 8000);
         await wait(600);
-        const panelEl = dialog.querySelector('[data-fisherai-canvas-effects]');
-        const sw = dialog.querySelector('[data-fisherai-canvas-effect="pointer-glow"]');
-        // 那块面板排在 vendor 的「界面主题 / 画布背景」之后，要滚到可见处截图里才看得见
-        if (panelEl) panelEl.scrollIntoView({ block: 'center' });
-        await wait(500);
-        const box = panelEl ? panelEl.getBoundingClientRect() : null;
+        const glow = root.querySelector('[data-fisherai-settings-grid-glow]');
+        const box = glow ? glow.getBoundingClientRect() : null;
         settingsProbe.effectsShot = {
-          panel: !!panelEl,
-          switchLabel: sw ? sw.getAttribute('aria-label') : null,
-          role: sw ? sw.getAttribute('role') : null,
-          ariaChecked: sw ? sw.getAttribute('aria-checked') : null,
-          state: panelEl ? panelEl.getAttribute('data-fisherai-canvas-effect-state') : null,
+          panel: !!glow,
+          switchLabel: glow ? glow.getAttribute('aria-label') : null,
+          role: glow ? glow.getAttribute('role') : null,
+          ariaChecked: glow ? glow.getAttribute('aria-pressed') : null,
+          state: glow ? glow.getAttribute('data-fisherai-settings-grid-glow') : null,
           width: box ? Math.round(box.width) : 0,
           height: box ? Math.round(box.height) : 0,
-          text: panelEl ? String(panelEl.innerText || '').replace(/\\s+/g, ' ').slice(0, 160) : '',
+          text: glow && glow.parentElement
+            ? String(glow.parentElement.textContent || '').replace(/\\s+/g, ' ').slice(0, 160)
+            : '',
         };
         return;
       }
-      for (const id of ['appearance', 'local-service', 'models', 'storage']) {
-        const tab = dialog.querySelector('[data-fisherai-settings-section="' + id + '"]');
-        if (!tab) {
-          settingsProbe.sections[id] = { missingTab: true };
-          continue;
+      /**
+       * 设置页的五块（v1.85）：外观与主题 / 生成 / 服务与通道 / 项目与数据 / 高级与关于。
+       * 左导航只是滚动锚点（分区同时渲染），所以「切到某一节」= 点导航再等它该出来的东西。
+       */
+      const sweep = async (id, ready) => {
+        nav(id);
+        if (ready) await until(ready, 14000);
+        await wait(1400);
+        settingsProbe.sections[id] = readSection(root, id);
+      };
+      // 「开源服务」那块要等 host 探本机（nvidia-smi + ComfyUI /object_info，冷启动能到几秒），
+      // 固定等 1.8s 会在 ComfyUI 忙的时候闪成「检测中…」→ 轮询到真出现为止。
+      await sweep('appearance', () => !!root.querySelector('[data-fisherai-settings-grid-glow]'));
+
+      /**
+       * v1.27：「画布互动」开关。真机点一次，验三件事 —— 开关自己的读数变了、
+       * 画布网格层同步变 off（store → 网格层的订阅通路）、状态落进本机 localStorage。
+       * 验完再点回来（后面的截图与其它场景都要看到互动着的画布）。
+       */
+      {
+        const glow = root.querySelector('[data-fisherai-settings-grid-glow]');
+        const gridAttr = () =>
+          document
+            .querySelector('[data-canvas-grid="true"]')
+            ?.getAttribute('data-canvas-grid-interactive') ?? null;
+        const before = glow ? glow.getAttribute('data-fisherai-settings-grid-glow') : null;
+        if (glow) glow.click();
+        await wait(400);
+        const stored = (() => {
+          try {
+            return window.localStorage.getItem('dsh-aifisher-canvas.canvas-effects');
+          } catch (error) {
+            return String(error);
+          }
+        })();
+        settingsProbe.effects = {
+          before: before,
+          after: glow ? glow.getAttribute('data-fisherai-settings-grid-glow') : null,
+          grid: gridAttr(),
+          stored: stored,
+        };
+        if (glow) glow.click();
+        await wait(300);
+        settingsProbe.effects.restored = glow
+          ? glow.getAttribute('data-fisherai-settings-grid-glow')
+          : null;
+      }
+
+      await sweep(
+        'services',
+        () => readSection(root, 'services').comfyHeading === true,
+      );
+      {
+        // 「OpenAI 通道」面板（v1.11）：宿主 div 由设置页给，面板由装配层的全局挂上去。
+        // 顺手点一次「+ 添加通道」，验它真的能长出一张通道卡片（纯前端草稿，不发请求）。
+        const panel = root.querySelector('[data-fisherai-cloud-channels]');
+        const add = panel ? panel.querySelector('button') : null;
+        const before = root.querySelectorAll('[data-fisherai-cloud-channel]').length;
+        if (add) {
+          add.click();
+          await wait(500);
         }
-        tab.click();
-        // 「开源服务」那一页要等 host 探本机（nvidia-smi + ComfyUI /object_info，冷启动能到几秒），
-        // 固定等 1.8s 会在 ComfyUI 忙的时候闪成「检测中…」→ 改成轮询到真出现为止（最多 12s）
-        if (id === 'local-service') {
-          await until(() => readSection(dialog, id).comfyHeading === true, 12000);
-        }
-        await wait(1800);
-        settingsProbe.sections[id] = readSection(dialog, id);
+        settingsProbe.channels = {
+          panel: !!panel,
+          addLabel: add ? String(add.textContent || '').trim().slice(0, 20) : '',
+          before: before,
+          after: root.querySelectorAll('[data-fisherai-cloud-channel]').length,
+        };
         /**
-         * v1.27：「画布互动」开关。真机点一次，验三件事 —— 开关自己的 aria-checked 变了、
-         * 画布网格层同步变 off（store → 网格层的订阅通路）、状态落进本机 localStorage。
-         * 验完再点回来（后面的截图与其它场景都要看到互动着的画布）。
+         * 「请求方言」探针（v1.29）：参考图字段分歧（openai 用 image / 魔搭认 image_url）
+         * 配错时**不报错、只把参考图丢掉**，所以那个下拉与它下面那行「自动当前判成了什么」
+         * 必须真在页面上、真的按地址判出来 —— 这里读的就是那两处真 DOM。
+         * ⚠️ 这段在 HOST_PAGE 模板字符串里：注释里不能出现反引号（会提前结束模板）。
          */
-        if (id === 'appearance') {
-          const sw = dialog.querySelector('[data-fisherai-canvas-effect="pointer-glow"]');
-          const panelState = () =>
-            dialog
-              .querySelector('[data-fisherai-canvas-effects]')
-              ?.getAttribute('data-fisherai-canvas-effect-state') ?? null;
-          const gridAttr = () =>
-            document
-              .querySelector('[data-canvas-grid="true"]')
-              ?.getAttribute('data-canvas-grid-interactive') ?? null;
-          const before = sw ? sw.getAttribute('aria-checked') : null;
-          if (sw) sw.click();
-          await wait(400);
-          const stored = (() => {
-            try {
-              return window.localStorage.getItem('dsh-aifisher-canvas.canvas-effects');
-            } catch (error) {
-              return String(error);
-            }
-          })();
-          settingsProbe.effects = {
-            before: before,
-            after: sw ? sw.getAttribute('aria-checked') : null,
-            panelState: panelState(),
-            grid: gridAttr(),
-            stored: stored,
-          };
-          if (sw) sw.click();
-          await wait(300);
-          settingsProbe.effects.restored = sw ? sw.getAttribute('aria-checked') : null;
+        const dialectSelect = panel ? panel.querySelector('[data-fisherai-channel-dialect]') : null;
+        const presetButton = panel ? panel.querySelector('[data-fisherai-channel-preset]') : null;
+        const presetButtons = panel
+          ? Array.prototype.slice.call(panel.querySelectorAll('[data-fisherai-channel-preset]'))
+          : [];
+        settingsProbe.channelDialect = {
+          selectPresent: !!dialectSelect,
+          value: dialectSelect ? dialectSelect.value : '(missing)',
+          optionCount: dialectSelect ? dialectSelect.options.length : 0,
+          selectWidth: dialectSelect ? Math.round(dialectSelect.getBoundingClientRect().width) : 0,
+          hintText: dialectSelect && dialectSelect.parentElement
+            ? String(dialectSelect.parentElement.textContent || '').replace(/\\s+/g, ' ').slice(0, 160)
+            : '(missing)',
+          presetPresent: !!presetButton,
+          presetLabel: presetButton ? String(presetButton.textContent || '').trim() : '(missing)',
+          presetLabels: presetButtons.map(function (node) {
+            return String(node.textContent || '').trim();
+          }),
+        };
+        /**
+         * 模型行布局探针（v1.12）：预置那条通道有一张 2 条模型的卡，卡片上的「模型（2）」
+         * 默认是收起的，点开后才渲染行。这里量的是**真浏览器布局**：
+         * 模型名 span 的宽度、类型下拉的宽度、别名输入框的值。
+         */
+        const toggle = panel
+          ? panel.querySelector('[data-fisherai-channel-models-toggle]')
+          : null;
+        if (toggle) {
+          toggle.click();
+          await wait(700);
         }
-        // 「OpenAI 通道」面板（v1.11）：它由 vendor 设置页那一行补丁调我们的全局挂上去，
-        // 所以这里顺手点一次「+ 添加通道」，验它真的能长出一张通道卡片（纯前端草稿，不发请求）。
-        if (id === 'models') {
-          const panel = dialog.querySelector('[data-fisherai-cloud-channels]');
-          const add = panel ? panel.querySelector('button') : null;
-          const before = dialog.querySelectorAll('[data-fisherai-cloud-channel]').length;
-          if (add) {
-            add.click();
-            await wait(500);
-          }
-          settingsProbe.channels = {
-            panel: !!panel,
-            addLabel: add ? String(add.textContent || '').trim().slice(0, 20) : '',
-            before: before,
-            after: dialog.querySelectorAll('[data-fisherai-cloud-channel]').length,
-          };
-          /**
-           * 「请求方言」探针（v1.29）：参考图字段分歧（openai 用 image / 魔搭认 image_url）
-           * 配错时**不报错、只把参考图丢掉**，所以那个下拉与它下面那行「自动当前判成了什么」
-           * 必须真在页面上、真的按地址判出来 —— 这里读的就是那两处真 DOM。
-           * ⚠️ 这段在 HOST_PAGE 模板字符串里：注释里不能出现反引号（会提前结束模板）。
-           */
-          const dialectSelect = panel ? panel.querySelector('[data-fisherai-channel-dialect]') : null;
-          const presetButton = panel ? panel.querySelector('[data-fisherai-channel-preset]') : null;
-          const presetButtons = panel
-            ? Array.prototype.slice.call(panel.querySelectorAll('[data-fisherai-channel-preset]'))
-            : [];
-          settingsProbe.channelDialect = {
-            selectPresent: !!dialectSelect,
-            value: dialectSelect ? dialectSelect.value : '(missing)',
-            optionCount: dialectSelect ? dialectSelect.options.length : 0,
-            selectWidth: dialectSelect ? Math.round(dialectSelect.getBoundingClientRect().width) : 0,
-            hintText: dialectSelect && dialectSelect.parentElement
-              ? String(dialectSelect.parentElement.textContent || '').replace(/\\s+/g, ' ').slice(0, 160)
-              : '(missing)',
-            presetPresent: !!presetButton,
-            presetLabel: presetButton ? String(presetButton.textContent || '').trim() : '(missing)',
-            presetLabels: presetButtons.map(function (node) {
-              return String(node.textContent || '').trim();
-            }),
-          };
-          /**
-           * 模型行布局探针（v1.12）：预置那条通道有一张 2 条模型的卡，卡片上的「模型（2）」
-           * 默认是收起的，点开后才渲染行。这里量的是**真浏览器布局**：
-           * 模型名 span 的宽度、类型下拉的宽度、别名输入框的值。
-           */
-          const toggle = panel
-            ? panel.querySelector('[data-fisherai-channel-models-toggle]')
-            : null;
-          if (toggle) {
-            toggle.click();
-            await wait(700);
-          }
-          const rowsAll = dialog.querySelectorAll('[data-fisherai-channel-model-row]');
-          const rows = Array.prototype.slice.call(rowsAll);
-          const findRow = (mid) => rows.find((row) => row.getAttribute('data-fisherai-channel-model-row') === mid) || null;
-          const nameOf = (mid) => {
-            const row = findRow(mid);
-            return row ? row.querySelector('[data-fisherai-channel-model-id="' + mid + '"]') : null;
-          };
-          const kindOf = (mid) => {
-            const row = findRow(mid);
-            return row ? row.querySelector('[data-fisherai-channel-model-kind="' + mid + '"]') : null;
-          };
-          const aliasOf = (mid) => {
-            const row = findRow(mid);
-            return row ? row.querySelector('[data-fisherai-channel-model-label="' + mid + '"]') : null;
-          };
-          const widthOf = (node) => (node ? Math.round(node.getBoundingClientRect().width) : 0);
-          // ⚠️ 这两个常量由 **Node 侧插值**进来（HOST_PAGE 是模板字符串）：写成裸标识符会在
-          //    页面里报 CHANNEL_FIXTURE is not defined，于是页面脚本中断、探针一次都发不出去。
-          const ALIAS_ID = '${CHANNEL_FIXTURE.aliasModelId}';
-          const PLAIN_ID = '${CHANNEL_FIXTURE.plainModelId}';
-          settingsProbe.channelModels = {
-            rows: rows.length,
-            aliasName: nameOf(ALIAS_ID) ? String(nameOf(ALIAS_ID).textContent) : '(missing)',
-            aliasNameWidth: widthOf(nameOf(ALIAS_ID)),
-            plainName: nameOf(PLAIN_ID) ? String(nameOf(PLAIN_ID).textContent) : '(missing)',
-            plainNameWidth: widthOf(nameOf(PLAIN_ID)),
-            kindWidth: widthOf(kindOf(ALIAS_ID)),
-            aliasValue: aliasOf(ALIAS_ID) ? aliasOf(ALIAS_ID).value : '(missing)',
-            aliasEnabled: !!aliasOf(ALIAS_ID) && aliasOf(ALIAS_ID).disabled === false,
-            plainAliasValue: aliasOf(PLAIN_ID) ? aliasOf(PLAIN_ID).value : '(missing)',
-          };
-        }
+        const rowsAll = root.querySelectorAll('[data-fisherai-channel-model-row]');
+        const rows = Array.prototype.slice.call(rowsAll);
+        const findRow = (mid) => rows.find((row) => row.getAttribute('data-fisherai-channel-model-row') === mid) || null;
+        const nameOf = (mid) => {
+          const row = findRow(mid);
+          return row ? row.querySelector('[data-fisherai-channel-model-id="' + mid + '"]') : null;
+        };
+        const kindOf = (mid) => {
+          const row = findRow(mid);
+          return row ? row.querySelector('[data-fisherai-channel-model-kind="' + mid + '"]') : null;
+        };
+        const aliasOf = (mid) => {
+          const row = findRow(mid);
+          return row ? row.querySelector('[data-fisherai-channel-model-label="' + mid + '"]') : null;
+        };
+        const widthOf = (node) => (node ? Math.round(node.getBoundingClientRect().width) : 0);
+        // ⚠️ 这两个常量由 **Node 侧插值**进来（HOST_PAGE 是模板字符串）：写成裸标识符会在
+        //    页面里报 CHANNEL_FIXTURE is not defined，于是页面脚本中断、探针一次都发不出去。
+        const ALIAS_ID = '${CHANNEL_FIXTURE.aliasModelId}';
+        const PLAIN_ID = '${CHANNEL_FIXTURE.plainModelId}';
+        settingsProbe.channelModels = {
+          rows: rows.length,
+          aliasName: nameOf(ALIAS_ID) ? String(nameOf(ALIAS_ID).textContent) : '(missing)',
+          aliasNameWidth: widthOf(nameOf(ALIAS_ID)),
+          plainName: nameOf(PLAIN_ID) ? String(nameOf(PLAIN_ID).textContent) : '(missing)',
+          plainNameWidth: widthOf(nameOf(PLAIN_ID)),
+          kindWidth: widthOf(kindOf(ALIAS_ID)),
+          aliasValue: aliasOf(ALIAS_ID) ? aliasOf(ALIAS_ID).value : '(missing)',
+          aliasEnabled: !!aliasOf(ALIAS_ID) && aliasOf(ALIAS_ID).disabled === false,
+          plainAliasValue: aliasOf(PLAIN_ID) ? aliasOf(PLAIN_ID).value : '(missing)',
+        };
       }
-      // 截图留的是**最后停在哪一页**：这里再切回「闭源服务」，让截图正好是 v1.11 的通道面板
-      const modelsTab = dialog.querySelector('[data-fisherai-settings-section="models"]');
-      if (modelsTab) {
-        modelsTab.click();
-        await wait(1200);
-      }
+
+      await sweep('data', () => !!root.querySelector('[data-fisherai-data-dir="panel"]'));
+      await sweep('other', () => !!root.querySelector('[data-fisherai-settings-profile]'));
+      // 截图留的是**最后停在哪一节**：切回「服务与通道」，让截图正好是闭源服务/通道面板
+      nav('services');
+      await wait(1200);
     };
     await walkSettings();
 
@@ -4445,6 +4478,16 @@ const HOST_PAGE = `<!doctype html>
             box.top >= mountBox.top - 1 &&
             box.width > 120
           : null,
+        /**
+         * v1.83：整页扩图 —— 页面必须真的铺满画布容器（宽高都 ≥ 90%）。
+         * 旧的节点气泡再大也只有 520（放大到 880 会越出左边），这条是真机上的硬证据。
+         */
+        fillsMount: mountBox
+          ? box.width >= mountBox.width * 0.9 && box.height >= mountBox.height * 0.9
+          : null,
+        mount: mountBox
+          ? { width: Math.round(mountBox.width), height: Math.round(mountBox.height) }
+          : null,
         text: String(panel.textContent || '').slice(0, 160),
       };
     };
@@ -5149,8 +5192,22 @@ const HOST_PAGE = `<!doctype html>
         await wait(200);
         const cardNodes = [...root.querySelectorAll('.cg-node')];
         const added = cardNodes[cardNodes.length - 1];
+        // 用户 2026-10-30：「添加节点的时候节点位置不会以鼠标为中心点」——
+        // 这一场前面没有把指针挪进 stage，落点回落到 stage 正中：卡片中心应该就在那儿。
         // 卡片宽度用 offsetWidth（布局宽度）：getBoundingClientRect 会带上 fitView 的 world 缩放
         compositorSteps.nodeWidth = Math.round(added.offsetWidth);
+        {
+          const stageBoxForAdd = stage.getBoundingClientRect();
+          const addedBoxForAdd = added.getBoundingClientRect();
+          compositorSteps.addedCenterDelta = {
+            dx: Math.round(
+              addedBoxForAdd.left + addedBoxForAdd.width / 2 - (stageBoxForAdd.left + stageBoxForAdd.width / 2),
+            ),
+            dy: Math.round(
+              addedBoxForAdd.top + addedBoxForAdd.height / 2 - (stageBoxForAdd.top + stageBoxForAdd.height / 2),
+            ),
+          };
+        }
         compositorSteps.addedKind = added.dataset.nodeId || '';
         compositorSteps.paramsInNode = added.querySelectorAll('.cg-param').length;
         // v1.75：色彩平衡换成四轮调色（暗部/中灰/亮部/偏移），参数不再是 .cg-param 行
@@ -6038,6 +6095,110 @@ const HOST_PAGE = `<!doctype html>
     //    （现象：没收到页面探针）。所以这里先装探针，再启动那些要等 DOM 的场景流程。
     setInterval(leakReport, 250);
     setTimeout(leakReport, 1800);
+    /**
+     * 页面层（v1.84）：项目库 / 设置两屏的**真机**取证。
+     *
+     * ?xpages=projects 点顶栏「项目库」、?xpages=settings 点侧栏「设置」，
+     * 量的是 jsdom 量不到的三件事：
+     *   ① 页面真的铺满画布容器（兄弟图层 + portal 的几何，100% × 100%）；
+     *   ② 真实数据渲染出来了（项目卡片数 / 设置分区数 / 「设计稿」标签数）；
+     *   ③ 两屏都在画布容器**内部**（不越到 DSH 侧边栏）。
+     */
+    const pagesScene = new URLSearchParams(location.search).get('xpages');
+    const pagesSteps = { done: false, kind: pagesScene };
+    const buildPagesScene = async () => {
+      if (!pagesScene) return;
+      try {
+        await until(() => document.querySelector('.af-canvas-header'), 20000);
+        await wait(700);
+        const trigger = pagesScene === 'settings'
+          ? document.querySelector('[data-fisherai-open-settings-page]')
+          : document.querySelector('[data-fisherai-back-to-library]');
+        pagesSteps.trigger = Boolean(trigger);
+        if (trigger) trigger.click();
+        const selector = pagesScene === 'settings'
+          ? '[data-fisherai-page="settings"]'
+          : '[data-fisherai-page="projects"]';
+        const page = await until(() => document.querySelector(selector), 14000);
+        pagesSteps.mounted = Boolean(page);
+        if (!page) {
+          pagesSteps.done = true;
+          return;
+        }
+        // 等 /projects 那一发回来（卡片墙才有内容）
+        if (pagesScene !== 'settings') {
+          await until(() => document.querySelector('[data-fisherai-project-card]'), 12000);
+        }
+        if (pagesScene === 'projects-list') {
+          const listToggle = page.querySelector('button[aria-label="列表视图"]');
+          if (listToggle) listToggle.click();
+          await until(() => document.querySelector('[data-fisherai-project-row]'), 8000);
+          await wait(600);
+        }
+        await wait(900);
+        const box = page.getBoundingClientRect();
+        const mount = document.querySelector('.af-canvas-mount');
+        const mountBox = mount ? mount.getBoundingClientRect() : null;
+        pagesSteps.geometry = {
+          left: Math.round(box.left),
+          top: Math.round(box.top),
+          width: Math.round(box.width),
+          height: Math.round(box.height),
+          mountWidth: mountBox ? Math.round(mountBox.width) : 0,
+          mountHeight: mountBox ? Math.round(mountBox.height) : 0,
+          insideViewport:
+            box.left >= -1 && box.top >= -1 &&
+            box.right <= window.innerWidth + 1 && box.bottom <= window.innerHeight + 1,
+        };
+        pagesSteps.inMount = Boolean(mount && mount.contains(page));
+        pagesSteps.topbar = Boolean(page.querySelector('.afg-top'));
+        pagesSteps.title = String(page.querySelector('.afg-crumb-title')?.textContent || '');
+        pagesSteps.cards = page.querySelectorAll('[data-fisherai-project-card]').length;
+        pagesSteps.rows = page.querySelectorAll('[data-fisherai-project-row]').length;
+        pagesSteps.drawer = Boolean(page.querySelector('[data-fisherai-project-drawer]'));
+        pagesSteps.hero = Boolean(page.querySelector('[data-fisherai-projects-hero]'));
+        pagesSteps.facets = page.querySelectorAll('[data-fisherai-projects-facet]').length;
+        pagesSteps.sections = page.querySelectorAll('[data-fisherai-settings-section]').length;
+        pagesSteps.drafts = page.querySelectorAll('.afs-draft').length;
+        pagesSteps.scale = page
+          .querySelector('[data-fisherai-settings-scale]')
+          ?.getAttribute('data-fisherai-settings-scale') || '';
+        pagesSteps.themeCanvas = Boolean(page.querySelector('[data-fisherai-settings-theme-canvas]'));
+        pagesSteps.overflow = (() => {
+          const main = page.querySelector('.afp-main, .afs-main');
+          if (!main) return null;
+          return { scrollHeight: main.scrollHeight, clientHeight: main.clientHeight };
+        })();
+        // 诊断：画布容器的父链（页面只盖住容器矩形，容器比画布底矮时下缘会露出底纹）
+        pagesSteps.layout = (() => {
+          const chain = [];
+          let element = document.querySelector('.af-canvas-mount');
+          for (let depth = 0; element && depth < 4; depth += 1, element = element.parentElement) {
+            const rect = element.getBoundingClientRect();
+            chain.push({
+              tag: element.tagName,
+              cls: String(element.className || '').slice(0, 60),
+              left: Math.round(rect.left),
+              top: Math.round(rect.top),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            });
+          }
+          const grid = document.querySelector('[data-canvas-grid="true"]');
+          const rect = grid ? grid.getBoundingClientRect() : null;
+          return {
+            chain,
+            grid: rect
+              ? { left: Math.round(rect.left), top: Math.round(rect.top), width: Math.round(rect.width), height: Math.round(rect.height) }
+              : null,
+          };
+        })();
+      } catch (error) {
+        pagesSteps.error = String((error && error.stack) || error);
+      }
+      pagesSteps.done = true;
+    };
+    void buildPagesScene();
     void buildNodeSearchNode();
     void buildWorkflowNode();
     void runPortDragScene();
@@ -6383,9 +6544,25 @@ async function seedTaskQueueScenario(projectId) {
 const SCENES = [
   // 看板场景等到「看板真的渲染出来」才算就绪：v1.15 加的两条断言都是看板头部的事，
   // 拿页面刚加载时的空壳探针会看出一堆假象（设置按钮数 0）。
-  ['dashboard', `${ORIGIN}/`, 'default', (probe) => probe.resourceEntry?.dashboard === true],
+  ['dashboard', `${ORIGIN}/`, 'default', (probe) => probe.home?.page === true],
   ['canvas', `${ORIGIN}/?resume=${projectId}`, `?resume=${projectId}`,
     (probe) => probe.header?.present === true],
+  /**
+   * 界面缩放（v1.81）：`?uiScale=1.25` 把 chrome 整体放大到 125%，画布内容不动。
+   * 这一场只出图（交付图 / 人工比对），几何断言在 test-canvas-skin.mjs 里跑。
+   */
+  ['canvas-ui-scale', `${ORIGIN}/?resume=${projectId}&uiScale=1.25`, `?resume=${projectId}&uiScale=1.25`,
+    (probe) => probe.header?.present === true],
+  /**
+   * 页面层（v1.84）：项目库 / 设置两屏。用户 2026-10-30 拍板「项目库默认卡片墙、视图切换即列表」，
+   * 2026-10-31 拍板「侧栏设置直接开新设置页」。这一场出两张交付图，几何断言在下面按 label 分派。
+   */
+  ['projects-page', `${ORIGIN}/?resume=${projectId}&xpages=projects`, `?resume=${projectId}&xpages=projects`,
+    (probe) => probe.pages?.done === true, 24000],
+  ['projects-list', `${ORIGIN}/?resume=${projectId}&xpages=projects-list`, `?resume=${projectId}&xpages=projects-list`,
+    (probe) => probe.pages?.done === true, 24000],
+  ['settings-page', `${ORIGIN}/?resume=${projectId}&xpages=settings`, `?resume=${projectId}&xpages=settings`,
+    (probe) => probe.pages?.done === true, 24000],
   ['workflow-node', `${ORIGIN}/?resume=${projectId}&wf=1`, `?resume=${projectId}&wf=1`,
     (probe) => probe.workflowLayout?.rendered === true && probe.portDrag?.done === true, 24000],
   // 视觉取证：把鼠标提亮圆心钉在画布中央，截图里能直接看到「周围圆形变亮」
@@ -6568,10 +6745,11 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     console.log(`[browser] FAIL  ${label}: 画布运行时错误 ${JSON.stringify(probe.errors)}`);
   }
 
-  // v1.15：看板头部那两个站外入口（用户「移除这两个功能」）—— 真浏览器里再确认一遍，
-  // 顺带守住「移除没连坐同文件注入的设置按钮」。
+  // v1.15：看板头部那两个站外入口（用户「移除这两个功能」）—— 真浏览器里再确认一遍。
+  // v1.85：这一场同时是「打开画布 = 新项目库首屏」的取证（用户「现在打开画布它的项目管理是旧的」）。
   if (label === 'dashboard') {
     const entry = probe.resourceEntry ?? {};
+    const home = probe.home ?? {};
     const report = (name, good, extra = '') => {
       if (!good) browserFailures += 1;
       console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
@@ -6579,9 +6757,21 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     report('看板头部没有站外入口（AIFISHER API 与服务 / Work-Fisher 教程与案例）',
       entry.dashboard === true && entry.navs === 0 && entry.links === 0 && entry.stale === false,
       JSON.stringify(entry));
-    report('看板头部的「设置」按钮仍在', entry.settings >= 1, JSON.stringify(entry));
+    report('看板头部的「设置」按钮仍在（旧对话框的入口已由装配层改路由，按钮本身不删）',
+      entry.settings >= 1, JSON.stringify(entry));
     // v1.42：项目库头部必须有「导入项目」按钮（看板视图里画布面板没挂载，导入只能从这儿进）
     report('看板头部有「导入项目」按钮（v1.42）', entry.importButton >= 1, JSON.stringify(entry));
+    report('打开画布直接进「项目库」页面（不是旧看板）',
+      home.page === true && home.title === '项目库',
+      JSON.stringify({ page: home.page, title: home.title }));
+    report('底下 vendor 旧看板被藏起来（没有一帧露出旧界面）',
+      home.dashboard === true && home.dashboardVisibility === 'hidden',
+      JSON.stringify({ dashboard: home.dashboard, visibility: home.dashboardVisibility }));
+    report('首屏项目库不给关闭（没有 ✕ / 返回箭头，退出画布走 DSH 那个按钮）',
+      home.hasClose === false && home.hasBack === false,
+      JSON.stringify({ close: home.hasClose, back: home.hasBack }));
+    report('首屏项目库渲染出真实项目卡片（≥1）', Number(home.cards) >= 1, String(home.cards));
+    report('打开画布时没有旧版设置对话框', home.vendorSettingsDialog === false, String(home.vendorSettingsDialog));
   }
 
   // 本地工作流节点场景：真建出节点 + 量布局（jsdom 量不了这些）
@@ -7254,6 +7444,9 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     report('面板有「延展内容」输入框（可空）', panel.hasContentField === true, '');
     report('面板没有被节点 composer 浮层盖住（点按钮中心命中的是面板自己）',
       panel.createHit === true, String(panel.createHitLabel));
+    report('整页工作台铺满画布（宽 / 高都 ≥ 画布的 90%）',
+      panel.fillsMount === true,
+      `panel=${JSON.stringify(panel.rect)} mount=${JSON.stringify(panel.mount)}`);
     report('预览按目标比例铺好（320×240 + 16:9 → 427×240）',
       panel.previewSize === '427x240', String(panel.previewSize));
     report('面板显示这次要用的模型（不是空字符串）',
@@ -7342,6 +7535,9 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     report('截图停在打开的面板上（交付图：扩图入口 + 目标比例/原图位置/延展内容）',
       panel.insideMount === true && Number(panel.rect?.width) > 120,
       JSON.stringify(panel.rect ?? null));
+    report('整页工作台铺满画布（宽 / 高都 ≥ 画布的 90%）',
+      panel.fillsMount === true,
+      `panel=${JSON.stringify(panel.rect)} mount=${JSON.stringify(panel.mount)}`);
     report('面板上有「生成扩图画面」按钮、模型读数、9 格位置、预览',
       panel.createLabel === '生成扩图画面' &&
         String(panel.model || '').length > 0 &&
@@ -7469,8 +7665,12 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
       JSON.stringify(search.queryIds ?? null));
     report('点候选真建出了节点（vendor 桥只被调用一次）', search.bridgeCalls === 1,
       `bridgeCalls=${search.bridgeCalls} created=${JSON.stringify(search.createdNodeIds ?? null)}`);
-    report('新节点就落在鼠标那一点上（节点框覆盖光标，容差 20px）',
-      search.nodeCoversPointer === true, JSON.stringify(search.nodeAtPointerDelta ?? null));
+    report('新节点以鼠标为中心放下（卡片中心 ≈ 光标，且覆盖光标）',
+      search.nodeCoversPointer === true &&
+        !!search.nodeCenterDelta &&
+        Math.abs(Number(search.nodeCenterDelta.dx)) <= 24 &&
+        Math.abs(Number(search.nodeCenterDelta.dy)) <= 24,
+      JSON.stringify({ edges: search.nodeAtPointerDelta ?? null, center: search.nodeCenterDelta ?? null }));
     // v1.45：Blender 式「新建并移动」—— 确认后节点跟着鼠标，左键才放下
     report('确认后节点跟着鼠标走（屏幕位移 +60/+40）',
       search.follow?.dx === 60 && search.follow?.dy === 40,
@@ -7594,6 +7794,45 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
         done: String(scene.doneRow?.text ?? '').slice(0, 60),
       }));
     if (scene.error) console.log(`[browser] 场景异常：${String(scene.error).slice(0, 300)}`);
+  }
+
+  /**
+   * 页面层（v1.84）：项目库 / 设置两屏的**真机几何**。
+   *
+   * 只验 jsdom 量不出来的部分：铺满画布容器（宽高 ≥ 容器的 99%）、页面在画布容器内部、
+   * 顶栏/内容真的渲染出来、窄窗口下不横向溢出。像素观感由交付图人工比对。
+   */
+  if (label === 'projects-page' || label === 'projects-list' || label === 'settings-page') {
+    const scene = probe.pages ?? {};
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const geometry = scene.geometry ?? {};
+    report('点入口打开了页面', scene.trigger === true && scene.mounted === true, JSON.stringify({ trigger: scene.trigger, mounted: scene.mounted }));
+    report('页面铺满画布容器（宽高 ≥ 容器的 99%）',
+      Number(geometry.width) >= Number(geometry.mountWidth) * 0.99 &&
+        Number(geometry.height) >= Number(geometry.mountHeight) * 0.99,
+      `${geometry.width}×${geometry.height} vs ${geometry.mountWidth}×${geometry.mountHeight}`);
+    report('页面在视口内（不越出窗口）', geometry.insideViewport === true, JSON.stringify(geometry));
+    report('页面在画布容器的渲染树里（兄弟图层 portal）', scene.inMount === true, String(scene.inMount));
+    report('顶栏渲染出来了', scene.topbar === true && String(scene.title ?? '').length > 0, String(scene.title ?? ''));
+    if (label === 'projects-page') {
+      report('卡片墙渲染出真实项目（≥1 张卡）', Number(scene.cards) >= 1, String(scene.cards));
+      report('「继续编辑」hero 在', scene.hero === true, String(scene.hero));
+      report('左栏四个视图分组都在', Number(scene.facets) === 4, String(scene.facets));
+    } else if (label === 'projects-list') {
+      report('列表视图渲染出行（≥1）', Number(scene.rows) >= 1, String(scene.rows));
+      report('右侧详情栏在（设计稿 B）', scene.drawer === true, String(scene.drawer));
+      report('列表里不再出现卡片墙', Number(scene.cards) === 0, String(scene.cards));
+    } else {
+      report('五个设置分组都在（v1.85 加了「服务与通道」）', Number(scene.sections) === 5, String(scene.sections));
+      report('未接入项挂了「设计稿」标签（≥5 个）', Number(scene.drafts) >= 5, String(scene.drafts));
+      report('缩放读数是真值（100/125 之类）', /^\d{2,3}$/.test(String(scene.scale ?? '')), String(scene.scale ?? ''));
+      report('外观分组有 B 的实时预览画布', scene.themeCanvas === true, String(scene.themeCanvas));
+    }
+    if (scene.error) console.log(`[browser] 场景异常：${String(scene.error).slice(0, 300)}`);
+    if (scene.layout) console.log(`[browser] ${label}: layout ${JSON.stringify(scene.layout)}`);
   }
 
   /**
@@ -7721,10 +7960,10 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     report('工作台头部 / 底栏高度在正常范围（48 / 48，不是被压扁）',
       Number(scene.studio?.headerHeight) >= 40 && Number(scene.studio?.footerHeight) >= 40,
       `header=${scene.studio?.headerHeight} footer=${scene.studio?.footerHeight}`);
-    report('四个工具按钮都在画布范围内、尺寸正常（不是被挤成 0 宽）',
+    report('四个工具按钮都在画布范围内、尺寸正常（页面层设计稿：左侧竖条 40×40）',
       Array.isArray(scene.studio?.tools) && scene.studio.tools.length === 4 &&
         scene.studio.allToolsInside === true &&
-        scene.studio.tools.every((tool) => tool.width >= 60 && tool.height >= 24),
+        scene.studio.tools.every((tool) => tool.width >= 36 && tool.height >= 36),
       JSON.stringify(scene.studio?.tools ?? null));
     report('vendor 的旧图片编辑界面不再出现（没有 .af-image-studio）',
       scene.studio?.vendorStudioGone === true);
@@ -7964,6 +8203,11 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
       `params=${scene.paramsInNode} wheels=${scene.wheels} values=${scene.wheelValues} paramWidth=${scene.paramWidth} cardWidth=${scene.nodeWidth} scale=${scene.viewScale}`);
     report('四轮卡片宽度够横排四个色轮（≥700px）',
       Number(scene.nodeWidth) >= 700, String(scene.nodeWidth));
+    report('新卡片以指针为中心（指针没进过 stage → 中心落在 stage 正中）',
+      !!scene.addedCenterDelta &&
+        Math.abs(Number(scene.addedCenterDelta.dx)) <= 4 &&
+        Math.abs(Number(scene.addedCenterDelta.dy)) <= 6,
+      JSON.stringify(scene.addedCenterDelta));
     report('新节点跟着鼠标走（世界位移 = 鼠标位移 ÷ 视图缩放）',
       Array.isArray(scene.followWorldDelta) &&
         Math.abs(Number(scene.followWorldDelta[0]) - 70 / (Number(scene.viewScale) || 1)) <= 3 &&
@@ -8157,12 +8401,13 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
       console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
     };
     const shot = probe.settings?.effectsShot ?? { panel: false };
-    report('设置 → 画布外观里有「画布互动」面板，开关是开着的',
-      shot.panel === true && shot.role === 'switch' && shot.ariaChecked === 'true',
-      JSON.stringify({ panel: shot.panel, role: shot.role, ariaChecked: shot.ariaChecked }));
-    report('面板有实际尺寸（不是被挤成一条）、文案是「鼠标互动效果」',
-      Number(shot.width) > 300 && Number(shot.height) > 60 && /鼠标互动效果/.test(String(shot.text)),
+    report('设置 → 外观与主题里有「光标辉光」开关，默认是开的（v1.85：设置页自己的控件）',
+      shot.panel === true && shot.state === 'on',
+      JSON.stringify({ panel: shot.panel, state: shot.state, ariaPressed: shot.ariaChecked }));
+    report('开关有实际尺寸（不是被挤成一条）、文案是「光标辉光」',
+      Number(shot.width) > 40 && Number(shot.height) > 20 && /光标辉光/.test(String(shot.text)),
       `${shot.width}×${shot.height} ${String(shot.text).slice(0, 80)}`);
+    report('旧版设置对话框没有出现', probe.settings?.vendorDialog === false, String(probe.settings?.vendorDialog));
   }
 
   /**
@@ -8202,18 +8447,33 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
       if (!good) browserFailures += 1;
       console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
     };
-    report('侧边栏「设置」能打开对话框', settings.opened === true);
+    report('侧边栏「设置」能打开设置页（v1.85 起是页面层）', settings.opened === true);
+    report('旧版设置对话框没有被打开（v1.85 移除）', settings.vendorDialog === false, String(settings.vendorDialog));
+    report('设置页里不再有「高级设置 / 打开旧版设置」入口', settings.advancedButton === false, String(settings.advancedButton));
     const section = (id) => settings.sections?.[id] ?? {};
     report('画布外观分区渲染出背景设置', section('appearance').background === true, section('appearance').alertText || '');
-    report('开源服务分区显示 ComfyUI 状态（不再是报错页）',
-      section('local-service').comfyHeading === true && section('local-service').gpuRow === true,
-      section('local-service').alertText || section('local-service').text?.slice(0, 120));
+    report('开源服务（本机 ComfyUI）面板挂进了「服务与通道」分区',
+      section('services').comfyHeading === true && section('services').gpuRow === true,
+      section('services').alertText || section('services').text?.slice(0, 120));
     report('闭源服务分区不再有「自配云端端点」单端点卡片（v1.13 移除，只留方舟）',
-      section('models').legacyCard === false && section('models').legacySecretField === false,
-      section('models').alertText || section('models').text?.slice(0, 120));
+      section('services').legacyCard === false && section('services').legacySecretField === false,
+      section('services').alertText || section('services').text?.slice(0, 120));
     report('闭源服务分区挂上了「OpenAI 通道」多通道面板（v1.11）',
-      section('models').channelPanel === true && section('models').channelHeading === true,
-      JSON.stringify(settings.channels ?? {}) || section('models').text?.slice(0, 120));
+      section('services').channelPanel === true && section('services').channelHeading === true,
+      JSON.stringify(settings.channels ?? {}) || section('services').text?.slice(0, 120));
+    report('服务与通道分区里六块旧对话框面板都有宿主（开源/闭源/通道 + 目录在数据分区）',
+      Array.isArray(section('services').hosts) &&
+        section('services').hosts.includes('local-service') &&
+        section('services').hosts.includes('source') &&
+        section('services').hosts.includes('channels'),
+      JSON.stringify(section('services').hosts ?? null));
+    report('服务与通道的面板真的有高度（不是被挤成 0）',
+      Array.isArray(section('services').hostHeights) &&
+        section('services').hostHeights.filter(function (height) { return height > 100; }).length >= 2,
+      JSON.stringify(section('services').hostHeights ?? null));
+    report('个人资料（昵称 / 头像）在「高级与关于」分区，读了真值',
+      section('other').profileName !== null && section('other').profileName !== undefined,
+      String(section('other').profileName));
     report('点「+ 添加通道」能长出一张通道卡片',
       (settings.channels?.after ?? 0) > (settings.channels?.before ?? 0),
       JSON.stringify(settings.channels ?? {}));
@@ -8263,33 +8523,32 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
       modelRows.aliasValue === CHANNEL_FIXTURE.alias && modelRows.aliasEnabled === true && modelRows.plainAliasValue === '',
       JSON.stringify({ aliasValue: modelRows.aliasValue, aliasEnabled: modelRows.aliasEnabled, plainAliasValue: modelRows.plainAliasValue }));
     report('存储分区显示下载目录',
-      section('storage').downloadSetting === true && /downloads/.test(section('storage').downloadDir || ''),
-      section('storage').downloadDir || section('storage').alertText);
+      section('data').downloadSetting === true && /downloads/.test(section('data').downloadDir || ''),
+      section('data').downloadDir || section('data').alertText);
     /**
-     * v1.27：「在设置里做一个开关」—— 画布外观页里真有一块「画布互动」面板，
-     * 开关是 role=switch，点一下关掉（网格层同步 off、状态落 localStorage），再点恢复。
+     * v1.27：「在设置里做一个开关」—— 画布外观分区里「画布网格 · 光标辉光」那颗按钮，
+     * 点一下关掉（网格层同步 off、状态落 localStorage），再点恢复。
      */
     const effects = settings.effects ?? {};
-    report('画布外观分区挂上了「画布互动」面板与 role=switch 的开关（v1.27）',
-      section('appearance').effectsPanel === true &&
-        section('appearance').effectsSwitch?.role === 'switch',
-      JSON.stringify(section('appearance').effectsSwitch ?? null));
-    report('开关默认是开的（aria-checked=true）',
-      settings.effects?.before === 'true',
+    report('画布外观分区有「光标辉光」开关（v1.85 起是设置页自己的按钮，不再是旧对话框里的开关）',
+      section('appearance').gridGlow === 'on',
+      String(section('appearance').gridGlow));
+    report('开关默认是开的（on）',
+      settings.effects?.before === 'on',
       String(settings.effects?.before));
-    report('点开关能关掉：aria-checked 变 false、面板状态 off、画布网格层同步变 off',
-      effects.after === 'false' && effects.panelState === 'off' && effects.grid === 'off',
+    report('点开关能关掉：读数变 off、画布网格层同步变 off',
+      effects.after === 'off' && effects.grid === 'off',
       JSON.stringify(effects));
     report('关掉的状态写进本机 localStorage（pointerGlow:false）',
       String(effects.stored ?? '').includes('"pointerGlow":false'),
       String(effects.stored ?? '(null)'));
     report('再点一下恢复开（回来时开关是开着的）',
-      effects.restored === 'true',
+      effects.restored === 'on',
       String(effects.restored));
-    for (const id of ['appearance', 'local-service', 'models', 'storage']) {
+    for (const id of ['appearance', 'services', 'data', 'other']) {
       report(`分区 ${id} 没有错误提示`, !section(id).alertText, section(id).alertText || '');
     }
-    report('设置对话框仍在画布容器内交互（越界检查同上一段）', true);
+    report('设置页铺在画布容器里（与项目库同一层浮层）', true);
   }
 }
 console.log(`[browser] SUMMARY fail=${browserFailures}`);

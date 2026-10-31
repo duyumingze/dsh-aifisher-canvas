@@ -3,6 +3,232 @@
 > 只记**对外可见的行为变化**与踩过的坑，实现细节看 `git log`。
 > 版本从 v1.45 起才有完整记录；更早的按主题合并。
 
+## 未发布 · 文档：新版插件介绍（78 秒宣传片 + 截图 + 文档地图）— 2026-10-31
+
+README 重写成一份能直接当落地页用的介绍，代码零改动：
+
+- **宣传片**《同一块画布》78 秒（1920×1080、带音轨）进库：`docs/media/same-canvas-78s.mp4`
+  （`+faststart`），顶部海报可点播，另附 14 秒循环 GIF（第 02 场「它的手」）和五张分场静帧；
+  分场表把片子里出现的 `read / recipe / configure / connect / preview / progress`、
+  「6 项生成已准备 · 在画布内批准」、9 节点 / 6 镜头都对回真实行为。
+- **界面图换成 v1.81 之后的玻璃面板皮肤**（原来是 v1.70 旧皮肤的截图），并补上调色合成器、
+  生成中噪波点阵两张。
+- 新增「一分钟看懂：它和前一种 AI 画布差在哪」对照表、调色合成器 / 项目库与设置页两节、
+  **文档地图**（使用说明 / Agent 契约 / 页面层 / 存储迁移 / 开发约束 / 贡献 / 日志）。
+- v1.58–v1.86 的实现细节与版本日志收进 README 的折叠块（`<details>`），首屏只留产品介绍。
+- `package.json` 补齐 `description` / `keywords` / `repository` / `homepage` / `bugs` / `license`，
+  GitHub 仓库页与 npm 元数据不再是空的。
+- `pnpm check:contract` 21 项仍全绿（README 版本行保留 `**Version**: v1.86` 供机器对账）。
+
+## 未发布 · v1.86.0 打开画布后点一次就进项目（不再点两次）— 2026-10-31
+
+用户原话（2026-10-31）：「打开无限画布后要点击两次才能进入画布，第一次点击好像才正式
+激活项目管理器」。
+
+根因是**项目库关得太早**：点「打开画布」只派发 `fisherai:open-project`，vendor 还要走
+一次 `loadProject`（HTTP + reset）才把 view 从 dashboard 切成 canvas；这中间项目库先
+`closeCanvasPage()`，而首屏看门（`homePage.ts` 的 `ensureHome`）看到「底下还是旧看板 +
+页面层一屏都没开」就判定「用户回到了项目库」，立刻把项目库**重新挂一份** —— 列表重拉、
+视图归位、卡片墙闪一下，画布在它底下悄悄起来了。第二次点的时候 `#canvas-background`
+已经在，关掉就不会再弹回来，所以正好「两次」。
+
+- **项目库等画布底盘出现再关**（`CanvasProjectsPage` 的 `enterCanvasWhenReady`）：
+  轮询 `#canvas-background`（60ms 一步，最多 6s），出现了才 `closeCanvasPage()`；
+  等不到就留着项目库并提示「画布还没起来，稍等一下再点 / 刷新页面」——加载失败时
+  用户原地重试，而不是掉进旧看板。「新建项目」走同一条。
+- **首屏看门加时间窗**（`homePage.ts`）：监听 `fisherai:open-project`，5s 内绝不自动
+  开项目库（画布底盘一出现就清掉窗口）；窗口过期仍恢复兜底，导入 / 打开失败时
+  用户还能回到项目库。
+- **回归**：新增 `scripts/test-canvas-home.mjs` 12 项（一个进程只挂一次画布：页面层有
+  模块级 store，第二个 jsdom 环境里 vendor 树不会重挂）。断言：首屏是项目库且压住旧看板、
+  点一次就出现 `#canvas-background`、全程没有「项目库不在 && 画布没起」的帧、
+  项目库只挂一份、`/projects` 没有被重拉（重开才会拉）、`fisherai:open-project` 只派发一次、
+  最后页面关掉且画布标题是真项目名。给 `/workflows/<id>` 加 200ms 延迟 —— 不加延迟
+  这条竞态永远复现不出来。已用旧构建验证它确实会红（`/projects` 1→2 + 项目库没关）。
+- 真机取证：`scripts/verify-live-home-click.mjs`（CDP 真鼠标 + 20ms 采样，打正在跑的 DSH）——
+  第一下之后项目库实例 token 从 1 变 2（整块重挂）、`#canvas-background` 在底下出现、
+  项目库仍盖在上面；修后一次点击即进画布，且 `/projects` 没有被多拉一次。
+
+## 未发布 · v1.85.1 副驾胶囊可以再点一次收起 — 2026-10-31
+
+用户原话（2026-10-31）：「在画布里点击副驾后再次点击副驾不会关闭」。
+
+副驾胶囊（画布底部「副驾 N」）原来只有「打开」一个分支：面板开着时胶囊仍在面板下方，
+再点一次只是又 setOpen(true)，面板不动 —— 用户读成「按钮坏了」。现在胶囊是**开关**：
+开着时再点收起（胶囊留在原位，随时再开），关着时点开并补一次活画布读数。
+`aria-label` / `aria-expanded` 跟着开合状态走，读屏也知道当前是开还是关。
+
+回归 `test:canvas-copilot` 新增两项「再点一次胶囊收起」「收起后再点能打开」。
+
+## 未发布 · 打开画布 = 新项目库 + 旧版设置对话框整块移除 — 2026-10-31
+
+用户原话（2026-10-31）：「现在打开画布它的项目管理是旧的；移除设置里的旧版设置」。
+拍板两件事：①旧设置里还在用的三块面板**搬进新设置页**（不外抛）；②项目库是首屏时**不给关**
+（✕ 只在已打开项目时出现）。
+
+- **打开画布直接进 v1.84 的新项目库**：以前打开「无限画布」看到的是 vendor 那张 v1.80 看板
+  （显示全部 / 设置 / 导入项目 / 新建项目），新项目库要再点一次顶栏才出现。现在
+  `src/client/canvas/homePage.ts` 做首屏看门：vendor 一回到看板（打开画布、点「退出项目」）
+  而页面层没开任何一屏，就开项目库；看板留在底下当「没有项目」的占位，但被
+  `html.afg-page-open` 藏起来（防止页面量出 0×0 的首帧闪一下旧界面）。
+- **带 resume 的刷新仍然回上次的画布**：vendor 初始 view 永远是 dashboard，带
+  `fisherai.canvas.resume.v1` 时它先渲染一帧看板再 loadProject。首屏看门在 resume 存在时
+  先等：`#canvas-background` 出现（恢复成功）或 session 被清掉（恢复失败）才判断。
+  踩坑：首帧 DOM 里还没有看板，「看不到看板」曾被当成「没有 resume」，结果刷新后永远
+  停在项目库、回不到画布（browser-check 的 `canvas` 场景抓到的）。
+- **首屏项目库不给关**：没开项目时 `CanvasProjectsPage` 的 `dismissible=false` —— 顶栏不渲染
+  返回箭头 / ✕，Esc 也不生效（退出画布仍走 DSH 右下角那个按钮）。判断依据是
+  `#canvas-background` 在不在：有它 = 底下是一个真的开着的项目。
+- **旧版设置对话框从界面移除**（个人设置 / 画布外观 / 开源服务 / 闭源服务 / 存储 / 关于）：
+  - 设置页里「高级设置 / 打开旧版设置」两个入口、以及侧栏的
+    `registerVendorSettingsOpener()` 插座全部删除；
+  - vendor 唯一那条开设置的路 `fisherai:open-settings`（看板「设置」按钮 / `openSettings()`）
+    由装配层拦下（`stopImmediatePropagation`），改开页面层设置页并落在「服务与通道」；
+  - **面板一个没丢**，改成页内宿主 `data-fisherai-settings-host="<id>"`：
+    `local-service`（ComfyUI 服务整页）、`source`（闭源来源卡片）、`channels`（OpenAI / 魔搭 /
+    FisherAI 自定义通道）、`data-dir`（项目数据目录）、`downloads`（下载目录与「每次询问」）、
+    `update`（仅桌面版；DSH 里宿主为空自动隐藏）。
+- **设置页新增「服务与通道」分区**（第三个导航项）：开源服务（本机 ComfyUI：目录 / 启动 /
+  扩展 / 日志）+ 闭源服务（云端来源 + 自定义通道）。「项目与数据」里两行目录的「更改」
+  改成「更换」—— 滚到页内目录管理面板，不再是打开旧对话框。
+- **个人资料搬进「高级与关于」**：昵称 + 头像。昵称走 `__FISHERAI_LOCAL_USER__`
+  （存储键仍是 vendor 的 `fisherai-collab-user`），头像走 `__FISHERAI_LOCAL_PROFILE__`；
+  vendor 的 `useLocalUser` 是组件内 state，所以昵称**下次打开画布**才用在协作头像上，
+  页面提示里照实写。
+- **ComfyUI 工作流配置**仍是画布自己的浮层：设置页那颗「工作流配置」按钮以前打开旧对话框，
+  现在直接 `requestComfyWorkflowConfig()`。
+- **窄画布的 hero 修版**（真机踩到）：DSH 右侧会话栏展开时画布只剩 ~950px，hero 的
+  344 + 300 固定列把中间挤成几十像素、标题与「1 小时前」叠成一团。改用容器查询
+  （`.afp-main` 是容器）：≤1040px 变两列 + 最近生成排下面，≤620px 单列并藏起最近生成。
+- 回归：`test:pages` 67 → 76 项（新增「没有高级设置入口 / 六块宿主都在 / 个人资料在 /
+  目录行改成页内更换」）；`test:canvas-grid` 85、`test:data-dir` 66、`test:shadcn-ui` 163、
+  `test:project-archive` 103、`test:outpaint` 103、`test:render` 31、`test-panel-exit` 26、
+  `test:canvas-skin` 19 全绿；browser-check 的 `dashboard` 场景改成验「打开画布 = 项目库首屏」，
+  `settings / effects / channels / data-dir` 四场改打新设置页，全 0 fail。
+- 交付图：`docs/shots/canvas-dashboard.png`（打开画布的首屏）、`canvas-settings-page.png`、
+  `canvas-settings.png`（服务与通道）、`canvas-channels.png`、`canvas-effects.png`、
+  `canvas-data-dir.png`；说明见 [docs/page-layer.md](docs/page-layer.md)。
+
+## 未发布 · 页面层：项目库 + 设置（四屏里的最后两屏）— 2026-10-31
+
+用户原话（2026-10-30）：「无限画布ui设计要包含设置页、图像编辑页、扩图页的等。还有项目管理页」；
+2026-10-31 拍板两件事：**侧栏「设置」直接开新设置页**（页内留「高级设置」打开 vendor 老对话框），
+**设计稿里只有一项真实现的选项置灰 + 挂「设计稿」标签**（页面不撒谎）。
+
+- **项目库**（新页面）：左栏视图（全部 / 最近编辑 / 收藏 / 已归档 + 图片/视频/文本筛选 + 真实本地占用）、
+  hero「继续编辑」（封面 + 规模 + 最近生成 + 进行中任务数）、默认卡片墙，
+  视图切换即设计稿 B 的「5 列清单 + 右侧 352 详情」（节点 / 画布尺寸 / 图像·视频数 / 占用、最近生成、
+  用过的模型、项目备注）。卡片 hover 出「打开 / 收藏 / 导出 / 移到归档」。
+  打开项目走 v1.42 的 `openProjectById`（`fisherai:open-project`），**不刷新 DSH 页面**。
+- **host 新增 `/api/aifisher/canvas/projects*`**（`projectsRouter.ts`）：列表 / 详情 / 新建 /
+  归档 / 收藏 / 备注 / 复制（文档 + 素材一起）/ 删除（素材进回收站）。
+  每项都是真数据：节点类型计数、画布包围盒、素材字节、最新一张图当封面、sidecar 里的模型名、
+  生成日记里的进行中任务数。`store.patchDocument()` 只合并字段、**不推 revision**（避免正在
+  打开的画布下一次保存撞 409）。
+- **设置页**（新页面，替代「设置散在七个弹层里」）：左导航 + 四段表单。接上的都是真的 ——
+  界面缩放（6 档 + 快捷键）、光标辉光开关、画布背景图（上传/清除）、本地 ComfyUI 状态与地址、
+  「新建节点默认模型」（v1.40 的跟随上次机制 + 忘记）、项目数据目录、导出目录、自动保存。
+  未实现的（另两款皮肤 / 生成中 V1·V3 / 动效 G1·G3·关 / 并发生成数）置灰并标「设计稿」。
+  外观分组用设计稿 B 的「左选项 + 右侧实时预览」（缩略节点卡 / 连线 / 端口 / 缩放胶囊）。
+- **入口变了**：顶栏「← 项目库」不再退出画布（原来等于把面板收掉），改为打开页面层项目库；
+  侧栏「设置」打开设置页，vendor 设置对话框退到页内「高级设置」（ComfyUI 工作流 / 闭源服务 /
+  项目数据目录三块面板一个没丢）。vendor 看板仍在，入口换成品牌下拉 →「退出项目」。
+- 踩坑两条：① 页面「没打开时 return null」+ 直接调用带 hooks 的外壳函数 → React #310
+  （Rendered more hooks than during the previous render），整块画布被 error boundary 接住；
+  修法是把外壳包成稳定组件 `CanvasPageShellView`。② 缩放条 / 快捷键钮 / 界面缩放胶囊 / 小地图 /
+  任务队列 / 副驾与分镜胶囊按**视口**贴边，比画布容器矮一截的页面盖不住它们（从下缘戳出来）；
+  页面挂载时给 `<html>` 加 `afg-page-open` 把它们藏掉，关闭即撤。
+- 回归：新增 `test:pages` 67 项（host 数据面 26 + DOM 与交互 41）；browser-check 新增
+  `projects-page` / `settings-page` 两场（铺满画布 1182×804、在容器内、真实项目卡、四个分组、
+  「设计稿」标签数、实时预览画布）；`test:canvas-ui` 与 `test:project-archive` 里「点返回项目库
+  回看板」的两处断言按新行为改写（看板改由下拉「退出项目」进）。
+- 交付图：`docs/shots/canvas-projects-page.png`（卡片墙）、`docs/shots/canvas-projects-list.png`（列表 + 右侧详情）、`docs/shots/canvas-settings-page.png`（设置）；
+  说明见 [docs/page-layer.md](docs/page-layer.md)。
+
+## 未发布 · 整页扩图（扩图从节点气泡变成画布级工作台）— 2026-10-31
+
+用户原话（2026-10-31）：「给无限画布做真正的整页扩图」。
+
+- **扩图不再是节点下面那个 520 气泡**：它长在节点卡里、卡长在带 transform 的画布 viewport 里，
+  `fixed` 会被困住 —— v1.82 把气泡放大到 880 / 560 两次实测：880 越出画布左边（insideMount=false），
+  560 两栏被挤成一行字。这一版把工作台挂成**画布容器的兄弟图层**（与生成批次卡同一套做法），
+  portal 到 `.af-canvas-mount`、按画布真实矩形铺满：顶栏 54 + 大舞台 + 右侧 362 参数栏。
+  真机实测 1182×804，正好等于画布容器（100%），不再是「节点旁边的一块板」。
+- **舞台**：按目标比例铺整张画面，原图按九宫格落位（青色虚线描边），其余区域是斜纹「待补」区；
+  每侧按实际 pad 标「左 + 107 px」，底栏写「目标 427 × 240 · 16:9 · 扩图面积 25%」，一角写「原图 320 × 240 · 不动」。
+- **参数栏**：原图位置九宫格（选中格直接显示原图缩略）/ 目标比例 / 输出尺寸（保持原图像素密度，
+  只有超过 4096 才整体等比缩）/ 扩展提示词 + 三个快捷短语（点了往输入框补一句，不是假开关）/
+  模型读数（跟着你的通道走）。`Shift+Enter` 或右下主按钮生成；Esc / ✕ 关闭。
+- **红线一条没动**：主按钮仍只调 `__FISHERAI_CANVAS_OUTPAINT__.create()` —— 先落「扩图画面」，
+  再建一个**空**的图像生成节点，生成由用户点；整场 host 一条 `/generate-*` 都没收到（browser-check 实测 0 条）。
+- 工具条改成两条路：有整页桥就交给整页工作台（`__FISHERAI_CANVAS_OUTPAINT_PAGE__.open(node)`），
+  桥没挂上就回落原来的 520 气泡 —— 任何宿主里都不会「点了没反应」。
+- 踩到的坑：vendor 的通用焦点环是
+  `:where(button, a, input, select, textarea, [tabindex]):not([contenteditable="true"]):focus-visible`
+  （特异性 0,2,0 + `!important`），而且它的样式表在运行时**后注入** —— 覆盖 CSS 里同特异性的
+  `.afo-root:focus-visible { outline: none !important }` 会被它按文档顺序压掉，整页多出一圈亮蓝描边；
+  选择器要写到 `.afo-root.afo-root:focus-visible`（0,3,0）才盖得住。另外 `activateModal` 默认把焦点
+  给「第一个可聚焦元素」＝右上角 ✕，要显式传 `initialFocus` 指回页面本身。
+- 回归：`test:outpaint` 97 → 103 项（新增「整页工作台不在节点卡里 / 顶栏舞台参数栏三块齐全 /
+  四个待补区 / 每侧 +px 读数 / 输出尺寸 427 × 240 / 关闭扩图」）；browser-check `outpaint` 与
+  `outpaint-panel` 两场新增「铺满画布（宽高都 ≥ 90%）」真机断言，全过。
+- 交付图：`docs/shots/canvas-outpaint-page.png`（整页参数态）。
+
+## 未发布 · 无限画布换肤（方案 C 玻璃面板）+ 界面缩放 + 生成中噪波点阵 — 2026-10-30
+
+用户原话：「帮我重新设计无限画布的 ui，按照之前的调色面板的 ui 风格来。位置尽量不要变。先设计出来，我再决定替不替换；做一下 ui 界面放大缩小的功能。」
+设计稿在 `E:\AllAssets\项目\画布UI改版`（8 张 @2× 概念稿 + 4 张页面稿 + 动效 GIF）；看过后用户拍板：
+「按设计好的无限画布 ui 替换」。
+
+- **皮肤换成方案 C（玻璃面板 Fluent）**：令牌直接覆盖 vendor 的 `--af-*`（冷灰蓝底 `#0b0d11` / 玻璃层 /
+  青色 `#5eead4` 强调 / 紫色 `#8b7cf6` 辅助），画布、调色面板、设置从此是同一套观感。
+  顶栏改玻璃条 + 青→紫渐变细线；左工具条 48 宽胶囊、34 圆钮、`+` 换成青色渐变主按钮；
+  左下缩放条 44 高玻璃卡 + 青色滑杆；小地图 14 圆角玻璃 + 语义色块（图片紫 / 视频琥珀）；
+  任务队列玻璃面板（宽度**保持 306**：它按 306 给头部让位，改成 320 会压住保存状态）；
+  节点卡片 14 圆角 + 玻璃渐变 + 内高光，标题行改成「分类色小圆点 + 名称」（圆点由内容反推类型，
+  不去读图标 path）；端口 12px 青圆点（20px 命中区不变）；连线改青→紫 halo；选中态青色描边 + 柔光。
+  **vendor 树一个字没改**：全部靠 `src/client/canvas/skin.ts` 的覆盖 CSS 与结构选择器。
+- **界面缩放（新功能）**：右下角「界面 − 100% +」胶囊，档位 80/90/100/110/125/150%，
+  `Ctrl + = / − / 0`，`localStorage['af.uiScale']` 记住。只给 6 类 chrome 加 `zoom: var(--af-ui-scale)`，
+  **画布内容（节点/图片/连线）不动**，也不写进画布存档。实测 Chrome：`zoom` 下 `top:50%` 仍居中、
+  `width:100%` 的顶栏仍正好铺满，所以不用做补偿；整层 transform 那套会让绝对定位元素错位（设计稿 mock 踩过）。
+  工具条放大后会撞到左下小地图，所以它的 `top` 随缩放上移一点（`(scale-1)×108px`）。
+  胶囊放在 `right:24 / bottom:72` 而不是设计稿的 24/24：DSH 桌面面板的「退出画布」按钮就占着那个角（z 60）。
+- **生成中节点换成噪波放大的圆点阵**：黑底 + 20px 圆点，value noise（2 octave）决定每个圆的
+  `r = 0.9 + n×3.2` 与亮度，阈值 `smoothstep(0.52, 0.84)` 拉出 Blender 噪波纹理那种团块，
+  整片场随时间平移；没有呼吸、没有扫描、不是白噪波。圆点由 `src/client/canvas/genDots.ts`
+  往 `[data-fisherai-regeneration-overlay]` 里插一层 SVG（约 391 个 `<circle>`，30fps、只改 r/opacity），
+  React 重渲染冲掉这层时 MutationObserver 会补回来；遮罩中央是 56px 青色不定进度环 + 三段文案，
+  底部一条不定进度线，`prefers-reduced-motion` 下只画一帧。**没有真实进度就不假装 62%**。
+- 回归：新增 `scripts/test-canvas-skin.mjs`（19 项：档位/夹取/快捷键/持久化/输入框不抢键/点阵数量与噪波
+  分布/层被冲掉后自愈/卸载清理）；`browser-check` 新增 `canvas-ui-scale` 场景（`?uiScale=1.25` 出交付图）；
+  新增 `scripts/verify-live-skin.mjs`（17 项真机断言：在**正在跑的 DSH** 里开面板→进画布→量胶囊/退出按钮
+  是否重叠、顶栏是否铺满、125% 后画布 transform 是否不动、工具条是否压到小地图）。交付图
+  `docs/shots/canvas-skin-{100,125}.png`、`docs/shots/canvas-generating-orbit.png`。
+- 真机上补的一处：画布变窄或界面放大后，头部左侧的 ComfyUI 胶囊会和中央的同步 chip 叠字，
+  现在顶栏做容器查询，宽度 < 860px 时胶囊只留状态点 + 箭头（ComfyUI 状态仍可点开）。
+  已跑：`test-canvas-shadcn-ui` 162、`test-canvas-task-queue` 107、`test-canvas-render` 31、
+  `test-panel-exit` 26、`test-canvas-skin` 19，全绿；browser `canvas` / `canvas-ui-scale` 两场 0 fail；
+  `verify-live-skin` 17 项全过。
+
+## 未发布 · 调色面板手势：单击不再断线（双击 / Ctrl+右键划线断开）+ 建节点以指针为中心 — 2026-10-30
+
+用户原话：「画布里的调色面板左键单点就断开连线了，修改一下，可以双击断开或者ctrl+鼠标右键划线断开；添加节点的时候节点位置不会以鼠标为中心点，主画布和调色画布都有这个问题」
+
+- **单击断线太容易误伤**：调色面板里点空白 / 起手框选时手一抖压到线（`.cg-edge-hit` 命中区 16px），那条线就没了。
+  现在**左键单击什么都不做**，只认两条路：**双击连线**断开；**`Ctrl`（macOS `Meta`）+ 鼠标右键划过连线**断开
+  （和主画布切刀同一个手势：划过的线在浮层里变红，松手才真断，`Esc` 取消，`Shift`+右键仍是合线加转接点）。
+  断线仍是一步整步撤销，`Ctrl+Z` 接回来。
+- **添加节点不以指针为中心**：主画布（`Shift+A` 搜索建节点、右键菜单建节点、端口拖出选类型）与调色面板
+  （`Shift+A` / 顶栏「+ 添加节点」）以前都把卡片**左上角**放在落点上，卡片整体往右下铺开；调色面板的
+  `Shift+A` 更是固定把节点丢在 stage 正中。现在两边都按画布自己的尺寸规则（`nodeWidth` / `nodeHeight`，
+  Junction 圆点 / 文本 / ComfyUI 工作流都对得上）反推左上角，**卡片中心 = 指针**；调色面板的菜单也从
+  stage 正中改为**贴着指针弹出**。调色面板卡片高度要等渲染才量得到，所以先按估高落位、渲染完再用真实
+  `offsetHeight` 摆正。agent 的 `create` 走另一条路（显式坐标原样保留），落位契约不变。
+- 回归：`test:compositor` 新增 8 项（单击不断线 / 双击断开 / Ctrl+右键划选红色高亮与断开与撤销 /
+  Shift+A 菜单贴指针 / 新卡片中心=指针世界坐标）、`test:node-search` 落点断言改成「卡片中心 = 鼠标点」，
+  browser-check 两场各加一条真机断言（主画布新节点中心 ≈ 光标；调色面板新卡片中心 ≈ stage 中心）。
+
 ## 未发布 · 调色面板六条：顶栏可点 / 色轮变圆 / 混合三输入 / 搜索 / 自绘下拉 / 自动避让 — 2026-10-30
 
 用户原话：「上方的按钮点不动；做一个当节点拖入线段接入后会自动调整节点位置，现在我加入一个较长的节点时节点会被遮住；还有我的色轮怎么变方了，调回来；shift+a可以模糊输入查找节点；还有下拉选项的ui还没有做好，现在是纯白的，比如混合节点；还有混合节点应该有三个输入通道，a b 和系数」

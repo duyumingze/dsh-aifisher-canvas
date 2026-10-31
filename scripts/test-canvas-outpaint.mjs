@@ -422,6 +422,31 @@ let compositeId = '';
       Math.abs(leftPercent - 12.41) < 0.5 && Math.abs(widthPercent - 74.94) < 0.5,
       `left=${leftPercent} width=${widthPercent}`);
   }
+  /**
+   * v1.83「真正的整页扩图」：面板不再长在节点卡里（节点气泡放到 880/560 都会越出画布），
+   * 而是挂成画布容器的兄弟图层 —— 顶栏 + 大舞台 + 右侧 362 参数栏三块齐全。
+   * jsdom 没有布局引擎，这里验的是「结构上真的离开了节点、三块都在」，像素尺寸由
+   * browser-check 的 outpaint / outpaint-panel 两场真机量。
+   */
+  check('整页工作台不在节点卡里（不是节点气泡）',
+    Boolean(panel) && Boolean(imageNode()) && !imageNode().contains(panel));
+  check('整页工作台的三块都在：顶栏 / 舞台 / 参数栏',
+    Boolean(panel?.querySelector('.afw-top')) &&
+      Boolean(panel?.querySelector('.afo-stage')) &&
+      Boolean(panel?.querySelector('.afo-insp')),
+    `${Boolean(panel?.querySelector('.afw-top'))}/${Boolean(panel?.querySelector('.afo-stage'))}/${Boolean(panel?.querySelector('.afo-insp'))}`);
+  check('舞台把四个待补区域都标出来了（斜纹 + 虚线）',
+    panel?.querySelectorAll('.afo-zone').length === 4,
+    String(panel?.querySelectorAll('.afo-zone').length));
+  check('每侧延展多少像素写在画面上了（+ 53 px）',
+    String([...(panel?.querySelectorAll('.afo-ext-chip') ?? [])].map((node) => node.textContent)).includes('+ 53 px'),
+    String([...(panel?.querySelectorAll('.afo-ext-chip') ?? [])].map((node) => node.textContent)).slice(0, 60));
+  check('参数栏给出了目标输出尺寸（427 × 240）',
+    String(panel?.textContent ?? '').includes('427') &&
+      String(panel?.querySelector('.afo-size')?.textContent ?? '').includes('240'),
+    String(panel?.querySelector('.afo-size')?.textContent ?? '').slice(0, 40));
+  check('整页工作台有「关闭扩图」按钮（Esc 同效）',
+    Boolean(panel?.querySelector('[aria-label="关闭扩图"]')));
   const create = panel?.querySelector('[data-fisherai-outpaint-create="true"]');
   check('「生成扩图画面」按钮可用',
     Boolean(create) && create.disabled === false && create.getAttribute('aria-label') === '生成扩图画面',

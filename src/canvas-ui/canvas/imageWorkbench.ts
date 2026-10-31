@@ -237,16 +237,11 @@ export function sizeLabel(size: WorkbenchSize | null | undefined): string {
 }
 
 /** 工作台根容器的公共外观（nova：中性、紧、界面退后）。定位由 imageWorkbenchOverlay 给。 */
-export const WORKBENCH_ROOT_CLASS =
-  'fixed z-[12000] flex select-none flex-col overflow-hidden bg-[var(--af-canvas)] text-[var(--af-text)]';
-export const WORKBENCH_HEADER_CLASS =
-  'flex h-12 shrink-0 items-center gap-2 border-b border-border bg-[var(--af-surface)] px-3';
-export const WORKBENCH_TOOLBAR_CLASS =
-  'flex min-h-11 shrink-0 flex-wrap items-center gap-2 border-b border-border bg-[var(--af-surface)] px-3 py-1.5';
-export const WORKBENCH_FOOTER_CLASS =
-  'flex h-12 shrink-0 items-center gap-2 border-t border-border bg-[var(--af-surface)] px-3';
-export const WORKBENCH_STAGE_CLASS =
-  'af-wb-stage relative flex min-h-0 flex-1 items-center justify-center overflow-hidden';
+export const WORKBENCH_ROOT_CLASS = 'afw-root fixed z-[12000] select-none';
+export const WORKBENCH_HEADER_CLASS = 'afw-top';
+export const WORKBENCH_TOOLBAR_CLASS = 'afw-toolbar';
+export const WORKBENCH_FOOTER_CLASS = 'afw-foot';
+export const WORKBENCH_STAGE_CLASS = 'afw-stage';
 export const WORKBENCH_LABEL_CLASS = 'text-[11px] text-[var(--af-text-muted)]';
 export const WORKBENCH_HINT_CLASS = 'text-[11px] text-[var(--af-text-muted)]';
 export const WORKBENCH_DIVIDER_CLASS = 'mx-1 h-5 w-px shrink-0 bg-[var(--af-border)]';

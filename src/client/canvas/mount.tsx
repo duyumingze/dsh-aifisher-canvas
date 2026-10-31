@@ -25,6 +25,15 @@ import { CanvasStage, canvasBindingReport, canvasViewInjectionReport } from './s
 import { installCanvasDiagnostics, installImageLoadTelemetry, reportCanvasError, reportCanvasInfo } from './diagnostics';
 import { installSaveTelemetry } from './saveTelemetry';
 import { canvasGridReport, mountCanvasGrid } from './canvasGrid';
+import { generationDotsReport, installCanvasGenerationDots } from './genDots';
+import {
+  canvasUiScaleReport,
+  currentUiScale,
+  resetUiScale,
+  setUiScale,
+  stepUiScale,
+  UI_SCALE_STEPS,
+} from './uiScale';
 import { knifeReport } from './knife';
 import {
   CanvasGenerationBatches,
@@ -34,6 +43,19 @@ import {
 } from '../../canvas-ui/canvas/CanvasGenerationBatches';
 import { storyboardReport } from '../../canvas-ui/canvas/CanvasStoryboard';
 import { copilotReport } from '../../canvas-ui/canvas/CanvasCopilot';
+import { CanvasOutpaintStudio } from '../../canvas-ui/canvas/CanvasOutpaintStudio';
+import { CanvasProjectsPage } from '../../canvas-ui/canvas/CanvasProjectsPage';
+import { CanvasSettingsPage } from '../../canvas-ui/canvas/CanvasSettingsPage';
+import {
+  canvasPagesReport,
+  currentCanvasPage,
+  installCanvasPagesBridge,
+} from '../../canvas-ui/canvas/CanvasPagesStore';
+import { canvasHomeReport, installCanvasHomePage } from './homePage';
+import {
+  installOutpaintStudioBridge,
+  outpaintStudioReport,
+} from '../../canvas-ui/canvas/CanvasOutpaintStudioStore';
 
 export interface CanvasHandle {
   /** 卸载画布：root.unmount + 撤销装配 + 移除样式。 */
@@ -103,6 +125,9 @@ export function canvasAppBuildInfo(): Record<string, unknown> {
     bindings: canvasBindingReport(),
     injections: canvasViewInjectionReport(),
     grid: canvasGridReport(),
+    // v1.81：界面缩放读数 + 生成中噪波点阵（排查「胶囊没反应 / 点阵不出现」用）
+    uiScale: canvasUiScaleReport(),
+    generationDots: generationDotsReport(),
     // 节点搜索：请求计数 / 订阅者数 / 候选目录规模（「Shift+A 没反应」时先看这几个数）
     nodeSearch: {
       ...canvasNodeSearchReport(),
@@ -120,6 +145,14 @@ export function canvasAppBuildInfo(): Record<string, unknown> {
     storyboard: storyboardReport(),
     // 主动副驾（v1.59）：开没开 / 胶囊在不在 / 几条建议（「副驾不出现」时先看这里）
     copilot: copilotReport(),
+    // 整页扩图（v1.83）：桥挂上没有 / 有没有打开 / 页面在不在（「点扩图没反应」时先看这里）
+    outpaintStudio: outpaintStudioReport(),
+    // 页面层（v1.84）：项目库 / 设置开的是哪一屏、页面在不在 DOM 里、桥挂上没有
+    pages: canvasPagesReport(),
+    // 画布首屏（v1.85）：底下是不是 vendor 旧看板、自动开过项目库没有、拦下过几次开设置请求
+    home: canvasHomeReport(),
+    // 打开画布的当前屏（null = 画布视图）
+    page: currentCanvasPage()?.id ?? null,
   };
 }
 
@@ -133,6 +166,29 @@ export function canvasAppBuildInfo(): Record<string, unknown> {
  */
 const GenerationBatchesOverlay = () => CanvasGenerationBatches(React, {});
 GenerationBatchesOverlay.displayName = 'GenerationBatchesOverlay';
+
+/**
+ * 整页扩图工作台（v1.83）。
+ *
+ * 与生成批次卡同一条理由：**挂成画布容器的兄弟图层**，不塞进 vendor 的 React 树。
+ * 节点工具条里的「扩图」按钮通过 `__FISHERAI_CANVAS_OUTPAINT_PAGE__.open(node)` 把
+ * 「要扩哪张图」交给这里，工作台自己 portal 到 `.af-canvas-mount`、按画布真实矩形铺满
+ * （v1.82 把节点气泡放大到 880/560 都越界，就是因为 `fixed` 被困在带 transform 的 viewport 里）。
+ */
+const OutpaintStudioOverlay = () => CanvasOutpaintStudio(React, {});
+OutpaintStudioOverlay.displayName = 'OutpaintStudioOverlay';
+
+/**
+ * 页面层（v1.84）：项目库 + 设置。
+ *
+ * 与扩图工作台同一套做法（兄弟图层 + portal 到 `.af-canvas-mount`），区别只是**同一时刻只开一屏**
+ * ——「现在开哪一屏」由 CanvasPagesStore 管，两屏各自订阅它。
+ */
+const ProjectsPageOverlay = () => CanvasProjectsPage(React, {});
+ProjectsPageOverlay.displayName = 'CanvasProjectsPageOverlay';
+
+const SettingsPageOverlay = () => CanvasSettingsPage(React, {});
+SettingsPageOverlay.displayName = 'CanvasSettingsPageOverlay';
 
 /** 排查用：批次确认卡是否真的挂上了（回归脚本也会读它）。 */
 export {
@@ -157,6 +213,21 @@ export type { StoryboardShot } from '../../canvas-ui/canvas/CanvasStoryboard';
 
 /** 排查用：画布点阵底纹的实时状态（原样转出 canvasGrid 的探针）。 */
 export { canvasGridReport } from './canvasGrid';
+
+/**
+ * v1.81：界面缩放与生成中噪波点阵的纯逻辑出口（回归直接在构建产物上验，
+ * 不必先摆一屏节点）。生成点阵的挂载本身也可以单独跑：它只依赖 DOM。
+ */
+export {
+  canvasUiScaleReport,
+  currentUiScale,
+  resetUiScale,
+  setUiScale,
+  stepUiScale,
+  UI_SCALE_STEPS,
+} from './uiScale';
+export { installCanvasUiScale } from './uiScale';
+export { generationDotsReport, installCanvasGenerationDots } from './genDots';
 
 /**
  * v1.70：调色节点合成器的纯逻辑（回归直接验，不必真开 WebGL / 真挂画布）。
@@ -533,6 +604,15 @@ export function mountCanvas(container: HTMLElement): CanvasHandle {
   // 见 containFileDrags：把文件拖拽挡在画布边界内，避免 DSH 会话输入框的「拖入即添加」提示层卡住。
   const releaseFileDragContainment = containFileDrags(container);
   const releaseDropOverlayHealer = installDropOverlayHealer();
+  // 整页扩图（v1.83）：先把「打开工作台」的桥挂上，再渲染 —— 工具条点下去时工作台
+  // 已经能收到请求（否则第一次点击会落回 vendor 的 520 浮层）。
+  const releaseOutpaintStudio = installOutpaintStudioBridge();
+  // 页面层（v1.84）：项目库 / 设置两屏的「打开哪一屏」桥。也先挂上再渲染 ——
+  // 顶栏「← 项目库」与侧栏「设置」点下去时，页面已经能收到请求。
+  const releaseCanvasPages = installCanvasPagesBridge();
+  // 画布首屏（v1.85）：打开画布 = 项目库，旧看板不露出；vendor 那条开设置的事件改开新设置页。
+  // 必须在 root.render 之前 —— 它要抢在 vendor 的监听器之前注册（见 homePage.ts 文件头）。
+  const releaseHomePage = installCanvasHomePage(container);
 
   const root: Root = createRoot(container);
   root.render(
@@ -544,6 +624,9 @@ export function mountCanvas(container: HTMLElement): CanvasHandle {
         null,
         React.createElement(CanvasStage),
         React.createElement(GenerationBatchesOverlay),
+        React.createElement(OutpaintStudioOverlay),
+        React.createElement(ProjectsPageOverlay),
+        React.createElement(SettingsPageOverlay),
       ),
     ),
   );
@@ -593,6 +676,9 @@ export function mountCanvas(container: HTMLElement): CanvasHandle {
         setCanvasPortalTarget(null);
         releaseFileDragContainment();
         releaseDropOverlayHealer();
+        releaseOutpaintStudio();
+        releaseCanvasPages();
+        releaseHomePage();
         releaseThemeMirror();
         releaseBootstrap();
         releaseStyles();

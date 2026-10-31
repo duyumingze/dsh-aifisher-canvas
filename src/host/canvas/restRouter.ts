@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 画布本地后端路由（host 半）。
  *
  * 挂在 `/api/aifisher/canvas` 前缀下 —— 这个命名空间是刻意选的：
@@ -22,6 +22,7 @@ import { handleMediaApi } from './mediaRouter';
 import { handleMediaEditing, mediaEditingStatus } from './mediaEditingRouter';
 import { handleLibraryApi } from './libraryRouter';
 import { handleAppearanceApi, appearanceStatus } from './appearanceRouter';
+import { handleProjectsApi, projectsStatus } from './projectsRouter';
 import { handleMediaDownloadApi, mediaDownloadStatus } from './mediaDownloadRouter';
 import { handleLocalRuntimeApi } from './localRuntimeRouter';
 import { handlePromptApi, promptStatus } from './promptRouter';
@@ -162,6 +163,8 @@ export async function handleCanvasApi(
       cloudChannels: channelDiagnostics(await readCloudChannels(dirname(store.filePath))),
       prompts: await promptStatus(dirname(store.filePath)),
       archive: projectArchiveStatus(),
+      // 项目库（v1.84）：接口清单（页面打不开项目列表时先看这里）
+      projects: projectsStatus(),
       // 项目数据目录（v1.43）：当前在用 / 重启后会用的那个 / 是否等重启
       dataDir: dataDirStatus(dirname(store.filePath)),
       // 画布右侧对话面板（v1.9）：DSH 会话服务是否可用、有几条活跃回合
@@ -588,6 +591,24 @@ export async function handleCanvasApi(
   // Promise 拒绝，足以把 DSH 宿主进程带走（画布还在用，人先下线了）。宁可回 500 + code。
   try {
     const dataDir = dirname(store.filePath);
+    // 项目库（v1.84）：卡片墙 / 列表 / 详情 / 归档 / 复制 / 新建 —— 比 /workflows 厚一层，
+    // 需要 stat 素材目录、扫节点包围盒，所以单开一组路由，不污染 vendor 的列表契约。
+    if (
+      extras.mediaStore &&
+      (await handleProjectsApi({
+        req,
+        res,
+        url,
+        parts,
+        deps: {
+          store,
+          mediaStore: extras.mediaStore,
+          dataDir,
+          ...(extras.tasks ? { tasks: extras.tasks } : {}),
+        },
+      }))
+    )
+      return;
     // 项目数据目录（v1.43）：设置 → 存储 里改「缓存目录」走这三条
     if (await handleDataDirApi({ req, res, parts, activeDir: dataDir })) return;
     if (await handleAppearanceApi({ req, res, url, parts, deps: { dataDir } })) return;

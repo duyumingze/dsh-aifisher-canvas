@@ -1,37 +1,21 @@
 /**
- * 「图片编辑」工作台（shadcn nova 版，v1.26）。
+ * 「图片编辑」工作台（v1.82 · 页面层设计稿 A 版）。
  *
- * 替换 vendor 的 `dialogs/canvasImageStudio.tsx`（上游外观：一条 nav 按钮带 + 一张大图 +
- * 底栏三个裸按钮）。**分工和边界**：
+ * 布局换成设计稿的三栏：左工具条（裁剪 / 蒙版 / 笔刷 / 组合）+ 中间画布台 + 右侧检查器，
+ * 顶栏保留标题、版本、撤销重做与关闭；保存按钮从底栏移进检查器底部（仍是主按钮）。
  *
- *   mode === 'editor'（节点工具条的「图片编辑」）→ 本文件：
- *     · 首页：工具（裁剪 / 蒙版 / 笔刷 / 组合）+ 预览 + 版本撤销重做 + 保存为新图片；
- *     · 裁剪：`ImageCropStage`（几何复用 vendor 纯函数）；
- *     · 蒙版 / 笔刷：`ImageAnnotationStage`（initialMask 区分，保存后回到首页成为一版）；
- *     · 组合：仍走 vendor 的 `CompositePreview`（多图层拖放/缩放/层级是另一套编辑器，
- *       不在这轮范围内 —— 见 docs/canvas-ui-shadcn.md 第五节）。
- *   mode !== 'editor'：
- *     · `grid`（v1.46）→ `ImageGridCropStage`（同样是 nova 工作台，几何/切线/导出全复用
- *       vendor 纯函数，见 docs/canvas-ui-shadcn.md 第三节）；
- *     · 其余（全景 / 角度 / 生成全景）→ **原样交给 vendor** 的 `Components.ImageCrop`：
- *       全景球采景依赖 three.js 场景、角度草稿走另一套编辑器，本轮不动，保证既有能力一个不丢
- *       （vendor 内部会再分发给自己的 CropEditor / Angle / Panorama）。
+ * 与 v1.26 的关系：逻辑一行没动 —— 工具分流、版本栈（最多 50 版）、保存链路、modal 契约全保留，
+ * 只重排了 DOM 与类名（类名在 `src/client/canvas/workbenchSkin.ts`）。
  *
- * 保存链路（也是 v1.26 修的 bug 的下游）：`onSave(node.id, [current])` →
- * `useCanvasCropSave` → `POST /api/aifisher/canvas/assets/images`（data URL 落盘）→
- * 在画布上新建一个 `Upload Image` 节点。host 侧那条路由以前对 POST 回 405
- * （列表分支把非 GET 全吞了），于是「保存为新图片」点了没反应、状态行显示
- * `method not allowed`；修好后图片会落进素材库并出现在源图右侧。
- *
- * 结构契约（回归 / 真机检查依赖）：
+ * 结构契约（回归 / 真机检查依赖，一个都不能少）：
  *   - 根 `role="dialog"` + `aria-label="图片编辑"` + `data-fisherai-image-studio="editor"`；
  *   - 工具按钮 `data-fisherai-image-tool="crop|mask|brush|compose"` + `aria-pressed`；
  *   - 保存按钮 `data-fisherai-image-save="studio"` + `aria-label="保存为新图片"`；
  *   - 撤销 / 重做 aria-label「撤销编辑」「重做编辑」；素材项 `data-fisherai-image-source="<节点id>"`；
- *   - 尺寸/版本读数 `data-fisherai-image-dimensions`，状态行 `data-fisherai-image-status`。
+ *   - 尺寸/版本读数 `data-fisherai-image-dimensions` / `data-fisherai-image-version`，
+ *     状态行 `data-fisherai-image-status`，预览 `data-fisherai-image-preview`。
  *
- * ⚠️ hooks 必须用注入进来的 React（第一个参数）—— 产物里 React 有两份。见
- *    docs/canvas-ui-shadcn.md 第 1 条；hook 也不能放到「!node return null」之后。
+ * ⚠️ hooks 必须用注入进来的 React（第一个参数）—— 产物里 React 有两份。
  */
 import * as ReactTypes from 'react';
 import { createElement } from '@/lib/react';
@@ -50,7 +34,6 @@ import {
 } from 'lucide-react';
 
 import { Button } from '@/ui/button';
-import { cn } from '@/lib/utils';
 import { canvasPortalTarget } from '@/lib/portal';
 import { activateModal } from '../../../vendor/aifisher/src/stable/design/modalFocus';
 import {
@@ -64,13 +47,9 @@ import {
   fitInside,
   loadWorkbenchImage,
   sizeLabel,
-  WORKBENCH_DIVIDER_CLASS,
-  WORKBENCH_FOOTER_CLASS,
   WORKBENCH_HEADER_CLASS,
-  WORKBENCH_HINT_CLASS,
   WORKBENCH_ROOT_CLASS,
   WORKBENCH_STAGE_CLASS,
-  WORKBENCH_TOOLBAR_CLASS,
   type WorkbenchOutput,
   type WorkbenchSize,
 } from './imageWorkbench';
@@ -136,7 +115,8 @@ export function CanvasImageStudio(react: Runtime, props: StudioProps) {
   const [selected, setSelected] = react.useState<string[]>([]);
   const [saving, setSaving] = react.useState(false);
   const [error, setError] = react.useState('');
-  const [sourcesOpen, setSourcesOpen] = react.useState(false);
+  // 素材默认展开：设计稿把它当成检查器里的一项常驻信息，而不是「点开才有的抽屉」。
+  const [sourcesOpen, setSourcesOpen] = react.useState(true);
   const [sourceSize, setSourceSize] = react.useState<WorkbenchSize | null>(null);
   const [previewBox, setPreviewBox] = react.useState<WorkbenchSize>({ width: 0, height: 0 });
   const stageRef = react.useRef<HTMLDivElement>(null);
@@ -227,6 +207,8 @@ export function CanvasImageStudio(react: Runtime, props: StudioProps) {
       saveLabel: '应用裁剪',
       onApply: apply,
       onClose: () => setStage(null),
+      onSwitchTool: (tool: Stage) => setStage(tool),
+      onCloseStudio: () => props.onClose(),
     });
   if (stage === 'mask' || stage === 'brush')
     return h(ImageAnnotationStageView, {
@@ -269,32 +251,62 @@ export function CanvasImageStudio(react: Runtime, props: StudioProps) {
 
   const others = sources.filter((item) => item.id !== node.id && item.resultUrl);
   const percentBase = sourceSize;
+  const versionLabel = current ? `第 ${position + 1} 版` : '原图';
 
   const header = h(
     'header',
     { className: WORKBENCH_HEADER_CLASS },
-    h(ImageIcon, { className: 'size-4 text-muted-foreground' }),
-    h('span', { className: 'text-sm font-medium' }, '图片编辑'),
-    h('span', { className: WORKBENCH_HINT_CLASS }, '应用工具后可继续编辑，保存时生成新图片'),
+    h('span', { className: 'afw-title' }, '图片编辑'),
+    h('span', { className: 'afw-badge' }, versionLabel),
+    h('span', { className: 'afw-sub' }, '应用工具后可继续编辑，保存时生成新图片'),
     h('div', { className: 'min-w-0 flex-1' }),
     h(
       Button,
       {
-        key: 'close',
         type: 'button',
         variant: 'ghost',
         size: 'icon-sm',
+        className: 'afw-iconbtn',
+        'aria-label': '撤销编辑',
+        title: '撤销上一版',
+        disabled: saving || position < 0,
+        onClick: () => setPosition(position - 1),
+      },
+      h(Undo2Icon, {}),
+    ),
+    h(
+      Button,
+      {
+        type: 'button',
+        variant: 'ghost',
+        size: 'icon-sm',
+        className: 'afw-iconbtn',
+        'aria-label': '重做编辑',
+        title: '重做下一版',
+        disabled: saving || position >= versions.length - 1,
+        onClick: () => setPosition(position + 1),
+      },
+      h(Redo2Icon, {}),
+    ),
+    h('span', { className: 'afw-sep' }),
+    h(
+      Button,
+      {
+        type: 'button',
+        variant: 'ghost',
+        size: 'icon-sm',
+        className: 'afw-iconbtn',
         'aria-label': '关闭图片编辑',
         title: '关闭（Esc）',
         onClick: () => props.onClose(),
       },
-      h(XIcon, { className: 'size-4' }),
+      h(XIcon, {}),
     ),
   );
 
-  const toolbar = h(
-    'div',
-    { className: WORKBENCH_TOOLBAR_CLASS },
+  const rail = h(
+    'nav',
+    { className: 'afw-rail', 'aria-label': '编辑工具' },
     ...TOOLS.map((tool) => {
       const Icon = tool.icon as ReactTypes.ComponentType<{ className?: string }>;
       // 「组合」没有素材可选时不可点（vendor 同款语义：只有一张图时没什么可组合的）
@@ -304,25 +316,34 @@ export function CanvasImageStudio(react: Runtime, props: StudioProps) {
         {
           key: tool.value,
           type: 'button',
-          variant: 'outline',
-          size: 'sm',
+          variant: 'ghost',
+          size: 'icon-sm',
+          className: 'afw-tool',
           title: tool.hint,
           'aria-label': tool.label,
           'aria-pressed': false,
           'data-fisherai-image-tool': tool.value,
           disabled,
           onClick: () => setStage(tool.value),
-          className: 'h-8 gap-1.5 border-border/70 text-xs text-muted-foreground hover:text-foreground',
         },
-        h(Icon, { className: 'size-3.5' }),
-        tool.label,
+        h(Icon, {}),
       );
     }),
-    h('div', { className: WORKBENCH_DIVIDER_CLASS }),
+    h('span', { className: 'afw-rail-div' }),
     h(
-      'span',
-      { className: WORKBENCH_HINT_CLASS },
-      current ? `已应用 ${position + 1} 次编辑` : '还没有应用编辑',
+      Button,
+      {
+        type: 'button',
+        variant: 'ghost',
+        size: 'icon-sm',
+        className: sourcesOpen ? 'afw-tool afw-tool-on' : 'afw-tool',
+        title: sourcesOpen ? '收起组合素材' : '展开组合素材',
+        'aria-label': sourcesOpen ? '收起组合素材' : '展开组合素材',
+        'data-fisherai-image-sources-toggle': sourcesOpen ? 'open' : 'closed',
+        disabled: saving || others.length === 0,
+        onClick: () => setSourcesOpen(!sourcesOpen),
+      },
+      h(LayersIcon, {}),
     ),
   );
 
@@ -332,8 +353,7 @@ export function CanvasImageStudio(react: Runtime, props: StudioProps) {
     h(
       'div',
       {
-        className:
-          'af-wb-image relative overflow-hidden rounded-[3px] bg-[var(--af-media-bg)]',
+        className: 'afw-stage-img relative overflow-hidden rounded-[3px] bg-[var(--af-media-bg)]',
         style: {
           width: previewBox.width || '40%',
           height: previewBox.height || '60%',
@@ -350,11 +370,7 @@ export function CanvasImageStudio(react: Runtime, props: StudioProps) {
       current
         ? h(
             'span',
-            {
-              className:
-                'absolute right-1.5 top-1.5 rounded border border-border bg-[var(--af-input)]/90 ' +
-                'px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground',
-            },
+            { className: 'afw-size-chip', style: { right: 8, top: 8 } },
             `第 ${position + 1} 版`,
           )
         : null,
@@ -372,174 +388,193 @@ export function CanvasImageStudio(react: Runtime, props: StudioProps) {
       : null,
   );
 
-  const sourcesStrip =
+  const sourcesSection =
     others.length > 0 && sourcesOpen
       ? h(
           'div',
-          {
-            'data-fisherai-image-sources': 'true',
-            className:
-              'flex shrink-0 items-center gap-2 overflow-x-auto border-t border-border ' +
-              'bg-[var(--af-surface)] px-3 py-2',
-          },
-          h('span', { className: cn(WORKBENCH_HINT_CLASS, 'shrink-0') }, '组合素材'),
-          ...others.map((item) => {
-            const pressed = selected.includes(item.id);
-            return h(
-              'button',
-              {
-                key: item.id,
-                type: 'button',
-                title: item.title ?? '未命名图片',
-                'data-fisherai-image-source': item.id,
-                'aria-pressed': pressed,
-                'aria-label': `组合素材 ${item.title ?? item.id}`,
-                disabled: saving,
-                onClick: () =>
-                  setSelected((old) =>
-                    old.includes(item.id)
-                      ? old.filter((id) => id !== item.id)
-                      : [...old, item.id],
-                  ),
-                className: cn(
-                  'flex shrink-0 flex-col items-center gap-1 rounded border p-1 transition-colors',
-                  pressed
-                    ? 'border-[var(--af-text-secondary)] bg-[var(--af-hover)]'
-                    : 'border-border/70 hover:bg-[var(--af-hover)]',
-                ),
-              },
-              h('img', {
-                src: item.resultUrl,
-                alt: item.title ?? '素材',
-                className: 'h-12 w-16 object-contain',
-              }),
-              h(
-                'span',
-                { className: 'max-w-16 truncate text-[10px] text-muted-foreground' },
-                item.title ?? '未命名',
-              ),
-            );
-          }),
+          { className: 'afw-sect', 'data-fisherai-image-sources': 'true' },
+          h(
+            'div',
+            { className: 'afw-sect-t' },
+            '组合素材',
+            h('span', { className: 'r' }, `${selected.length}/${others.length}`),
+          ),
+          h(
+            'div',
+            { className: 'afw-thumbs' },
+            ...others.map((item) => {
+              const pressed = selected.includes(item.id);
+              return h(
+                'button',
+                {
+                  key: item.id,
+                  type: 'button',
+                  title: item.title ?? '未命名图片',
+                  'data-fisherai-image-source': item.id,
+                  'aria-pressed': pressed,
+                  'aria-label': `组合素材 ${item.title ?? item.id}`,
+                  disabled: saving,
+                  onClick: () =>
+                    setSelected((old) =>
+                      old.includes(item.id)
+                        ? old.filter((id) => id !== item.id)
+                        : [...old, item.id],
+                    ),
+                },
+                h('img', { src: item.resultUrl, alt: item.title ?? '素材' }),
+              );
+            }),
+          ),
+          h(
+            'div',
+            { className: 'afw-note' },
+            others.length === 1
+              ? '选中后点「组合」可叠加到当前图片'
+              : '可多选，叠加顺序按选中先后',
+          ),
         )
       : null;
 
-  const footer = h(
-    'footer',
-    { className: WORKBENCH_FOOTER_CLASS },
+  const inspector = h(
+    'aside',
+    { className: 'afw-insp', 'aria-label': '编辑参数' },
     h(
-      Button,
-      {
-        type: 'button',
-        variant: 'ghost',
-        size: 'icon-sm',
-        'aria-label': '撤销编辑',
-        title: '撤销上一版',
-        disabled: saving || position < 0,
-        onClick: () => setPosition(position - 1),
-      },
-      h(Undo2Icon, { className: 'size-4' }),
-    ),
-    h(
-      Button,
-      {
-        type: 'button',
-        variant: 'ghost',
-        size: 'icon-sm',
-        'aria-label': '重做编辑',
-        title: '重做下一版',
-        disabled: saving || position >= versions.length - 1,
-        onClick: () => setPosition(position + 1),
-      },
-      h(Redo2Icon, { className: 'size-4' }),
-    ),
-    h('div', { className: WORKBENCH_DIVIDER_CLASS }),
-    h(
-      'span',
-      {
-        'data-fisherai-image-version': current ? String(position + 1) : 'original',
-        className:
-          'rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground',
-      },
-      current ? `第 ${position + 1} 版` : '原图',
-    ),
-    h(
-      'span',
-      {
-        className: 'font-mono text-[11px] tabular-nums text-muted-foreground',
-        'data-fisherai-image-dimensions': current ? 'edited' : 'original',
-      },
-      percentBase ? sizeLabel(percentBase) : '—',
-    ),
-    h('span', { className: WORKBENCH_HINT_CLASS }, '像素'),
-    h('div', { className: 'min-w-0 flex-1' }),
-    others.length > 0
-      ? h(
-          Button,
-          {
-            type: 'button',
-            variant: 'ghost',
-            size: 'xs',
-            'aria-label': sourcesOpen ? '收起组合素材' : '展开组合素材',
-            'aria-pressed': sourcesOpen,
-            disabled: saving,
-            onClick: () => setSourcesOpen(!sourcesOpen),
-            className: 'gap-1 px-1.5 text-[11px] text-muted-foreground',
-          },
-          h(LayersIcon, { className: 'size-3' }),
-          `素材 ${selected.length}/${others.length}`,
-        )
-      : null,
-    error
-      ? h(
-          'span',
-          {
-            role: 'alert',
-            'data-fisherai-image-status': 'error',
-            className: 'max-w-[42ch] truncate text-[11px] text-[var(--af-danger)]',
-          },
-          error,
-        )
-      : h(
-          'span',
-          {
-            role: 'status',
-            'data-fisherai-image-status': 'idle',
-            className: WORKBENCH_HINT_CLASS,
-          },
-          current ? '本次编辑已应用，可继续编辑或保存' : '应用一个工具后就能保存为新图片',
+      'div',
+      { className: 'afw-insp-head' },
+      h(ImageIcon, { className: 'size-4 text-[#5eead4]' }),
+      h(
+        'div',
+        { className: 'min-w-0' },
+        h('h2', {}, '图片编辑'),
+        h(
+          'div',
+          { className: 'afw-sub' },
+          current ? `已应用 ${position + 1} 次编辑` : '还没有应用编辑',
         ),
+      ),
+    ),
     h(
-      Button,
-      {
-        type: 'button',
-        size: 'sm',
-        'aria-label': '保存为新图片',
-        'data-fisherai-image-save': 'studio',
-        disabled: saving || !current,
-        onClick: async () => {
-          if (lockRef.current || !current) return;
-          lockRef.current = true;
-          setSaving(true);
-          setError('');
-          try {
-            await props.onSave(node.id, [current], () => {});
-            if (activeRef.current) props.onClose();
-          } catch (cause) {
-            if (activeRef.current)
-              setError(
-                cause instanceof Error ? cause.message : '保存失败，请重试',
-              );
-          } finally {
-            lockRef.current = false;
-            if (activeRef.current) setSaving(false);
-          }
+      'div',
+      { className: 'afw-insp-body' },
+      h(
+        'div',
+        { className: 'afw-sect' },
+        h('div', { className: 'afw-sect-t' }, '尺寸', h('span', { className: 'r' }, '像素')),
+        h(
+          'div',
+          { className: 'afw-kv' },
+          h('span', {}, '当前'),
+          h(
+            'b',
+            { 'data-fisherai-image-dimensions': current ? 'edited' : 'original' },
+            percentBase ? sizeLabel(percentBase) : '—',
+          ),
+        ),
+        h(
+          'div',
+          { className: 'afw-note' },
+          current ? '应用编辑后的像素尺寸' : '原图像素尺寸，应用工具后会更新',
+        ),
+      ),
+      h(
+        'div',
+        { className: 'afw-sect' },
+        h('div', { className: 'afw-sect-t' }, '版本'),
+        h(
+          'div',
+          { className: 'afw-kv' },
+          h('span', {}, '当前'),
+          h(
+            'b',
+            { 'data-fisherai-image-version': current ? String(position + 1) : 'original' },
+            versionLabel,
+          ),
+        ),
+        h('div', { className: 'afw-note' }, '撤销 / 重做在顶栏，最多保留 50 版；保存后整条版本栈合并成一张新图'),
+      ),
+      h(
+        'div',
+        { className: 'afw-sect' },
+        h('div', { className: 'afw-sect-t' }, '保存方式'),
+        h('div', { className: 'afw-note' }, '保存为画布上的新图片节点，原图不动；下游节点会连到新图。'),
+      ),
+      h(
+        'div',
+        { className: 'afw-sect' },
+        h('div', { className: 'afw-sect-t' }, '图片信息'),
+        h(
+          'div',
+          { className: 'afw-kv' },
+          h('span', {}, '来源'),
+          h('b', {}, node.title ? String(node.title) : '画布节点'),
+        ),
+        h(
+          'div',
+          { className: 'afw-kv' },
+          h('span', {}, '节点'),
+          h('b', { className: 'font-mono' }, node.id.slice(0, 12)),
+        ),
+        h('div', { className: 'afw-note' }, '顶部撤销 / 重做只在版本栈里回退，不会改动画布上的原图。'),
+      ),
+      sourcesSection,
+      h(
+        'div',
+        { className: 'afw-sect' },
+        error
+          ? h(
+              'span',
+              { role: 'alert', 'data-fisherai-image-status': 'error', className: 'afw-alert' },
+              error,
+            )
+          : h(
+              'span',
+              { role: 'status', 'data-fisherai-image-status': 'idle', className: 'afw-status' },
+              current ? '本次编辑已应用，可继续编辑或保存' : '应用一个工具后就能保存为新图片',
+            ),
+      ),
+    ),
+    h(
+      'footer',
+      { className: 'afw-insp-foot' },
+      h(
+        Button,
+        {
+          type: 'button',
+          'aria-label': '保存为新图片',
+          'data-fisherai-image-save': 'studio',
+          disabled: saving || !current,
+          onClick: async () => {
+            if (lockRef.current || !current) return;
+            lockRef.current = true;
+            setSaving(true);
+            setError('');
+            try {
+              await props.onSave(node.id, [current], () => {});
+              if (activeRef.current) props.onClose();
+            } catch (cause) {
+              if (activeRef.current)
+                setError(cause instanceof Error ? cause.message : '保存失败，请重试');
+            } finally {
+              lockRef.current = false;
+              if (activeRef.current) setSaving(false);
+            }
+          },
         },
-        className: 'h-8 gap-1.5 text-xs',
-      },
-      saving
-        ? h(LoaderCircleIcon, { className: 'size-3.5 animate-spin' })
-        : h(CheckIcon, { className: 'size-3.5' }),
-      saving ? '正在保存…' : '保存为新图片',
+        saving
+          ? h(LoaderCircleIcon, { className: 'size-3.5 animate-spin' })
+          : h(CheckIcon, { className: 'size-3.5' }),
+        saving ? '正在保存…' : '保存为新图片',
+      ),
+      h(
+        Button,
+        {
+          type: 'button',
+          variant: 'ghost',
+          className: 'afw-ghost',
+          onClick: () => props.onClose(),
+        },
+        '取消',
+      ),
     ),
   );
 
@@ -563,10 +598,7 @@ export function CanvasImageStudio(react: Runtime, props: StudioProps) {
       className: WORKBENCH_ROOT_CLASS,
     },
     header,
-    toolbar,
-    stageView,
-    sourcesStrip,
-    footer,
+    h('div', { className: 'afw-body' }, rail, h('div', { className: 'afw-main' }, stageView), inspector),
   );
   const target = canvasPortalTarget();
   return target ? (createPortal(root, target) as ReactTypes.ReactNode) : root;

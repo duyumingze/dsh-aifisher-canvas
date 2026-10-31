@@ -9,6 +9,8 @@ import {
   type NodeRuntime,
 } from './canvasNodeOperations';
 import { installNodeFramework } from './nodeFramework';
+// dsh-aifisher-canvas 追加：新建节点要以指针为中心，尺寸跟画布同一套规则。
+import { nodeHeight, nodeWidth } from './canvasNodeRules';
 import type {
   WorkflowCanvasNodeRecord,
   WorkflowVerifiedCanvasInsertion,
@@ -79,6 +81,20 @@ export function attachCanvasNodeCreateBridge(
         const updated = updateCanvasNode([node], node.id, { comfyMode: detail.comfyMode }, runtime);
         if (updated[0]) node = updated[0];
       }
+      // 用户 2026-10-30：「添加节点的时候节点位置不会以鼠标为中心点」—— 以前节点的左上角
+      // 直接贴着指针，卡片整个往右下铺开。现在按画布自己的尺寸规则（nodeWidth/nodeHeight，
+      // Junction 圆点、文本、ComfyUI 都覆盖）反推左上角，让卡片的**中心**落在指针上。
+      const width = nodeWidth(node);
+      const height = nodeHeight(node);
+      node = { ...node, x: point.x - width / 2, y: point.y - height / 2 };
+      (window as { __DSH_NODE_CREATE_CENTER__?: unknown }).__DSH_NODE_CREATE_CENTER__ = {
+        type: node.type,
+        point: { x: point.x, y: point.y },
+        width,
+        height,
+        x: node.x,
+        y: node.y,
+      };
       setNodes((nodes) => [...nodes, node]);
       setSelected([node.id]);
       if (detail.place === true) {

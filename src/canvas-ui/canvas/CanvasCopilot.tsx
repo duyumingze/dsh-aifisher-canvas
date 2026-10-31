@@ -300,9 +300,19 @@ export function CanvasCopilot(
     {
       type: 'button',
       'data-fisherai-copilot-pill': 'true',
-      'aria-label': '副驾建议',
+      'aria-label': open ? '收起副驾' : '副驾建议',
+      'aria-expanded': open,
       title: suggestions[0]?.title ?? '副驾',
+      /**
+       * 2026-10-31 用户报障：「点击副驾后再次点击副驾不会关闭」。
+       * 胶囊是开关，不是单向打开 —— 开着时再点一次收起（面板开着时胶囊仍在面板下方，
+       * 不会被盖住）；只有「打开」这一下才去补一次活画布读数。
+       */
       onClick: () => {
+        if (open) {
+          setOpen(false);
+          return;
+        }
         setOpen(true);
         reload.current(true);
       },

@@ -555,18 +555,34 @@ check('面板标题里写着「任务队列」', String(panel()?.textContent).in
   check('平时（没有浮层）面板不带 inert', panel()?.hasAttribute('inert') === false, String(panel()?.getAttribute('inert')));
 
   window.dispatchEvent(new window.CustomEvent('fisherai:open-settings'));
-  const settingsDialog = await waitFor(() => $('[data-fisherai-settings="true"]'), 6000);
-  check('设置对话框真的打开了（vendor 的 activateModal 生效）', Boolean(settingsDialog), String(Boolean(settingsDialog)));
-  check('设置打开时面板拿到 inert（浮层接管了画布这一层）', panel()?.hasAttribute('inert') === true, String(panel()?.getAttribute('inert')));
+  const settingsPage = await waitFor(() => $('[data-fisherai-page="settings"]'), 8000);
+  check('设置页真的打开了（v1.85：页面层接管）', Boolean(settingsPage), String(Boolean(settingsPage)));
+  check('旧版设置对话框没有出现（v1.85 移除）', $('[data-fisherai-settings="true"]') === null);
+  // v1.85：页面层不再走 vendor 的 activateModal（那是旧对话框的机制），改由
+  // html.afg-page-open 把按视口贴边的画布 chrome（含任务队列）整块 display:none。
+  const pageStyles = [...window.document.querySelectorAll('style')]
+    .map((node) => node.textContent ?? '')
+    .join('\n');
+  check(
+    '页面开着时任务队列被样式表藏掉（html.afg-page-open 选择器里点名了它）',
+    /html\.afg-page-open[^{}]*\[data-fisherai-task-queue\]/.test(pageStyles),
+    pageStyles.includes('afg-page-open') ? '(有 afg-page-open 规则)' : '(没有 afg-page-open 规则)',
+  );
+  check('文档根节点挂上了 afg-page-open', window.document.documentElement.classList.contains('afg-page-open'), String(window.document.documentElement.className));
   check(
     '面板自己的位置/内容没被改动（只是被盖掉，不是被卸载）',
     Boolean(panel()) && (panel()?.getAttribute('style') ?? '').includes('right: 12px'),
     String(Boolean(panel())),
   );
 
-  click(settingsDialog?.querySelector('button[aria-label="关闭设置"]'));
-  const released = await waitFor(() => $('[data-fisherai-settings="true"]') === null && panel()?.hasAttribute('inert') === false, 6000);
-  check('关掉设置后 inert 被摘掉、面板回到画布层', released === true || (released === false && panel()?.hasAttribute('inert') === false), String(panel()?.hasAttribute('inert')));
+  click(settingsPage?.querySelector('[data-fisherai-page-close]'));
+  const released = await waitFor(
+    () =>
+      $('[data-fisherai-page="settings"]') === null &&
+      !window.document.documentElement.classList.contains('afg-page-open'),
+    8000,
+  );
+  check('关掉设置后 afg-page-open 被摘掉、面板回到画布层', Boolean(released), String(window.document.documentElement.className));
   check('关掉设置后面板还在（没被这次开关弄丢）', Boolean(panel()), String(Boolean(panel())));
 }
 

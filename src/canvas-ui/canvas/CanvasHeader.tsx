@@ -44,6 +44,7 @@ import { Spinner } from '@/ui/spinner';
 import { iconNode } from '@/lib/icon';
 import { cn } from '@/lib/utils';
 import { requestCanvasProjectArchive } from './CanvasProjectArchiveStore';
+import { openCanvasPage } from './CanvasPagesStore';
 
 /** 注入进来的 React 运行时（vendor 的 bind 会把 React 作为第一个参数传进来）。 */
 type Runtime = Pick<
@@ -205,7 +206,11 @@ export function CanvasHeader(react: Runtime, props: Props, icons: HeaderIcons) {
     if (hasUnsavedChanges)
       return h(
         Badge,
-        { variant: 'outline', className: 'font-normal text-[var(--af-warning)]' },
+        { variant: 'outline', className: 'gap-1.5 font-normal text-[var(--af-warning)]' },
+        // 设计稿：脏数据用 5px 琥珀点标出来，比纯文字更快被扫到。
+        h('span', {
+          className: 'size-[5px] rounded-full bg-[var(--af-warning)] shadow-[0_0_6px_rgba(245,194,107,.5)]',
+        }),
         '未保存',
       );
     if (props.lastAutoSaveTime)
@@ -249,8 +254,16 @@ export function CanvasHeader(react: Runtime, props: Props, icons: HeaderIcons) {
         size: 'xs',
         'aria-label': '返回项目库',
         'data-fisherai-back-to-library': 'true',
-        title: '返回项目库（回到项目列表）',
-        onClick: () => live.current.onBack?.(),
+        title: '项目库（所有项目 / 归档 / 导入导出）',
+        /**
+         * v1.84：这个按钮以前直接 `onBack()` —— 那会退出画布（DSH 里等于把面板收掉），
+         * 用户 2026-10-30 要的「项目管理页」没有落点。现在它打开页面层的项目库
+         * （兄弟图层，画布还在下面活着）；只有页面层没挂上时才回落到原来的 onBack。
+         */
+        onClick: () => {
+          const opened = openCanvasPage('projects');
+          if (!opened) live.current.onBack?.();
+        },
         className:
           'h-8 shrink-0 gap-1 pl-1.5 pr-2 text-xs font-medium text-muted-foreground ' +
           'hover:text-foreground',
@@ -352,7 +365,8 @@ export function CanvasHeader(react: Runtime, props: Props, icons: HeaderIcons) {
             onClick: startRename,
             title: '点击重命名',
             className:
-              'max-w-[42vw] truncate rounded-sm px-1.5 py-1 text-[13px] font-semibold text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
+              // shrink-0：界面放大（zoom）后头部内容整体变宽，标题不能被挤成「U」（v1.81 真机回归）
+              'max-w-[42vw] shrink-0 truncate rounded-sm px-1.5 py-1 text-[13px] font-semibold text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
           },
           canvasTitle,
         ),

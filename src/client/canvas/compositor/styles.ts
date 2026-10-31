@@ -378,6 +378,8 @@ export const COMPOSITOR_STYLE = `
 .cg-stage.cg-space { cursor: grab; }
 .cg-stage.cg-panning { cursor: grabbing; }
 .cg-stage.cg-merging { cursor: crosshair; }
+/* Ctrl+右键划过 = 断开：和主画布切刀同一套红色，一眼区分「这是切、不是合」 */
+.cg-stage.cg-cutting { cursor: crosshair; }
 .cg-merge-stroke {
   fill: none;
   stroke: rgba(255, 255, 255, .95);
@@ -392,6 +394,14 @@ export const COMPOSITOR_STYLE = `
   stroke-width: 2.4;
   stroke-linecap: round;
   filter: drop-shadow(0 0 5px rgba(94, 234, 212, .55));
+  pointer-events: none;
+}
+.cg-cut-hint {
+  fill: none;
+  stroke: #ff4d5a;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  filter: drop-shadow(0 0 5px rgba(255, 77, 90, .55));
   pointer-events: none;
 }
 /* 节点层：默认不留 will-change（常驻会把整层固化成位图，缩放就发虚）。

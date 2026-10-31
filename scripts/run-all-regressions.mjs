@@ -62,6 +62,10 @@ const order = [
   'test-project-archive.mjs',
   'test-canvas-data-dir.mjs',
   'test-canvas-task-queue.mjs',
+  // v1.84：页面层（项目库卡片墙/列表 + 设置四分组 + host /projects 数据面）
+  'test-canvas-pages.mjs',
+  // v1.86：首屏「点一次就进画布」（别让看门把项目库弹回来）
+  'test-canvas-home.mjs',
   'test-canvas-workflow-library.mjs',
   'test-canvas-shadcn-ui.mjs',
   'verify-canvas-ui.mjs',

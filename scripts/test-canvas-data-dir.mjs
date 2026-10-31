@@ -271,12 +271,13 @@ console.log('\n=== B. 设置 → 存储 → 项目数据目录 ===');
   };
 
   window.dispatchEvent(new window.CustomEvent('fisherai:open-settings'));
-  const dialog = await waitFor(() => $('[data-fisherai-settings="true"]'));
-  check('设置对话框打开了', Boolean(dialog));
-  const storageTab = await waitFor(() => $('[data-fisherai-settings-section="storage"]'));
-  click(storageTab);
+  const settingsPage = await waitFor(() => $('[data-fisherai-page="settings"]'));
+  check('设置页打开了（v1.85：页面层，不是旧对话框）', Boolean(settingsPage));
+  check('旧版设置对话框没有出现', $('[data-fisherai-settings="true"]') === null);
+  const dataTab = await waitFor(() => $('[data-fisherai-settings-nav="data"]'));
+  click(dataTab);
   const panel = await waitFor(() => $('[data-fisherai-data-dir="panel"]'));
-  check('「存储」分区里有「项目数据目录」面板', Boolean(panel));
+  check('「项目与数据」分区里有「项目数据目录」面板', Boolean(panel));
   check('面板可访问（有标题 id + aria-labelledby）',
     panel?.getAttribute('aria-labelledby') === 'fisherai-data-dir-title' &&
       Boolean($('#fisherai-data-dir-title')),

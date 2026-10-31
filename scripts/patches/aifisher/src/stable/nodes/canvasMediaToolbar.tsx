@@ -111,6 +111,18 @@ interface OutpaintCreateBridge {
   }>;
 }
 /**
+ * 整页扩图工作台（v1.83）的入口。
+ *
+ * 为什么不在这个文件里把面板直接画大：工具条长在节点卡里、节点卡长在带 transform 的
+ * 画布 viewport 里 —— 面板再大也只在节点附近那点空间里，`fixed` 还会被困住。v1.82
+ * 实测放大到 880 / 560 两次都越界。所以这里只把「要扩哪张图」交给画布图层上的
+ * 整页工作台（`src/canvas-ui/canvas/CanvasOutpaintStudio.tsx`），面板本体留在下面当兜底
+ * （桥没挂上时仍然可用，只是回到 520 的小气泡）。
+ */
+interface OutpaintPageBridge {
+  open(node: MediaNode): boolean;
+}
+/**
  * 原图位置（九宫格，行优先）。与 `src/canvas-ui/canvas/CanvasOutpaint.ts` 的
  * OUTPAINT_ANCHORS 一一对应 —— 这里只放 label/hint（面板要文案），落点算法在装配层。
  */
@@ -321,6 +333,16 @@ export function CanvasMediaToolbar(React: Runtime, props: Props, components: Com
                     onPointerDown={stop}
                     onClick={() => {
                       setOutpaintError('');
+                      // v1.83：优先交给画布图层上的整页工作台（portal 到 .af-canvas-mount，
+                      // 才铺得满）。桥没挂上（画布还没渲染到那一步 / 被裁掉的宿主）就回落到
+                      // 下面这个 520 的节点气泡 —— 两条路都不会让按钮点了没反应。
+                      const page = (window as unknown as {
+                        __FISHERAI_CANVAS_OUTPAINT_PAGE__?: OutpaintPageBridge;
+                      }).__FISHERAI_CANVAS_OUTPAINT_PAGE__;
+                      if (page && typeof page.open === 'function' && page.open(node)) {
+                        setOutpaintOpen(false);
+                        return;
+                      }
                       setOutpaintOpen(!outpaintOpen);
                     }}
                     className={buttonClass}

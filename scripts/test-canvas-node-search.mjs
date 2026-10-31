@@ -444,14 +444,30 @@ check('未打开时页面上没有搜索面板', !panel());
     const node = (await savedNodes()).find((item) => item.id === image?.id);
     return node ?? null;
   });
+  // 用户 2026-10-30：「添加节点的时候节点位置不会以鼠标为中心点」—— 现在左上角按卡片尺寸
+  // 前移半个宽高，**卡片中心**落在指针上（桥接层把这次的换算结果留在 window 上供回归核对）。
+  const centered = window.__DSH_NODE_CREATE_CENTER__;
   check(
-    '新节点落在鼠标那个位置（画布坐标，允许节点尺寸带来的取整差）',
-    saved && Math.abs(Number(saved.x) - 200) <= 12 && Math.abs(Number(saved.y) - 150) <= 12,
-    JSON.stringify({ x: saved?.x, y: saved?.y }),
+    '新节点以鼠标为中心放下（卡片中心 = 鼠标点）',
+    Boolean(centered) &&
+      Math.abs(centered.point.x - 200) <= 1 &&
+      Math.abs(centered.point.y - 150) <= 1 &&
+      Math.abs(centered.x + centered.width / 2 - 200) <= 1 &&
+      Math.abs(centered.y + centered.height / 2 - 150) <= 1,
+    JSON.stringify({ centered, saved: { x: saved?.x, y: saved?.y } }),
+  );
+  check(
+    '存盘的左上角就是桥接层算出来的那个（允许取整差）',
+    saved &&
+      Math.abs(Number(saved.x) - Number(centered?.x)) <= 1 &&
+      Math.abs(Number(saved.y) - Number(centered?.y)) <= 1,
+    JSON.stringify({ saved: { x: saved?.x, y: saved?.y }, centered: centered && { x: centered.x, y: centered.y } }),
   );
   check('新节点带着画布的默认模型（与右键菜单建出来的完全一样）', Boolean(saved?.imageModel), String(saved?.imageModel));
 
   // 「新建并移动」：节点先跟着鼠标走，下一次左键才放下
+  const followStartX = Number(saved?.x);
+  const followStartY = Number(saved?.y);
   const move = (x, y) =>
     window.dispatchEvent(new window.MouseEvent('pointermove', { bubbles: true, clientX: x, clientY: y }));
   move(400, 300); // 第一次只定基线
@@ -461,8 +477,10 @@ check('未打开时页面上没有搜索面板', !panel());
   const following = (await readCanvas()).find((node) => node.id === image?.id);
   check(
     '确认后节点跟着鼠标走（方向与位移都对：+40/+24，缩放 1）',
-    following && Math.abs(Number(following.x) - 240) <= 2 && Math.abs(Number(following.y) - 174) <= 2,
-    JSON.stringify({ x: following?.x, y: following?.y }),
+    following &&
+      Math.abs(Number(following.x) - (followStartX + 40)) <= 2 &&
+      Math.abs(Number(following.y) - (followStartY + 24)) <= 2,
+    JSON.stringify({ x: following?.x, y: following?.y, start: [followStartX, followStartY] }),
   );
 
   const drop = new window.MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 });
@@ -478,12 +496,14 @@ check('未打开时页面上没有搜索面板', !panel());
   const placed = (await readCanvas()).find((node) => node.id === image?.id);
   check(
     '左键放下后节点不再跟手',
-    placed && Math.abs(Number(placed.x) - 240) <= 2 && Math.abs(Number(placed.y) - 174) <= 2,
+    placed &&
+      Math.abs(Number(placed.x) - (followStartX + 40)) <= 2 &&
+      Math.abs(Number(placed.y) - (followStartY + 24)) <= 2,
     JSON.stringify({ x: placed?.x, y: placed?.y }),
   );
   const savedAfterDrop = await waitFor(async () => {
     const node = (await savedNodes()).find((item) => item.id === image?.id);
-    return node && Math.abs(Number(node.x) - 240) <= 2 ? node : null;
+    return node && Math.abs(Number(node.x) - (followStartX + 40)) <= 2 ? node : null;
   });
   check(
     '放下的位置会存盘（移动过程中不丢更新）',
@@ -558,16 +578,21 @@ check('未打开时页面上没有搜索面板', !panel());
   const toolbarNode = afterToolbarNodes.find(
     (node) => !beforeToolbarNodes.some((before) => before.id === node.id),
   );
+  // 落点回落到画布正中；节点以该点为中心（左上角 = 中心 − 半宽高）
+  const toolbarCentered = window.__DSH_NODE_CREATE_CENTER__;
   check(
-    '工具栏入口也能建节点（落点回落到画布正中）',
+    '工具栏入口也能建节点（落点回落到画布正中，卡片中心落在该点）',
     afterToolbarNodes.length === beforeToolbarNodes.length + 1 &&
       Boolean(toolbarNode) &&
-      Math.abs(Number(toolbarNode.x) - window.innerWidth / 2) <= 2 &&
-      Math.abs(Number(toolbarNode.y) - window.innerHeight / 2) <= 2,
+      Math.abs(Number(toolbarCentered?.point.x) - window.innerWidth / 2) <= 2 &&
+      Math.abs(Number(toolbarCentered?.point.y) - window.innerHeight / 2) <= 2 &&
+      Math.abs(Number(toolbarNode.x) + Number(toolbarCentered?.width) / 2 - window.innerWidth / 2) <= 2 &&
+      Math.abs(Number(toolbarNode.y) + Number(toolbarCentered?.height) / 2 - window.innerHeight / 2) <= 2,
     JSON.stringify({
       delta: afterToolbarNodes.length - beforeToolbarNodes.length,
       x: toolbarNode?.x,
       y: toolbarNode?.y,
+      centered: toolbarCentered && { point: toolbarCentered.point, width: toolbarCentered.width, height: toolbarCentered.height },
     }),
   );
   window.dispatchEvent(new window.MouseEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 }));

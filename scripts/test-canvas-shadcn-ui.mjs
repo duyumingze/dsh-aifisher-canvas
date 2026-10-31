@@ -809,14 +809,22 @@ const selectToolbarImageNode = async () => {
   const back = container.querySelector('[data-fisherai-back-to-library]');
   check('返回前头部还在（点击前状态正常）', Boolean(container.querySelector('.af-canvas-header')));
   back?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-  const dashboard = await waitFor(async () => {
-    if (container.querySelector('.af-canvas-header')) return null;
-    return /新建项目/.test(String(container.textContent ?? '')) ? container : null;
-  }, 8000);
+  /**
+   * v1.84：这个按钮从「onBack() 退出画布」改成打开页面层项目库（用户 2026-10-30 要的
+   * 「项目管理页」）。看板那条路仍然存在（品牌下拉 → 退出项目），B7 在
+   * test-project-archive.mjs 里验；这里只验新行为 + Esc 回来。
+   */
+  const page = await waitFor(async () => window.document.querySelector('[data-fisherai-page="projects"]'), 8000);
   check(
-    '点「返回项目库」真的回到项目列表（头部消失 + 看板「新建项目」出现）',
-    Boolean(dashboard),
-    String(container.textContent ?? '').replace(/\s+/g, ' ').slice(0, 80),
+    '点「返回项目库」打开页面层项目库（v1.84）',
+    Boolean(page) && Boolean(page?.querySelector('.afg-top')) && /新建项目/.test(String(page?.textContent ?? '')),
+    String(page?.querySelector('.afg-crumb-title')?.textContent ?? '(none)'),
+  );
+  window.document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await settle(240);
+  check(
+    'Esc 关掉项目库后回到画布（头部还在）',
+    Boolean(container.querySelector('.af-canvas-header')) && !window.document.querySelector('[data-fisherai-page]'),
   );
 }
 
