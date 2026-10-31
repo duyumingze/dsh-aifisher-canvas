@@ -194,7 +194,32 @@ check('生成中：诊断读数能看出挂了几个遮罩 / 多少个点',
   report.overlays === 1 && report.dots === 391,
   JSON.stringify(report));
 
+// 动画持续性（v1.88 修「一张静帧」）：200ms 内圆点的 r / 透明度必须真的在变
+const painted = () =>
+  [...overlay.querySelectorAll('.af-gen-dots circle')].map(
+    (circle) => `${circle.getAttribute('r')}|${circle.getAttribute('fill-opacity')}`,
+  );
+const dotsBefore = painted();
+await new Promise((done) => setTimeout(done, 200));
+const dotsAfter = painted();
+const moved = dotsAfter.filter((value, index) => value !== dotsBefore[index]).length;
+check('生成中：点阵真的在动（200ms 内过半圆点在变，不是一张静帧）',
+  dotsAfter.length === 391 && moved > dotsAfter.length * 0.5,
+  `${moved}/${dotsAfter.length}`);
+
+// 上一轮生成结束（遮罩摘掉、rAF 停）→ 下一轮生成开始：循环重启后必须立刻动。
+// 回归的是「ensureLoop 没清 lastPaint，time - lastPaint 一直为负，新点阵冻住上一轮的时长」。
 disposeDots();
+const disposeRestart = app.installCanvasGenerationDots();
+const resumeBefore = painted();
+await new Promise((done) => setTimeout(done, 200));
+const resumeAfter = painted();
+const resumed = resumeAfter.filter((value, index) => value !== resumeBefore[index]).length;
+check('生成中：停一轮再挂回来，点阵立刻恢复动画（不沿用上一轮的时间）',
+  resumed > resumeAfter.length * 0.5,
+  `${resumed}/${resumeAfter.length}`);
+
+disposeRestart();
 check('生成中：卸载后把自己插的层清干净',
   !overlay.querySelector('.af-gen-dots') && !overlay.querySelector('.af-gen-bar'));
 

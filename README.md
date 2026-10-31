@@ -1,4 +1,4 @@
-<p align="center"><img src="public/brand/duyumingze-lockup-h.svg" width="380" alt="渡雨鸣泽"></p>
+﻿<p align="center"><img src="public/brand/duyumingze-lockup-h.svg" width="380" alt="渡雨鸣泽"></p>
 
 <h1 align="center">dsh-aifisher-canvas</h1>
 
@@ -6,10 +6,10 @@
 一块专业级 AI 创作无限画布 —— 你说一句话，DSH 原生 Agent 在画布上替你搭好整条流水线；<br>
 而按下「生成」的那一下（费用授权），永远由你自己按。</p>
 
-**Version**: v1.87 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
+**Version**: v1.88 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v1.87.0-5eead4?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.88.0-5eead4?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/Node-%E2%89%A522.19-3c873a?style=flat-square" alt="node">
   <img src="https://img.shields.io/badge/React-19-61dafb?style=flat-square" alt="react">
   <img src="https://img.shields.io/badge/TypeScript-5.8-3178c6?style=flat-square" alt="typescript">

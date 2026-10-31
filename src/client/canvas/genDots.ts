@@ -13,11 +13,18 @@
  * 这一层挂在 `[data-fisherai-regeneration-overlay="true"]` 里当**兄弟节点**，
  * React 重渲染把我们的层冲掉时 MutationObserver 会补回来。
  *
- * 观感参数（和设计稿实测一致）：
- *   - 点距 20px，缺省 r=0.9 / alpha .025（几乎不可见）；
- *   - 噪波 = 2 octave value noise，坐标 x*0.012 + t*0.055（整片场随时间平移）；
- *   - smoothstep(0.38, 0.78) 拉对比 → 团块边界像 Blender 噪波纹理；
- *   - r = 0.9 + n*3.6，alpha = 0.025 + n*0.975；
+ * 2026-11-01 第二轮（用户原话）：「噪波点阵的动态效果，现在它是一张静帧，但是噪波的大小要发大一倍，
+ * 也就是让让发光放大的点阵与默认状态下的过度更平滑」。两件事：
+ *   ①「静帧」是真 bug：循环重启时没清 lastPaint，`time - lastPaint` 一直是负的，
+ *      点阵要冻住上一轮动画那么久（一次生成 30–60s）才恢复。ensureLoop 里重置 lastPaint。
+ *   ②噪波尺寸放大一倍 = NOISE_SCALE 减半（0.012→0.006，团块从约 83px 变约 166px），
+ *      同时把对比区间从 0.32 宽拉到 0.50 宽，亮团到暗点的过渡才不硬边。
+ *
+ * 观感参数（2026-11-01 现用）：
+ *   - 点距 20px，缺省 r=0.9 / alpha .03（几乎不可见）；
+ *   - 噪波 = 2 octave value noise，坐标 x*0.006 + t*0.12（整片场随时间平移，约 20px/s，肉眼能看出在飘）；
+ *   - smoothstep(0.40, 0.90) 拉对比 → 团块边界像 Blender 噪波纹理，但留软过渡；
+ *   - r = 0.9 + n*3.2，alpha = 0.03 + n*0.85；
  *   - 发光靠 SVG 根的 drop-shadow（见 skin.ts），不做整层呼吸。
  *
  * 性能：391 点 × 若干节点，约 30fps；文档隐藏时停 rAF，prefers-reduced-motion 只画一帧。
@@ -29,12 +36,13 @@ const BASE_R = 0.9;
 const GROW_R = 3.2;
 const BASE_ALPHA = 0.03;
 const ALPHA_RANGE = 0.85;
-const NOISE_SCALE = 0.012;
-const X_SPEED = 0.055;
-const Y_SPEED = 0.021;
-/** 对比区间：设计稿是 0.38–0.78，真机上看亮区偏多，收紧到 0.52–0.84 后团块更稀缺、层次更像噪波纹理。 */
-const NOISE_LOW = 0.52;
-const NOISE_HIGH = 0.84;
+/** 噪声尺寸：0.006 = 团块直径约 166px（2026-11-01 用户要求「放大一倍」，原 0.012）。 */
+const NOISE_SCALE = 0.006;
+const X_SPEED = 0.12;
+const Y_SPEED = 0.045;
+/** 对比区间：0.40–0.90（宽 0.50）。区间越窄团块边界越硬；放大噪声后配合放宽，亮团→暗点是连续过渡。 */
+const NOISE_LOW = 0.4;
+const NOISE_HIGH = 0.9;
 const LAYER_CLASS = 'af-gen-dots';
 const BAR_CLASS = 'af-gen-bar';
 const OVERLAY_SELECTOR = '[data-fisherai-regeneration-overlay="true"]';
@@ -223,6 +231,10 @@ function ensureLoop(): void {
     return;
   }
   startedAt = performance.now();
+  // 上一轮循环停下时 lastPaint 停在上一轮的时间（可能 30–60s），不清掉的话
+  // `time - lastPaint` 会一直是负数，新一轮点阵要冻住同样长的时间才动 —— 用户看到的就是「一张静帧」。
+  lastPaint = -1;
+  for (const instance of instances.values()) paint(instance, 0.8);
   const tick = (now: number) => {
     frame = 0;
     if (disposed || instances.size === 0) return;

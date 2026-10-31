@@ -1,6 +1,6 @@
 {
   "name": "dsh-aifisher-canvas",
-  "version": "1.87.0",
+  "version": "1.88.0",
   "description": "把专业 AI 创作无限画布做成 DSH 插件：DSH 原生 Agent 通过 canvas_control 直接接管画布（建节点、连线、填参、整理素材），支持本地 ComfyUI 与多云端生成。",
   "keywords": [
     "dsh",
@@ -114,6 +114,8 @@
     "verify:upload": "node scripts/verify-live-channel-upload.mjs",
     "verify:skills": "node scripts/verify-live-skills.mjs",
     "verify:bundle": "node scripts/verify-live-canvas-bundle.mjs",
+    "verify:skin": "node scripts/verify-live-skin.mjs",
+    "verify:gen-dots": "node scripts/verify-live-gen-dots.mjs",
     "test:ui": "node scripts/test-canvas-ui-services.mjs",
     "test:grid": "node scripts/test-canvas-grid.mjs",
     "test:node-search": "node scripts/test-canvas-node-search.mjs",
