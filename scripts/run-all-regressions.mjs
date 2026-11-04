@@ -1,91 +1,34 @@
 /**
  * 全量回归：逐套跑，判绿只看 SUMMARY 行（`fail=0` 或 `SUMMARY PASS`）。
- * 用法：node .dsh-tmp/run-all-regressions.mjs
- * 说明：比 E: 的旧版多一套 test-canvas-workflow-library（v1.28 新增），
- *       再加 test-canvas-stack（v1.37：叠图切换）、test-canvas-outpaint（v1.38/v1.39：扩图）
- *       与 test-canvas-last-model（v1.40：新节点默认用上一次的模型），共 27 套。
- *       v1.41 没有新增套件（任务队列的层级护栏并进 test-canvas-task-queue，
- *       会话栏输入区贴底并进 test-canvas-chat-dock）。
+ *
+ * 用法：
+ *   node scripts/run-all-regressions.mjs          # 本机全量（57 套；有 Chrome 的话收口再跑 browser-check）
+ *   node scripts/run-all-regressions.mjs --ci     # 只跑 CI 标了 ci:true 的那几套（公开 runner 用）
+ *
+ * 套件清单只有一份：`scripts/suites.mjs`。以前这里自带一份硬编码顺序、package.json 又一份、
+ * CI 再一份，三份漂移之后 v1.88 的 `test-canvas-skin` 谁都没跑（2026-11-04 发现）。
  */
 import { spawnSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { existsSync } from 'node:fs';
+import { SUITES } from './suites.mjs';
 
 const node = process.execPath;
-const order = [
-  'smoke-contract.mjs',
-  'test-canvas-backend.mjs',
-  'test-canvas-render.mjs',
-  'test-panel-exit.mjs',
-  'test-canvas-chat-dock.mjs',
-  'test-canvas-agent.mjs',
-  'test-canvas-agent-chat.mjs',
-  'test-canvas-agent-speed.mjs',
-  'test-canvas-placement.mjs',
-  'test-canvas-digest.mjs',
-  'test-canvas-recipe.mjs',
-  'test-canvas-save.mjs',
-  'test-canvas-preview.mjs',
-  'test-canvas-events.mjs',
-  'test-canvas-memory.mjs',
-  'test-canvas-consistency.mjs',
-  'test-canvas-copilot.mjs',
-  'test-canvas-job.mjs',
-  'test-canvas-storyboard.mjs',
-  'test-canvas-references.mjs',
-  'test-canvas-generation.mjs',
-  'test-media-editing.mjs',
-  'test-canvas-library.mjs',
-  'test-custom-workflows.mjs',
-  'test-canvas-workflow-config.mjs',
-  'test-canvas-local-workflows.mjs',
-  'test-cloud-generation.mjs',
-  'test-ark-generation.mjs',
-  'test-ark-video.mjs',
-  'test-cloud-channels.mjs',
-  'test-canvas-cloud-generation.mjs',
-  'test-canvas-ui-services.mjs',
-  'test-canvas-grid.mjs',
-  'test-canvas-node-search.mjs',
-  'test-canvas-stack.mjs',
-  'test-canvas-video-history.mjs',
-  'test-canvas-video-references.mjs',
-  'test-canvas-video-frames.mjs',
-  // v1.68：进度条拖拽（整条轨道吃指针 / 1:1 跟手 / 节流 / 定位中）
-  'test-canvas-video-seek.mjs',
-  'test-canvas-knife.mjs',
-  // v1.70：调色节点（Color Grade）+ 全屏合成器
-  'test-canvas-compositor.mjs',
-  // v1.71：Shift+右键划选合并（同源线收进转接节点）
-  'test-canvas-reroute.mjs',
-  'test-canvas-outpaint.mjs',
-  'test-canvas-last-model.mjs',
-  'test-project-archive.mjs',
-  'test-canvas-data-dir.mjs',
-  'test-canvas-task-queue.mjs',
-  // v1.84：页面层（项目库卡片墙/列表 + 设置四分组 + host /projects 数据面）
-  'test-canvas-pages.mjs',
-  // v1.86：首屏「点一次就进画布」（别让看门把项目库弹回来）
-  'test-canvas-home.mjs',
-  // v1.87：拖入 .md/.txt → 文本节点（Markdown 本机转富文档）
-  'test-canvas-markdown.mjs',
-  'test-canvas-workflow-library.mjs',
-  'test-canvas-shadcn-ui.mjs',
-  'verify-canvas-ui.mjs',
-  'test-canvas-p2.mjs',
-  'test-canvas-crew.mjs',
-];
+const ciOnly = process.argv.includes('--ci');
+const order = SUITES.filter((suite) => (ciOnly ? suite.ci === true : true));
 
-const present = new Set(readdirSync('scripts'));
 let totalPass = 0;
 let bad = 0;
 const badNames = [];
-for (const name of order) {
-  if (!present.has(name)) {
+for (const suite of order) {
+  const file = suite.file;
+  const name = file.replace(/^scripts\//, '');
+  if (!existsSync(file)) {
     console.log(`MISSING ${name}`);
     bad += 1;
+    badNames.push(name);
     continue;
   }
-  const result = spawnSync(node, [`scripts/${name}`], {
+  const result = spawnSync(node, [file], {
     encoding: 'utf8',
     timeout: 900000,
   });
@@ -118,4 +61,8 @@ for (const name of order) {
     console.log(`OK   ${name.padEnd(34)} ${summary}`);
   }
 }
-console.log(`\nTOTAL pass=${totalPass} suites=${order.length} bad=${bad}${badNames.length ? ` (${badNames.join(', ')})` : ''}`);
+console.log(
+  `\nTOTAL pass=${totalPass} suites=${order.length}${ciOnly ? ' (ci)' : ''} bad=${bad}` +
+    `${badNames.length ? ` (${badNames.join(', ')})` : ''}`,
+);
+process.exitCode = bad === 0 ? 0 : 1;

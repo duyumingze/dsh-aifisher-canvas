@@ -2017,19 +2017,35 @@ const HOST_PAGE = `<!doctype html>
           /** 圆的外半边在节点框外面：旧实现按节点矩形判命中的地方 */
           outsideHalf: slots.length > 0 && slots[0].centerX - 6 < frameRect.left,
         };
-        // 源节点：用画布自己的建节点桥（与节点搜索同一条路）在左上放一张「图片生成」
+        // 源节点：用画布自己的建节点桥（与节点搜索同一条路）在左上放一张「图片生成」。
+        // v1.80 起这个桥的 point 是**卡片中心**（桥里按 nodeWidth/nodeHeight 反推左上角，
+        // 并写 window.__DSH_NODE_CREATE_CENTER__）—— 不能再按「左上角贴指针」找它。
+        const wanted = { x: origin.x - 900, y: origin.y + 80 };
         window.dispatchEvent(
           new CustomEvent('fisherai:add-canvas-node', {
-            detail: { type: 'Image', point: { x: origin.x - 900, y: origin.y + 80 } },
+            detail: { type: 'Image', point: wanted },
           }),
         );
         const sourceFrame = await portUntil(() => {
+          const created = window.__DSH_NODE_CREATE_CENTER__;
           const frames = [...document.querySelectorAll('[data-node-id]')];
           return (
             frames.find((frame) => {
               if (frame === targetFrame) return false;
               const point = portFramePoint(frame);
-              return point !== null && Math.abs(point.x - (origin.x - 900)) < 4;
+              if (point === null) return false;
+              if (created) {
+                const near =
+                  Math.abs(point.x - Number(created.x)) < 2 &&
+                  Math.abs(point.y - Number(created.y)) < 2;
+                if (near) return true;
+              }
+              // 兜底：拿不到读数时按中心语义反推
+              const rect = frame.getBoundingClientRect();
+              return (
+                Math.abs(point.x - (wanted.x - rect.width / 2)) < 24 &&
+                Math.abs(point.y - (wanted.y - rect.height / 2)) < 24
+              );
             }) || null
           );
         }, 8000);
@@ -3252,6 +3268,7 @@ const HOST_PAGE = `<!doctype html>
         Math.round(box.left + box.width / 2),
         Math.round(box.top + 16),
       );
+      const page = document.querySelector('[data-fisherai-page="settings"]');
       return {
         display: String(style.display || ''),
         inert: panel.hasAttribute('inert'),
@@ -3259,7 +3276,9 @@ const HOST_PAGE = `<!doctype html>
         height: Math.round(box.height),
         hitInsideQueue: Boolean(hit && panel.contains(hit)),
         hit: hit ? hit.tagName.toLowerCase() : null,
-        settingsOpen: Boolean(document.querySelector('[data-fisherai-settings="true"]')),
+        settingsOpen: Boolean(page),
+        pageRole: page ? String(page.getAttribute('role') || '') : '',
+        pageModal: page ? String(page.getAttribute('aria-modal') || '') : '',
       };
     };
     const buildQueueLayerScene = async () => {
@@ -3269,19 +3288,21 @@ const HOST_PAGE = `<!doctype html>
         await wait(1200);
         queueLayerSteps.before = queueLayerReport();
         window.dispatchEvent(new CustomEvent('fisherai:open-settings'));
-        const dialog = await until(
-          () => document.querySelector('[data-fisherai-settings="true"]'),
+        // v1.84 起设置是**页面层**（data-fisherai-page="settings"），旧的 vendor 设置对话框
+        // 已整块移除；页面打开时靠 html.afg-page-open 把画布 chrome 藏起来。
+        const page = await until(
+          () => document.querySelector('[data-fisherai-page="settings"]'),
           10000,
         );
-        if (!dialog) {
-          queueLayerSteps.error = 'no settings dialog';
+        if (!page) {
+          queueLayerSteps.error = 'no settings page';
           queueLayerSteps.done = true;
           return;
         }
         await wait(700);
         queueLayerSteps.during = queueLayerReport();
         // 截图取证：停在「设置 → 画布外观」这一屏（任务队列的位置就在右上角，一眼能看出来）
-        const tab = dialog.querySelector('[data-fisherai-settings-section="appearance"]');
+        const tab = page.querySelector('[data-fisherai-settings-nav="appearance"]');
         if (tab) tab.click();
         await wait(900);
         queueLayerSteps.duringAppearance = queueLayerReport();
@@ -7842,6 +7863,10 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
    * 这条只能真机验：面板在设置打开时必须 `display:none`（jsdom 没有 CSS 引擎），
    * 而且它原来占的那块像素不能再命中它自己（`elementFromPoint`，证明没浮在设置上面）。
    * 同时守两条反向契约：画布层上它得在场、关掉设置后它得回来（护栏不能把它永久藏掉）。
+   *
+   * v1.84 起设置换了形态：旧的 vendor 设置对话框整块移除，改成页面层
+   * `[data-fisherai-page="settings"]`，靠 `html.afg-page-open` 把画布 chrome 藏掉。
+   * 所以这里等的是页面根、验的是页面层的 role=dialog + aria-modal 契约。
    */
   if (label === 'queue-layers') {
     const scene = probe.queueLayers ?? {};
@@ -7858,9 +7883,9 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     report('打开设置后任务队列整块消失（display:none）',
       scene.during?.settingsOpen === true && scene.during?.display === 'none',
       JSON.stringify(scene.during ?? null));
-    report('打开设置后面板被浮层接管（带 inert，不是靠 z-index 遮住）',
-      scene.during?.inert === true,
-      String(scene.during?.inert));
+    report('打开设置后是页面层接管（role=dialog + aria-modal，不是靠 z-index 遮住）',
+      scene.during?.pageRole === 'dialog' && scene.during?.pageModal === 'true',
+      `role=${scene.during?.pageRole ?? '(none)'} modal=${scene.during?.pageModal ?? '(none)'}`);
     report('面板原来那块像素不再命中它自己（elementFromPoint 落在设置上）',
       scene.during?.hitInsideQueue === false,
       `hit=${scene.during?.hit ?? '(none)'}`);

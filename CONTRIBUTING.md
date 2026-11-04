@@ -92,10 +92,16 @@ pnpm check:contract          # 机器对账（秒级，不需要构建）
 pnpm typecheck               # src 零错误；vendor 是上游源码，不进门禁
 pnpm build:offline           # 需要产物才能跑的测试，先建一次
 node scripts/test-canvas-agent-tools.mjs   # 单套
-pnpm test                    # 全量：约 50 套 / 2600+ 项，5~10 分钟
+pnpm test                    # 全量 jsdom：57 套 / 3000+ 项，约 10 分钟
+pnpm test:full               # 收口用：typecheck + 契约对账 + 全量 + 真机 40 场，约 20 分钟
 ```
 
 判绿只认每套末尾的 `SUMMARY pass=N fail=0`（退出码同时为准）。
+
+**套件清单只有一份**：`scripts/suites.mjs`。加一套回归 = 在清单里加一行，本机全量、`pnpm test`、
+CI 立刻都能覆盖到；不要再往 `package.json` 里抄一遍清单（以前三份清单漂移，v1.88 新加的
+`test-canvas-skin` 就谁都没跑）。清单里标了 `ci: true` 的那几套由 CI 跑（ubuntu、无上游源码树、
+无 Chrome），没标的别往 CI 里加。
 
 真机校验（要开着 DSH，脚本自带浏览器）：
 
@@ -103,11 +109,14 @@ pnpm test                    # 全量：约 50 套 / 2600+ 项，5~10 分钟
 # PowerShell
 $env:DSH_WEB_URL = 'http://127.0.0.1:<GUI 端口>'
 node scripts/verify-live-canvas-bundle.mjs
+
+pnpm verify:browser                              # 真机全量 40 场
+$env:BROWSER_ONLY='workflow-node,queue-layers'; pnpm verify:browser   # 只跑几场
 ```
 
-**CI 覆盖什么**：类型门禁、契约对账、离线构建、产物契约、4 套核心回归（见
-`.github/workflows/ci.yml`）。它**不跑**完整回归与浏览器校验——那两条依赖上游源码树、ffmpeg 和
-真实页面，请在本地跑过再提 PR。
+**CI 覆盖什么**：类型门禁、契约对账、离线构建、产物契约、`pnpm test:ci`（清单里 `ci: true` 的
+核心回归）。它**不跑**完整回归与浏览器校验——那两条依赖上游源码树、ffmpeg 和真实页面，请在本地
+`pnpm test:full` 跑过再提 PR。
 
 ---
 
@@ -122,9 +131,13 @@ node scripts/verify-live-canvas-bundle.mjs
 ## 6. 发版
 
 1. 改 `package.json` 的 `version`（`vendor/package.json` 的版本号由构建自动对齐）。
-2. 在 `CHANGELOG.md` 顶部加一节（对外可见的行为变化 + 踩过的坑）。
-3. `pnpm build`（有上游源码时）或 `pnpm build:offline` → 跑全量 `pnpm test`。
+2. 在 `CHANGELOG.md` 顶部加一节（对外可见的行为变化 + 踩过的坑），标题写**真实版本号**，
+   不要留「未发布」（2026-11-04 清过一次 17 处）。
+3. `pnpm build`（有上游源码时）或 `pnpm build:offline` → 跑全量 `pnpm test:full`。
 4. 提交并推送；把 `lib/` 同步到实际安装目录（如果用 junction 安装就同步到那个目录）。
+5. 打 tag 并推上去：`git tag v1.xx <sha>` + `git push origin v1.xx`。同一个提交里攒了多个版本
+   （比如 v1.80–v1.86 一起上线）时，只在最后那版打 tag，并在 CHANGELOG 里写明「这几版一起上线」——
+   给同一提交打一排 tag 只会伪造精确度。
 
 ---
 

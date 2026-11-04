@@ -2,8 +2,10 @@ name: ci
 
 # 公开 CI 只跑「不需要上游 AIFISHER 源码树」的那部分：
 #   - 类型门禁、契约三处对账、离线构建（用仓库里已提交的 vendor/）、产物契约、核心回归。
-#   - 完整回归（55 套 / 2600+ 项）与真机浏览器校验仍在本机跑：它们依赖上游源码、ffmpeg
-#     与真实 DSH 页面，不适合放进公开 runner。见 CONTRIBUTING.md「测试」一节。
+#   - 核心回归的名单在 scripts/suites.mjs 里（`ci: true` 那几套），别再往这里抄清单。
+#   - 完整回归（57 套 / 3100+ 项）与真机浏览器校验仍在本机跑：它们依赖上游源码、
+#     ffmpeg 与真实 DSH 页面，不适合放进公开 runner。本地一条 `pnpm test:full` 跑完。
+#     见 CONTRIBUTING.md「测试」一节。
 
 on:
   push:
@@ -42,9 +44,5 @@ jobs:
       - name: 产物契约（client 半能被 ModuleLoader 加载、面板出口还在）
         run: node scripts/smoke-contract.mjs
 
-      - name: 核心回归（画布工具 / 记忆 / 摘要 / 引用）
-        run: |
-          node scripts/test-canvas-agent-tools.mjs
-          node scripts/test-canvas-memory.mjs
-          node scripts/test-canvas-digest.mjs
-          node scripts/test-canvas-references.mjs
+      - name: 核心回归（清单里标了 ci: true 的那几套）
+        run: pnpm test:ci
