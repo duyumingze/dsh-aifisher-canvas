@@ -4,8 +4,8 @@
  * 用户 2026-10-30 原话：「无限画布ui设计要包含设置页、图像编辑页、扩图页的等」；
  * 2026-10-31 拍板三件事：
  *   ① 侧栏「设置」直接开这一页；
- *   ② 设计稿里只有一项真实现的（主题另两款、生成中 V1/V3、动效 G1/G3、并发生成数）
- *      **置灰 + 挂「设计稿」标签**，页面不撒谎；
+ *   ② 设计稿里只有一项真实现的（主题另两款、生成中 V1/V3、动效 G1/G3）
+ *      **置灰 + 挂「设计稿」标签**，页面不撒谎（并发生成数在 v1.90 已接线，不再置灰）；
  *   ③ 旧版设置对话框（个人设置 / 画布外观 / 开源服务 / 闭源服务 / 存储 / 关于）
  *      **整块移除**，里面还在用的面板搬进这一页 —— 开源服务 / 闭源服务在「服务与通道」，
  *      下载目录与项目数据目录在「项目与数据」，个人资料与检查更新在「高级与关于」。
@@ -40,6 +40,11 @@ import {
 } from 'lucide-react';
 
 import { CanvasPageShellView } from './CanvasPageShell';
+import {
+  readGenerationConcurrency,
+  stepGenerationConcurrency,
+  subscribeGenerationConcurrency,
+} from './CanvasGenerationConcurrency';
 import {
   closeCanvasPage,
   currentCanvasPage,
@@ -202,6 +207,7 @@ export function CanvasSettingsPage(react: Runtime, props: CanvasSettingsPageProp
   const [lastModels, setLastModels] = react.useState({ image: '', video: '' });
   const [profileName, setProfileName] = react.useState('');
   const [avatarUrl, setAvatarUrl] = react.useState('');
+  const [concurrency, setConcurrency] = react.useState(readGenerationConcurrency());
   const toastTimer = react.useRef<number | null>(null);
 
   const say = react.useCallback((message: string) => {
@@ -230,6 +236,21 @@ export function CanvasSettingsPage(react: Runtime, props: CanvasSettingsPageProp
     void reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, pageKey]);
+
+  /** 并发生成数（v1.90）：设置页与画布应用共用 localStorage 里的同一个键。 */
+  react.useEffect(() => subscribeGenerationConcurrency(() => setConcurrency(readGenerationConcurrency())), []);
+  react.useEffect(() => {
+    if (open) setConcurrency(readGenerationConcurrency());
+  }, [open, pageKey]);
+
+  const changeConcurrency = react.useCallback(
+    (delta: number) => {
+      const value = stepGenerationConcurrency(delta);
+      setConcurrency(value);
+      say(`并发生成数：${value} 路`);
+    },
+    [say],
+  );
 
   /**
    * 旧对话框搬过来的面板（v1.85）：打开这一页才挂，关掉就卸。
@@ -937,24 +958,50 @@ export function CanvasSettingsPage(react: Runtime, props: CanvasSettingsPageProp
   const concurrencyRow = visible('并发生成数', '显存 同时生成') &&
     h(
       'div',
-      { className: 'afs-row', key: 'concurrency' },
+      {
+        className: 'afs-row',
+        key: 'concurrency',
+        'data-fisherai-settings-concurrency': String(concurrency),
+      },
       h(
         'div',
         { className: 'afs-row-main' },
         h('div', { className: 'afs-row-t' }, '并发生成数'),
-        h('div', { className: 'afs-row-h' }, '受显存限制；当前版本按节点逐个排队，还没有并发队列'),
+        h(
+          'div',
+          { className: 'afs-row-h' },
+          '一批生成时同时提交几个节点（1–3，默认 2）；单张生成不受影响，任一失败会立刻停掉后面的',
+        ),
       ),
       h(
         'div',
         { className: 'afs-row-ctl' },
         h(
           'div',
-          { className: 'afs-stepper', 'aria-disabled': true, title: '设计稿：还没有并发队列' },
-          h('button', { type: 'button', disabled: true }, h(MinusIcon, {})),
-          h('span', { className: 'afs-v' }, '1'),
-          h('button', { type: 'button', disabled: true }, h(PlusIcon, {})),
+          { className: 'afs-stepper' },
+          h(
+            'button',
+            {
+              type: 'button',
+              'aria-label': '减少并发生成数',
+              disabled: concurrency <= 1,
+              onClick: () => changeConcurrency(-1),
+            },
+            h(MinusIcon, {}),
+          ),
+          h('span', { className: 'afs-v' }, String(concurrency)),
+          h(
+            'button',
+            {
+              type: 'button',
+              'aria-label': '增加并发生成数',
+              disabled: concurrency >= 3,
+              onClick: () => changeConcurrency(1),
+            },
+            h(PlusIcon, {}),
+          ),
         ),
-        h('span', { className: 'afs-draft' }, '设计稿'),
+        h('span', { className: 'afs-draft' }, '本机'),
       ),
     );
 

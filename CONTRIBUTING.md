@@ -92,8 +92,8 @@ pnpm check:contract          # 机器对账（秒级，不需要构建）
 pnpm typecheck               # src 零错误；vendor 是上游源码，不进门禁
 pnpm build:offline           # 需要产物才能跑的测试，先建一次
 node scripts/test-canvas-agent-tools.mjs   # 单套
-pnpm test                    # 全量 jsdom：57 套 / 3000+ 项，约 10 分钟
-pnpm test:full               # 收口用：typecheck + 契约对账 + 全量 + 真机 40 场，约 20 分钟
+pnpm test                    # 全量 jsdom：58 套 / 3000+ 项，约 10 分钟
+pnpm test:full               # 收口用：typecheck + 契约对账 + 全量 + 真机 41 场，约 20 分钟
 ```
 
 判绿只认每套末尾的 `SUMMARY pass=N fail=0`（退出码同时为准）。
@@ -110,7 +110,7 @@ CI 立刻都能覆盖到；不要再往 `package.json` 里抄一遍清单（以�
 $env:DSH_WEB_URL = 'http://127.0.0.1:<GUI 端口>'
 node scripts/verify-live-canvas-bundle.mjs
 
-pnpm verify:browser                              # 真机全量 40 场
+pnpm verify:browser                              # 真机全量 41 场
 $env:BROWSER_ONLY='workflow-node,queue-layers'; pnpm verify:browser   # 只跑几场
 ```
 

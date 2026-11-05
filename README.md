@@ -6,10 +6,10 @@
 一块专业级 AI 创作无限画布 —— 你说一句话，DSH 原生 Agent 在画布上替你搭好整条流水线；<br>
 而按下「生成」的那一下（费用授权），永远由你自己按。</p>
 
-**Version**: v1.89 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
+**Version**: v1.90 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v1.89.0-5eead4?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.90.0-5eead4?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/Node-%E2%89%A522.19-3c873a?style=flat-square" alt="node">
   <img src="https://img.shields.io/badge/React-19-61dafb?style=flat-square" alt="react">
   <img src="https://img.shields.io/badge/TypeScript-5.8-3178c6?style=flat-square" alt="typescript">
@@ -260,7 +260,7 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
 | 测试 | 类型门禁（`pnpm typecheck`）+ 55 套 jsdom 契约测试（3000+ 项）+ 真机浏览器视觉校验（`browser-check` / `verify-live-*`） |
 
 <details>
-<summary><b>实现细节与版本日志（v1.58 – v1.89）</b> —— 每个版本改了什么、踩了什么坑</summary>
+<summary><b>实现细节与版本日志（v1.58 – v1.90）</b> —— 每个版本改了什么、踩了什么坑</summary>
 
 ### 数据与保存
 
@@ -297,6 +297,10 @@ vendor/aifisher/        # 上游 AIFISHER 源码树，零修改
 ### 文本节点 / Markdown（v1.87）
 
 - 拖入 `.md` 直接成节点 v1.87（2026-11-01）：用户「现在画布里的文本节点不兼容 .md 格式的文件，导入 .md 文件内容格式完全不正确。可以做一个能直接拖入 .md 文件到画布生成文本节点」。两个病根：① 画布 `onDrop` 的唯一去处是 `upload()`，`classifyMedia()` 只认图片/视频/音频，`.md` 直接被弹「无法识别的文件类型」；② 文本节点的「导入文本」把文件送 host 的 `/agent/drama/script` 解析，拿回的是**纯文本**，`##`／`-`／`**` 全成了字面量。现在 ① 在 **window 捕获阶段**接管画布范围内的文本文件（`md markdown mdx …` 走 Markdown，`txt csv json yaml srt …` 按行成段，单份 2 MB 上限，空文件只提示不建节点，多份斜向错开），落点换算与节点搜索同一套，节点以指针为中心；② 新增 `textDocumentFromMarkdown()` 转换器（源码 `scripts/vendor-patches/text-document-markdown.ts`，构建期追加到 vendor 的 `text/textDocument.ts`）把标题 1–3 / 嵌套清单 / 有序清单 `start` / 引用 / 围栏代码块 / 分隔线 / 管道表格 / 加粗·斜体·删除线·行内代码 / 链接取文字 / 转义 / 硬换行 / front matter 丢弃 / CRLF 翻成 tiptap 文档，「导入文本」的 `.md` 也改走本机 FileReader + 同一个转换器（替换 / 追加与确认框都带富文档）。落库仍是 `createTextDocumentPatch()` 一次算出的 `textContent`（干净纯文本，给模型读）+ `textRichContent`（排版）。vendor 补丁 11 处锚点 + 1 段追加，新增 `scripts/test-canvas-markdown.mjs` 48 项。说明见 [docs/markdown-text-nodes.md](docs/markdown-text-nodes.md)。
+
+### 生成并发（v1.90）
+
+- 一批生成同时跑 2 路 v1.90（2026-11-05）：用户「生成并发 2–3 路」。上游 batch approve 是逐个 `await`，一批 8 张要串 8 次等；现在提交段换成**有界并发池**（1–3 路，默认 2，设置页「并发生成数」可改，存本机 localStorage）。语义只改「同时跑几条」：带 `dependsOn` 的条目仍等上游成功后再重新准备请求；任一条失败立刻停止派发新条目、在飞的跑完（不额外花钱），其余标 stopped。实现是**整文件覆盖** `scripts/patches/aifisher/src/stable/agent/canvasCreationControl.ts`（只换 approve 提交段，其余一字不改）；生成确认卡上显示「并发 N 路」。回归 `scripts/test-canvas-generation-concurrency.mjs` 16 项（并发池上限/依赖门控/失败即停 + 真画布 3 节点一批只发 2 次请求）。
 
 ### 文本节点（v1.89）
 

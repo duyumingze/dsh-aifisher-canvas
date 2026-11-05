@@ -6,6 +6,27 @@
 > 对不上的（v1.70–v1.76 调色面板迭代、v1.82–v1.83 整页扩图）按批次合并并保留日期，
 > 不再写「未发布」这种既不是版本也不是日期的标题。
 
+## v1.90.0 — 2026-11-05
+
+### 批量生成并发 2–3 路（设置页「并发生成数」终于不再是设计稿）
+
+用户原话（2026-11-05）：「生成并发 2–3 路」。
+
+上游的「确认本批生成与费用」是**逐个提交、逐个等**（`for (const [index, item] of batch.items.entries())` 里 `await generate(...)`），
+一批 8 张就是 8 次串行等待；设置页里「并发生成数」一直是灰的「设计稿」。
+
+- **有界并发池**：一批里同时最多 1–3 条在飞（默认 2），带 `dependsOn` 的条目仍等上游成功后再按新结果
+  重新准备请求；**任一条失败立刻停止派发新条目**，在飞的跑完为止（不额外花钱），其余标 `stopped` ——
+  花费语义与原来「失败就 break」一致。
+- **设置页接线**：「并发生成数」改成真步进器（1–3），存本机 `localStorage`
+  （`dsh-aifisher-canvas.generation-concurrency`），改完立刻对下一批生效；画布应用与设置页共用一个键。
+- **确认卡**：标题行显示「并发 N 路」，卡上加 `data-fisherai-generation-concurrency` 便于真机取证。
+- **实现方式**：整文件覆盖 `scripts/patches/aifisher/src/stable/agent/canvasCreationControl.ts`
+  （只换 approve 的提交段，prepareGeneration / 支出授权 / journal / restore / cancel 一字不改）；
+  窗口上挂 `__FISHERAI_CANVAS_BATCH_POOL__`（run / limit）供回归直接驱动并发池。
+- **回归**：新增 `scripts/test-canvas-generation-concurrency.mjs` 16 项 —— 并发池上限 / 依赖门控 /
+  失败即停 / 并发数读写夹取 / 确认卡读数 / 真画布 3 节点一批「同时最多 2 个请求在飞、失败后第 3 个不再提交」。
+
 ## v1.89.0 — 2026-11-01
 
 ### 文本节点全屏预览（只读）+ 修正「拖一次 .md 生成两个一样的节点」

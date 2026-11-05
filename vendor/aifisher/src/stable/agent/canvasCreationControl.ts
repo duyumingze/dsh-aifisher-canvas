@@ -1,3 +1,14 @@
+/**
+ * ⚠️ 整文件覆盖（v1.90 起，scripts/patches/aifisher 机制）—— 上游 AIFISHER 的这个文件没有
+ *    「批量生成并发」的概念：approve() 里 `for (const [index, item] ...)` 逐个 await，一笔 8 张要
+ *    串 8 次等。这里只换掉提交段为「有界并发池（1–3 路，默认 2）」，其余（prepareGeneration /
+ *    approve 的支出授权语义 / journal / restore / cancel）一字不改。
+ *
+ * 为什么整文件覆盖而不是锚点补丁：要换的是 50 行带依赖链的控制流，锚点补丁会变成一团
+ * 没人敢改的正则。覆盖发生在所有正则改写之后（3.9 段），所以本文件里的 URL/文案不会再被改一遍。
+ *
+ * 上游升级时请重新对照：只保留 approve 的提交段差异，别把上游新逻辑丢掉。
+ */
 import { IMAGE_MODELS, VIDEO_MODELS, AUDIO_MODELS, TEXT_MODELS } from '../../config/modelConfig';
 import {
   prepareCanvasGenerationRequest,
@@ -67,6 +78,112 @@ const generatedFields = new Set(['status', 'resultUrl', 'resultUrls', 'currentRe
 function configuration(node: CanvasNode) {
   return JSON.stringify(Object.fromEntries(Object.entries(node).filter(([key]) => !generatedFields.has(key) && !(node.type === 'Video' && key === 'aspectRatio'))));
 }
+
+/** 「并发生成数」的 localStorage 键：设置页（canvas-ui 半）与画布（vendor 半）共用一个字符串。 */
+export const BATCH_CONCURRENCY_STORAGE_KEY = 'dsh-aifisher-canvas.generation-concurrency';
+export const BATCH_CONCURRENCY_DEFAULT = 2;
+export const BATCH_CONCURRENCY_MAX = 3;
+
+/**
+ * 读并发生成数：1–3，读不到/存坏了一律回默认 2。
+ * 为什么是 localStorage 而不是 host 配置：只影响这台机器的排队方式，跟项目数据无关；
+ * 而且画布应用与设置页是两个 bundle，字符串键是它们唯一稳的共享点。
+ */
+export function readBatchConcurrency(): number {
+  try {
+    const raw = (globalThis as { localStorage?: Storage }).localStorage?.getItem(
+      BATCH_CONCURRENCY_STORAGE_KEY,
+    );
+    const value = Number.parseInt(String(raw ?? ''), 10);
+    if (Number.isFinite(value)) return Math.min(BATCH_CONCURRENCY_MAX, Math.max(1, value));
+  } catch {
+    /* localStorage 被禁（隐私模式）→ 用默认值，不报错 */
+  }
+  return BATCH_CONCURRENCY_DEFAULT;
+}
+
+export type BatchPoolReadiness = 'ready' | 'waiting' | 'blocked';
+
+export interface BatchPoolOptions {
+  indexes: number[];
+  limit: number;
+  /** 这一条现在能不能跑：有依赖还没成功的返回 waiting。 */
+  ready: (index: number) => BatchPoolReadiness;
+  /** 被跳过（依赖失败 / 并发池提前停止）时怎么收尾。 */
+  blocked: (index: number) => void;
+  /** 真正提交一条：返回 true = 成功，false = 失败（会触发 fail-fast）。 */
+  run: (index: number) => Promise<boolean>;
+}
+
+/**
+ * 有界并发池（v1.90）：
+ *   - 同时最多 limit 条在飞；
+ *   - 依赖没就绪的条目先排着，等上游成功后由新一轮 pump 捞起来（不等别的批次）；
+ *   - 只要有任意一条失败就**立刻停止派发新条目**，在飞的跑完为止（不额外花钱），
+ *     剩下的交给 blocked() 标 stopped —— 与原来「失败就 break」的花费语义一致。
+ * 抽成纯函数是为了能单测：窗口上挂了 __FISHERAI_CANVAS_BATCH_POOL__（见文件末尾）。
+ */
+export async function runBatchPool(options: BatchPoolOptions): Promise<void> {
+  const limit = Math.max(1, Math.trunc(options.limit) || 1);
+  const pending = new Set(options.indexes);
+  const running = new Set<Promise<void>>();
+  let stopped = false;
+  await new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+    const pump = () => {
+      if (!stopped) {
+        for (const index of [...pending]) {
+          if (running.size >= limit) break;
+          const state = options.ready(index);
+          if (state === 'blocked') {
+            pending.delete(index);
+            options.blocked(index);
+            continue;
+          }
+          if (state !== 'ready') continue;
+          pending.delete(index);
+          const task: Promise<void> = options
+            .run(index)
+            .then((ok) => {
+              if (!ok) stopped = true;
+            })
+            .catch(() => {
+              stopped = true;
+            })
+            .then(() => {
+              running.delete(task);
+              pump();
+            });
+          running.add(task);
+        }
+      }
+      if (running.size === 0 && (stopped || pending.size === 0)) finish();
+    };
+    pump();
+  });
+  if (stopped) {
+    for (const index of [...pending]) {
+      pending.delete(index);
+      options.blocked(index);
+    }
+  }
+}
+
+if (typeof window !== 'undefined') {
+  (window as { __FISHERAI_CANVAS_BATCH_POOL__?: unknown }).__FISHERAI_CANVAS_BATCH_POOL__ = {
+    run: runBatchPool,
+    limit: readBatchConcurrency,
+    key: BATCH_CONCURRENCY_STORAGE_KEY,
+    defaultLimit: BATCH_CONCURRENCY_DEFAULT,
+    maxLimit: BATCH_CONCURRENCY_MAX,
+  };
+}
+
 export function createCanvasCreationControl(
   execute: CanvasActionHandler,
   getRuntime: () => Runtime | null,
@@ -320,56 +437,123 @@ export function createCanvasCreationControl(
     try {
       if (!batch.items.every((_, index) => unchanged(index))) return;
       if (journal && entry.record) entry.record = await journal.claim(entry.record);
-      for (const [index, item] of batch.items.entries()) {
-        if (!unchanged(index)) break;
-        if (item.dependsOn?.length) {
-          const runtime = getRuntime()!, nodes = runtime.nodes(), target = nodes.find(node => node.id === item.nodeId)!;
-          requests[index] = JSON.stringify(await prepareCanvasGenerationRequest(nodes, target, batch.projectId, models));
-          if (!unchanged(index)) break;
+
+      // ---- v1.90：并发提交（1–3 路，默认 2）----
+      // journal 的 record 是 revision 乐观并发，几条同时写会互撞 —— 串成一条队列再发。
+      let journalTail: Promise<void> = Promise.resolve();
+      const journalStep = (task: () => Promise<void>): Promise<void> => {
+        journalTail = journalTail.then(task, task).catch(() => undefined);
+        return journalTail;
+      };
+      const readiness = (index: number): BatchPoolReadiness => {
+        const deps = batch.items[index].dependsOn ?? [];
+        if (deps.length === 0) return 'ready';
+        let waiting = false;
+        for (const depId of deps) {
+          const depIndex = batch.items.findIndex((candidate) => candidate.nodeId === depId);
+          if (depIndex < 0) return 'blocked';
+          const state = batch.items[depIndex].state;
+          if (state === 'success') continue;
+          if (state === 'pending' || state === 'submitted') waiting = true;
+          else return 'blocked';
         }
-        const originalNode = getRuntime()!.nodes().find(node => node.id === item.nodeId)!;
-        let submitted = false;
-        await getRuntime()!.generate(item.nodeId, {
-          authorizationId,
-          planId: journal ? batch.id : undefined,
-          valid: () => unchanged(index),
-          request: requests[index],
-          reserve: async attemptId => {
-            if (journal && entry.record) entry.record = await journal.record(entry.record, item.nodeId, 'submitted', attemptId);
-          },
-          submitted: () => {
-            submitted = true;
-            item.state = 'submitted';
+        return waiting ? 'waiting' : 'ready';
+      };
+      await runBatchPool({
+        indexes: batch.items.map((_, index) => index),
+        limit: readBatchConcurrency(),
+        ready: readiness,
+        blocked: (index) => {
+          const item = batch.items[index];
+          if (item.state === 'pending') item.state = 'stopped';
+          publish();
+        },
+        run: async (index) => {
+          const item = batch.items[index];
+          if (!unchanged(index)) {
+            item.state = 'stopped';
             publish();
-          },
-        });
-        const node =
-          getRuntime()?.projectId === batch.projectId
-            ? getRuntime()!
-                .nodes()
-                .find((node) => node.id === item.nodeId)
-            : undefined;
-        item.state = !submitted
-          ? 'stopped'
-          : node?.status === 'success' && !node.generationAttemptId
-            ? 'success'
-            : node?.status === 'error' && !node.generationAttemptId
-              ? 'failed'
-              : 'unconfirmed';
-        if (item.state === 'success' && node) {
-          if (configuration(originalNode) !== configuration(node)) break;
-          for (let next = index + 1; next < batch.items.length; next++) {
-            const expected: CanvasNode[] = JSON.parse(signatures[next]);
-            signatures[next] = JSON.stringify(expected.map(input => input.id === item.nodeId ? node : input));
+            return false;
           }
-        }
-        publish();
-        if (journal && entry.record) {
-          const persisted = entry.record.items.find(candidate => candidate.nodeId === item.nodeId);
-          if (persisted?.state === 'submitted') entry.record = await journal.record(entry.record, item.nodeId, ['success', 'failed'].includes(item.state) ? item.state : 'unconfirmed');
-        }
-        if (item.state !== 'success') break;
-      }
+          try {
+            if (item.dependsOn?.length) {
+              const runtime = getRuntime()!;
+              const nodes = runtime.nodes();
+              const target = nodes.find((node) => node.id === item.nodeId)!;
+              requests[index] = JSON.stringify(
+                await prepareCanvasGenerationRequest(nodes, target, batch.projectId, models),
+              );
+              if (!unchanged(index)) {
+                item.state = 'stopped';
+                publish();
+                return false;
+              }
+            }
+            const originalNode = getRuntime()!.nodes().find((node) => node.id === item.nodeId)!;
+            let submitted = false;
+            await getRuntime()!.generate(item.nodeId, {
+              authorizationId,
+              planId: journal ? batch.id : undefined,
+              valid: () => unchanged(index),
+              request: requests[index],
+              reserve: async (attemptId) => {
+                await journalStep(async () => {
+                  if (journal && entry.record)
+                    entry.record = await journal.record(entry.record, item.nodeId, 'submitted', attemptId);
+                });
+              },
+              submitted: () => {
+                submitted = true;
+                item.state = 'submitted';
+                publish();
+              },
+            });
+            const node =
+              getRuntime()?.projectId === batch.projectId
+                ? getRuntime()!
+                    .nodes()
+                    .find((candidate) => candidate.id === item.nodeId)
+                : undefined;
+            item.state = !submitted
+              ? 'stopped'
+              : node?.status === 'success' && !node.generationAttemptId
+                ? 'success'
+                : node?.status === 'error' && !node.generationAttemptId
+                  ? 'failed'
+                  : 'unconfirmed';
+            if (item.state === 'success' && node) {
+              if (configuration(originalNode) !== configuration(node)) {
+                publish();
+                return false;
+              }
+              for (let next = index + 1; next < batch.items.length; next++) {
+                const expected: CanvasNode[] = JSON.parse(signatures[next]);
+                signatures[next] = JSON.stringify(
+                  expected.map((input) => (input.id === item.nodeId ? node : input)),
+                );
+              }
+            }
+            publish();
+            await journalStep(async () => {
+              if (!journal || !entry.record) return;
+              const persisted = entry.record.items.find(
+                (candidate) => candidate.nodeId === item.nodeId,
+              );
+              if (persisted?.state === 'submitted')
+                entry.record = await journal.record(
+                  entry.record,
+                  item.nodeId,
+                  ['success', 'failed'].includes(item.state) ? item.state : 'unconfirmed',
+                );
+            });
+            return item.state === 'success';
+          } catch {
+            item.state = 'stopped';
+            publish();
+            return false;
+          }
+        },
+      });
     } catch {
       /* No retry. Original generation attempt/recovery remains authoritative. */
     } finally {

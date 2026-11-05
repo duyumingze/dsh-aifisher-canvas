@@ -2,7 +2,7 @@
  * 全量回归：逐套跑，判绿只看 SUMMARY 行（`fail=0` 或 `SUMMARY PASS`）。
  *
  * 用法：
- *   node scripts/run-all-regressions.mjs          # 本机全量（57 套；有 Chrome 的话收口再跑 browser-check）
+ *   node scripts/run-all-regressions.mjs          # 本机全量（58 套；有 Chrome 的话收口再跑 browser-check）
  *   node scripts/run-all-regressions.mjs --ci     # 只跑 CI 标了 ci:true 的那几套（公开 runner 用）
  *
  * 套件清单只有一份：`scripts/suites.mjs`。以前这里自带一份硬编码顺序、package.json 又一份、

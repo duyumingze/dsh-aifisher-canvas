@@ -2750,6 +2750,12 @@ const HOST_PAGE = `<!doctype html>
      * 顺带量出「当前目录 / 默认目录 / 是否等重启」三个读数（真机上这些值来自 host 的 /data-dir）。
      */
     const dataDirScene = new URLSearchParams(location.search).get('ddir') === '1';
+    /**
+     * 设置 →「生成 → 并发生成数」的取证场景（?conc=1，v1.90）。
+     * 这一项以前是灰的「设计稿」；现在真的接上了 1–3 步进器 + 本机 localStorage，
+     * 这里在真浏览器里量：打开设置 → 切生成 → 点步进器 → 读写真的变了（截图 = 交付图）。
+     */
+    const concScene = new URLSearchParams(location.search).get('conc') === '1';
     const settingsProbe = { opened: false, sections: {} };
     /**
      * 设置页（v1.85）：旧版 vendor 设置对话框已移除，fisherai:open-settings 被装配层
@@ -2793,7 +2799,7 @@ const HOST_PAGE = `<!doctype html>
       };
     };
     const walkSettings = async () => {
-      if (!settingsScene && !effectsScene && !channelsScene && !dataDirScene) return;
+      if (!settingsScene && !effectsScene && !channelsScene && !dataDirScene && !concScene) return;
       await wait(1500);
       window.dispatchEvent(new CustomEvent('fisherai:open-settings'));
       await wait(1400);
@@ -2868,6 +2874,53 @@ const HOST_PAGE = `<!doctype html>
           width: box ? Math.round(box.width) : 0,
           height: box ? Math.round(box.height) : 0,
           text: panelEl ? String(panelEl.innerText || '').replace(/\\s+/g, ' ').slice(0, 240) : '',
+        };
+        return;
+      }
+      if (concScene) {
+        // v1.90「并发生成数」：切到「生成」分组，把步进器从当前值拉到 1 再拉到 3，
+        // 每一步都读回 DOM 与 localStorage —— 证明它不再是设计稿，而且真的落盘。
+        nav('generation');
+        const row = await until(
+          () => root.querySelector('[data-fisherai-settings-concurrency]'),
+          8000,
+        );
+        await wait(500);
+        const readRow = () =>
+          Number(row ? row.getAttribute('data-fisherai-settings-concurrency') : NaN);
+        const readStored = () => {
+          try {
+            return Number(localStorage.getItem('dsh-aifisher-canvas.generation-concurrency'));
+          } catch {
+            return NaN;
+          }
+        };
+        const plus = row ? row.querySelector('[aria-label="增加并发生成数"]') : null;
+        const minus = row ? row.querySelector('[aria-label="减少并发生成数"]') : null;
+        const before = readRow();
+        for (let step = 0; step < 4 && minus && !minus.disabled; step += 1) {
+          minus.click();
+          await wait(200);
+        }
+        const low = readRow();
+        const minusDisabled = minus ? minus.disabled : null;
+        for (let step = 0; step < 4 && plus && !plus.disabled; step += 1) {
+          plus.click();
+          await wait(200);
+        }
+        const high = readRow();
+        const plusDisabled = plus ? plus.disabled : null;
+        if (row) row.scrollIntoView({ block: 'center' });
+        await wait(400);
+        settingsProbe.concurrencyShot = {
+          panel: !!row,
+          before: before,
+          low: low,
+          high: high,
+          stored: readStored(),
+          minDisabled: minusDisabled,
+          maxDisabled: plusDisabled,
+          text: row ? String(row.innerText || '').replace(/\\s+/g, ' ').slice(0, 220) : '',
         };
         return;
       }
@@ -6598,6 +6651,9 @@ const SCENES = [
   // 「OpenAI 通道」面板取证（v1.30）：只开设置 → 闭源服务，停在通道面板那一屏（截图 = 交付图）
   ['channels', `${ORIGIN}/?resume=${projectId}&settings=1&channels=1`, `?resume=${projectId}&settings=1&channels=1`,
     (probe) => probe.settings?.channelsShot?.panel === true, 24000],
+  // 并发生成数（v1.90）：设置 → 生成，步进器真的改得动、写得进本机设置
+  ['settings-concurrency', `${ORIGIN}/?resume=${projectId}&settings=1&conc=1`, `?resume=${projectId}&settings=1&conc=1`,
+    (probe) => probe.settings?.concurrencyShot?.panel === true, 20000],
   // 节点搜索：等到「Shift+A 那条链路整条走完」（假 ComfyUI 的那个工作流目录里就一份自定义工作流）
   ['node-search', `${ORIGIN}/?resume=${projectId}&search=1`, `?resume=${projectId}&search=1`,
     (probe) => probe.nodeSearch?.done === true],
@@ -7854,6 +7910,42 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     }
     if (scene.error) console.log(`[browser] 场景异常：${String(scene.error).slice(0, 300)}`);
     if (scene.layout) console.log(`[browser] ${label}: layout ${JSON.stringify(scene.layout)}`);
+  }
+
+  /**
+   * 并发生成数（v1.90）：设置页那一行不再是「设计稿」，步进器真的读写本机设置。
+   * jsdom 能证「点了会写 localStorage」，但证不了这颗步进器在真设置页里点得动、
+   * 也不证明它没被页面层的浮层盖住 —— 所以这里再量一遍。
+   */
+  if (label === 'settings-concurrency') {
+    const shot = probe.settings?.concurrencyShot ?? {};
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    report('设置页里有「并发生成数」这一行', shot.panel === true, JSON.stringify(shot).slice(0, 220));
+    report(
+      '初始值落在 1–3',
+      Number(shot.before) >= 1 && Number(shot.before) <= 3,
+      String(shot.before),
+    );
+    report(
+      '连点减号拉到 1 并停住（按钮置灰）',
+      Number(shot.low) === 1 && shot.minDisabled === true,
+      `low=${shot.low} disabled=${shot.minDisabled}`,
+    );
+    report(
+      '连点加号拉到 3 并停住（按钮置灰）',
+      Number(shot.high) === 3 && shot.maxDisabled === true,
+      `high=${shot.high} disabled=${shot.maxDisabled}`,
+    );
+    report('点数真的落进本机设置（localStorage = 3）', Number(shot.stored) === 3, String(shot.stored));
+    report(
+      '这一行写的是「并发生成数」，不再挂「设计稿」',
+      String(shot.text ?? '').includes('并发生成数') && !String(shot.text ?? '').includes('设计稿'),
+      String(shot.text ?? '').slice(0, 90),
+    );
+    if (probe.settings?.error) console.log(`[browser] 场景异常：${String(probe.settings.error).slice(0, 200)}`);
   }
 
   /**

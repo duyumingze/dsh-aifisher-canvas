@@ -27,6 +27,7 @@
  */
 import * as ReactTypes from 'react';
 import { createElement } from '@/lib/react';
+import { readGenerationConcurrency } from './CanvasGenerationConcurrency';
 
 type Runtime = Pick<
   typeof ReactTypes,
@@ -197,6 +198,7 @@ export function CanvasGenerationBatches(
   const projectId = props.projectId ?? currentCanvasProjectId();
   const batches = visibleGenerationBatches(snapshot, projectId);
   if (!control || batches.length === 0) return null;
+  const concurrency = readGenerationConcurrency();
 
   const act = (batch: GenerationBatch, action: 'approve' | 'cancel') => {
     if (busy) return;
@@ -211,6 +213,7 @@ export function CanvasGenerationBatches(
     'div',
     {
       'data-fisherai-generation-batches': 'true',
+      'data-fisherai-generation-concurrency': String(concurrency),
       style: CARD_STYLE,
       // 画布 vendor 在 document 上装了「画布永不滚动」的 wheel 监听：这张卡自己可以滚，
       // 但滚轮不能冒到 document 去（否则长批次（分镜 24 个节点）滚不动）。
@@ -229,7 +232,7 @@ export function CanvasGenerationBatches(
         h(
           'div',
           { className: 'mb-2 font-medium text-[var(--af-text)]' },
-          `生成批次 · ${batch.items.length} 个节点`,
+          `生成批次 · ${batch.items.length} 个节点 · 并发 ${concurrency} 路`,
         ),
         h(
           'p',

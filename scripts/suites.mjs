@@ -35,6 +35,7 @@ export const SUITES = [
   { file: 'scripts/test-canvas-storyboard.mjs' },
   { file: 'scripts/test-canvas-references.mjs', ci: true, note: '@ 画布节点引用（CI 核心回归）' },
   { file: 'scripts/test-canvas-generation.mjs' },
+  { file: 'scripts/test-canvas-generation-concurrency.mjs', note: 'v1.90 批量生成并发 1–3 路（并发池 + 真画布集成）' },
   { file: 'scripts/test-media-editing.mjs' },
   { file: 'scripts/test-canvas-library.mjs' },
   { file: 'scripts/test-custom-workflows.mjs' },
@@ -73,7 +74,7 @@ export const SUITES = [
 ];
 
 /**
- * 真机（headless Chromium）套件：`browser-check.mjs` 自带 40 场场景，**不进 jsdom 全量**
+ * 真机（headless Chromium）套件：`browser-check.mjs` 自带 41 场场景，**不进 jsdom 全量**
  * （要 Chrome、要 8 分钟）。收口流程里由 `pnpm test:full` 串起来跑。
  */
 export const BROWSER_CHECK = 'scripts/browser-check.mjs';
