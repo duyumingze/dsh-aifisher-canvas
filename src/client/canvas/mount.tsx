@@ -25,6 +25,7 @@ import { CanvasStage, canvasBindingReport, canvasViewInjectionReport } from './s
 import { installCanvasDiagnostics, installImageLoadTelemetry, reportCanvasError, reportCanvasInfo } from './diagnostics';
 import { installSaveTelemetry } from './saveTelemetry';
 import { canvasGridReport, mountCanvasGrid } from './canvasGrid';
+import { mountBootSplash } from './bootSplash';
 import { generationDotsReport, installCanvasGenerationDots } from './genDots';
 import {
   canvasUiScaleReport,
@@ -637,6 +638,11 @@ export function mountCanvas(container: HTMLElement): CanvasHandle {
   // MutationObserver 等它出现（dashboard 视图下没有底盘，切进画布时才挂上）。
   const releaseGrid = mountCanvasGrid({ container });
 
+  // 启动动画（v1.91）：打开「无限画布」时先盖一层全屏动画，播完溶解露出项目库。
+  // 挂在 root.render 之后 = container 的最后一个孩子，z-index 压住画布；
+  // 只加 DOM、不碰 vendor 树，失败一律放行（见 bootSplash.ts 文件头）。
+  const releaseBootSplash = mountBootSplash(container);
+
   // 构建信息上报放在这里（而不是 root.render 之前）：grid 段要等这一帧渲染完才拿得到
   // 真实状态（底盘出现 → 网格挂上），否则回报的永远是「未挂载」。
   reportCanvasInfo('画布应用已加载', canvasAppBuildInfo());
@@ -672,6 +678,7 @@ export function mountCanvas(container: HTMLElement): CanvasHandle {
       try {
         root.unmount();
       } finally {
+        releaseBootSplash();
         releaseGrid();
         setCanvasPortalTarget(null);
         releaseFileDragContainment();
