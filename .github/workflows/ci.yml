@@ -44,5 +44,5 @@ jobs:
       - name: 产物契约（client 半能被 ModuleLoader 加载、面板出口还在）
         run: node scripts/smoke-contract.mjs
 
-      - name: 核心回归（清单里标了 ci: true 的那几套）
+      - name: "核心回归（清单里标了 ci: true 的那几套）"
         run: pnpm test:ci
