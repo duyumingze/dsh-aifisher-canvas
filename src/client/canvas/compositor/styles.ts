@@ -179,10 +179,17 @@ export const COMPOSITOR_STYLE = `
   cursor: grab;
 }
 .cg-preview.cg-preview-panning .cg-preview-canvas { cursor: grabbing; }
-.cg-preview-label {
+/* 左上角一块：VIEWER/OUTPUT 标签 +「预览 / 遮罩」切换（v1.95：在预览里直接画遮罩） */
+.cg-preview-head {
   position: absolute;
   left: 12px;
   top: 11px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  z-index: 3;
+}
+.cg-preview-label {
   display: flex;
   align-items: center;
   gap: 6px;
@@ -208,6 +215,47 @@ export const COMPOSITOR_STYLE = `
   box-shadow: 0 0 8px #5eead4;
 }
 .cg-preview-label.cg-live { color: #8bf5e3; border-color: rgba(94, 234, 212, .45); }
+.cg-preview-modes {
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  height: 23px;
+  border-radius: 7px;
+  background: rgba(10, 14, 19, .72);
+  border: 1px solid rgba(255, 255, 255, .1);
+  backdrop-filter: blur(10px);
+}
+.cg-preview-mode {
+  height: 19px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #8b95a4;
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.cg-preview-mode:hover { color: #d7e0ea; }
+.cg-preview-mode.cg-active {
+  background: rgba(94, 234, 212, .18);
+  color: #affeef;
+}
+/* 盖在 WebGL 预览上的遮罩画布：和预览画布完全重合（同一套 contain + transform） */
+.cg-mask-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: none;
+  border-radius: 7px;
+  transform-origin: 0 0;
+  will-change: transform;
+  cursor: crosshair;
+  touch-action: none;
+  z-index: 1;
+}
 .cg-preview-zoom {
   position: absolute;
   right: 12px;
@@ -1159,93 +1207,112 @@ export const COMPOSITOR_STYLE = `
   color: #fff;
 }
 
-/* ---- 蒙版绘制大画布（Blender Mask Editor 那套：左键画白、右键擦黑） ------- */
-.cg-maskpaint {
-  position: fixed;
-  inset: 0;
-  z-index: 2147482300;
-  display: flex;
+/* ---- 预览里的遮罩工具栏（v1.95：点「编辑」不再跳页，直接在左上角预览里画） --- */
+.cg-mask-hud {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 9px;
+  display: none;
   flex-direction: column;
-  background: rgba(6, 8, 11, .97);
-  backdrop-filter: blur(6px);
-  color: #e6edf6;
+  gap: 6px;
+  z-index: 4;
+  pointer-events: none;
 }
-.cg-maskpaint-head {
+.cg-preview-mask .cg-mask-hud { display: flex; }
+.cg-preview-mask .cg-preview-hint { display: none; }
+.cg-preview-mask {
+  border-color: rgba(94, 234, 212, .38);
+  box-shadow: 0 0 0 1px rgba(94, 234, 212, .18), 0 24px 60px rgba(0, 0, 0, .5);
+}
+.cg-maskbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 10px 14px;
-  border-bottom: 1px solid rgba(255, 255, 255, .09);
-  font-size: 11.5px;
-  flex: 0 0 auto;
-  white-space: nowrap;
-  overflow: hidden;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  border-radius: 10px;
+  background: rgba(9, 12, 17, .82);
+  border: 1px solid rgba(255, 255, 255, .1);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, .45);
+  backdrop-filter: blur(14px);
+  pointer-events: auto;
 }
-.cg-maskpaint-title { font-weight: 600; letter-spacing: .2px; flex: 0 0 auto; }
-.cg-maskpaint-hint {
-  color: #7c8694;
-  font-size: 10.5px;
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.cg-maskpaint-actions { margin-left: auto; display: flex; gap: 6px; }
-.cg-maskpaint-actions button,
-.cg-maskpaint-field button {
-  height: 26px;
-  padding: 0 10px;
-  border-radius: 7px;
+.cg-maskbar-tools { display: flex; gap: 3px; }
+.cg-maskbar-tool,
+.cg-maskbar-swap,
+.cg-maskbar-actions button {
+  height: 23px;
+  padding: 0 9px;
+  border-radius: 6px;
   border: 1px solid rgba(255, 255, 255, .12);
   background: rgba(255, 255, 255, .05);
-  color: #d6dee8;
+  color: #cfd8e3;
   font: inherit;
-  font-size: 11px;
+  font-size: 10.5px;
   cursor: pointer;
 }
-.cg-maskpaint-actions button:hover,
-.cg-maskpaint-field button:hover {
+.cg-maskbar-tool:hover,
+.cg-maskbar-swap:hover,
+.cg-maskbar-actions button:hover {
   border-color: rgba(94, 234, 212, .5);
   background: rgba(94, 234, 212, .12);
   color: #fff;
 }
-.cg-maskpaint-actions button[data-primary='true'] {
+.cg-maskbar-tool.cg-active {
   border-color: rgba(94, 234, 212, .6);
-  background: rgba(94, 234, 212, .18);
+  background: rgba(94, 234, 212, .2);
   color: #affeef;
 }
-.cg-maskpaint-body {
+.cg-maskbar-colors {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.cg-maskbar-swatch {
   position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, .22);
+  background: var(--swatch, #fff);
+  cursor: pointer;
+  overflow: hidden;
+}
+.cg-maskbar-swatch input[type='color'] {
+  position: absolute;
+  inset: -4px;
+  width: calc(100% + 8px);
+  height: calc(100% + 8px);
+  padding: 0;
+  border: 0;
+  background: transparent;
+  opacity: 0;
+  cursor: pointer;
+}
+.cg-maskbar-swap { width: 24px; padding: 0; font-size: 12px; }
+.cg-maskbar-field {
   display: flex;
   align-items: center;
-  justify-content: center;
-  padding: 18px;
-  cursor: crosshair;
-  touch-action: none;
-}
-.cg-maskpaint-body canvas {
-  /* 蒙版画布是 1024 级的大图：按可用面积等比缩放（指针换算走 getBoundingClientRect，
-     缩放多少都不影响落笔位置） */
-  width: auto;
-  height: auto;
-  max-width: 100%;
-  max-height: 100%;
-  border-radius: 4px;
-  box-shadow: 0 18px 46px rgba(0, 0, 0, .6);
-  background: #000;
-  image-rendering: auto;
-}
-.cg-maskpaint-field {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+  gap: 5px;
   color: #96a0ae;
-  font-size: 10.5px;
+  font-size: 10px;
+  white-space: nowrap;
 }
-.cg-maskpaint-field input[type='range'] {
-  width: 96px;
+.cg-maskbar-field.cg-dim { opacity: .45; }
+.cg-maskbar-field input[type='range'] {
+  width: 74px;
   accent-color: #5eead4;
+}
+.cg-maskbar-actions { display: flex; gap: 4px; margin-left: auto; }
+.cg-maskbar-hint {
+  font-size: 10px;
+  color: #86909e;
+  padding: 0 6px;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, .6);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 `;

@@ -60,21 +60,41 @@ export interface CompositorEdge {
 }
 
 /**
+ * 遮罩里的一条形状（Blender 的一个 mask 可以含多条 spline）：圆 / 方 / 自由样条。
+ *
+ * 用户 2026-11-11 追加：「添加圆形和方型的遮罩工具，可以直接在画布预览区域 shift+a
+ * 搜索添加形状」—— 所以形状带 kind：圆的控制点走平滑插值、方框走直线（硬角）。
+ */
+export interface CompositorMaskShape {
+  kind: 'spline' | 'circle' | 'box';
+  /** 归一化 0..1 的控制点 [x0,y0,x1,y1,…]。 */
+  points: number[];
+  /** 是否闭合（Blender 里按 F 把首尾两个端点连起来）；没闭合的样条没有面积。 */
+  closed: boolean;
+}
+
+/**
  * 遮罩（Blender 的 Mask datablock）：**项目级共享资源**，不属于某个节点。
  *
  * 用户 2026-11-11：「它是在遮罩区添加遮罩之后在添加遮罩节点获取遮罩图像的」——
  * 所以按 Blender 的形态拆开：遮罩对象存在 graph.masks 里（在编辑区里改它），
  * 「遮罩」节点只是按 id **引用**（多个节点可以引用同一个遮罩，改一处全都跟着变）。
+ *
+ * 形状之外还有一层**画笔层**（用户 2026-11-11：「添加画笔工具和颜色工具」）：
+ * 一张与遮罩画布同尺寸的透明 PNG，白笔画加入、黑笔画擦除，栅格化时叠在形状上面。
  */
 export interface CompositorMask {
   id: string;
   name: string;
-  /** 归一化 0..1 的控制点 [x0,y0,x1,y1,…]。 */
-  spline: number[];
-  /** 是否闭合（Blender 里按 F 把首尾两个端点连起来）；没闭合的样条没有面积。 */
-  closed: boolean;
+  /** 形状列表；多条形状按「并集」（都是白色）合成。 */
+  shapes: CompositorMaskShape[];
   /** 羽化占画面宽度的比例（0..0.1），在编辑区里调。 */
   feather: number;
+  /** 画笔层：透明 PNG（dataURL），白 = 加入遮罩、黑 = 擦掉。 */
+  paint?: string;
+  /** 画笔层像素宽高（帧比例变了要按它做一次重采样）。 */
+  paintWidth?: number;
+  paintHeight?: number;
 }
 
 export interface CompositorGraph {
@@ -231,13 +251,14 @@ export const NODE_SPECS: Record<CompositorKind, CompositorNodeSpec> = {
    * 遮罩（用户 2026-11-11：「在调色面板做绘制功能…遮罩要用混合节点来实现，
    * 接入黑白遮罩图像」；随后补了 Blender 的 Mask Editor 截图，所以走**样条**形态）。
    *
-   * 在卡片里点「编辑」开一块大画布，左键加点、拖控制点画出一圈闭合样条（绿线黄点，
-   * 和 Blender 一样），羽化柔化边缘；栅格化成一张**黑白图**存在 params.mask 里。
-   * 输出口接到「混合」节点的第三个口（系数）就按像素控混合量 ——
-   * 于是「局部调色」= A 口接调过色的链、B 口接原图、系数口接这张遮罩。
+   * 2026-11-11 二次改版：不再开一块独立的编辑大画布，而是把上方预览切到「遮罩」模式
+   * 直接在上面画（圆 / 方 / 自由样条 + 画笔层），Shift+A 搜索添加形状。
+   * 栅格化成一张**黑白图**存在 params.mask 里，输出口接到「混合」节点的第三个口
+   * （系数）就按像素控混合量 —— 于是「局部调色」= A 口接调过色的链、B 口接原图、
+   * 系数口接这张遮罩。
    *
    * 一个输入口：可选的底图（编辑时垫在下面帮你对位，不参与输出）。
-   * params.spline 是归一化控制点数组、params.feather 是羽化比例、params.mask 是黑白 PNG、
+   * 形状与画笔层存在项目级遮罩数据块里（graph.masks），params.mask 是栅格化后的黑白 PNG、
    * params.maskRev 是改一次 +1 的版本号（引擎靠它失效缓存）。它们都不是数字/布尔里的
    * 「界面参数」，所以只有 feather / invert 进 defaults。
    */
@@ -522,7 +543,7 @@ export function newCompositorId(kind: CompositorKind): string {
   return `${kind}-${Date.now().toString(36)}-${sequence.toString(36)}`;
 }
 
-/** 新的遮罩数据块（Blender 的 Mask）：空样条 + 默认羽化，命名按现有条数递增。 */
+/** 新的遮罩数据块（Blender 的 Mask）：空形状 + 默认羽化，命名按现有条数递增。 */
 export function createCompositorMask(masks: readonly CompositorMask[]): CompositorMask {
   let index = masks.length + 1;
   const names = new Set(masks.map((mask) => mask.name));
@@ -530,8 +551,7 @@ export function createCompositorMask(masks: readonly CompositorMask[]): Composit
   return {
     id: `mask-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
     name: `遮罩 ${index}`,
-    spline: [],
-    closed: false,
+    shapes: [],
     feather: 0.015,
   };
 }
@@ -609,20 +629,47 @@ export function createDefaultGraph(inputCount: number): CompositorGraph {
   }
   const view = record(source.view);
   const scope = record(source.scope);
-  // 遮罩数据块（Blender 的 Mask）：老图没有这一段 → 空数组；有就只挑认得的字段
+  // 遮罩数据块（Blender 的 Mask）：老图没有这一段 → 空数组；有就只挑认得的字段。
+  // 老图（v1.94）存的是单条样条 spline + closed，这里升成 shapes[0]，不必迁移文件。
   const masks: CompositorMask[] = [];
+  const numberArray = (input: unknown): number[] =>
+    Array.isArray(input)
+      ? input.map((value) => Number(value)).filter((value) => Number.isFinite(value))
+      : [];
   for (const raw of Array.isArray(source.masks) ? source.masks : []) {
     const item = record(raw);
     const id = String(item.id || '');
     if (!id) continue;
+    const shapes: CompositorMaskShape[] = [];
+    for (const shapeRaw of Array.isArray(item.shapes) ? item.shapes : []) {
+      const shape = record(shapeRaw);
+      const points = numberArray(shape.points);
+      if (points.length < 2) continue;
+      const kind =
+        shape.kind === 'circle' || shape.kind === 'box' ? shape.kind : ('spline' as const);
+      shapes.push({ kind, points, closed: shape.closed === true });
+    }
+    if (!shapes.length) {
+      const legacy = numberArray(item.spline);
+      if (legacy.length >= 2) {
+        shapes.push({ kind: 'spline', points: legacy, closed: item.closed === true });
+      }
+    }
+    const paint = typeof item.paint === 'string' && item.paint.startsWith('data:image/')
+      ? item.paint
+      : undefined;
     masks.push({
       id,
       name: typeof item.name === 'string' && item.name ? item.name : '遮罩',
-      spline: Array.isArray(item.spline)
-        ? item.spline.map((value) => Number(value)).filter((value) => Number.isFinite(value))
-        : [],
-      closed: item.closed === true,
+      shapes,
       feather: Number.isFinite(Number(item.feather)) ? Number(item.feather) : 0.015,
+      ...(paint ? { paint } : {}),
+      ...(paint && Number.isFinite(Number(item.paintWidth))
+        ? { paintWidth: Number(item.paintWidth) }
+        : {}),
+      ...(paint && Number.isFinite(Number(item.paintHeight))
+        ? { paintHeight: Number(item.paintHeight) }
+        : {}),
     });
   }
   return {

@@ -251,22 +251,27 @@ export {
 export { buildCurveLut, curveValue, normalizeCurvePoints } from './compositor/curves';
 /**
  * 遮罩（用户 2026-11-11 要的「调色面板里做遮罩、接混合节点系数口」）的纯逻辑：
- * 画布尺寸、样条几何（控制点往返 / 插点 / 命中 / Catmull-Rom → 贝塞尔 / 羽化像素）。
+ * 画布尺寸、形状（圆 / 方）、轮廓（直线 / 贝塞尔）、控制点往返 / 插点 / 命中 / 羽化像素。
  */
 export {
   MASK_CANVAS_WIDTH,
+  boxShapePoints,
   brushDiameter,
   brushGradientStops,
+  circleShapePoints,
   featherPixels,
   hasMaskImage,
   hitSplinePoint,
   insertSplinePoint,
   invertMaskPixels,
   maskCanvasSize,
+  maskOutline,
+  shapeIsSmooth,
   splineBezierSegments,
   splineFromParam,
   splineToParam,
   strokePoints,
+  traceMaskOutline,
 } from './compositor/maskPaint';
 export {
   SCOPE_MAX,

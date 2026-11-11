@@ -208,3 +208,125 @@ export function featherPixels(feather: number, width: number): number {
   const value = Number.isFinite(feather) ? Math.abs(feather) : 0;
   return Math.max(0, value * Math.max(1, width));
 }
+
+/* ------------------------------------------------------------------ */
+/* 形状：圆 / 方（用户 2026-11-11：「添加圆形和方型的遮罩工具」）          */
+/* ------------------------------------------------------------------ */
+
+export type MaskShapeKind = 'spline' | 'circle' | 'box';
+
+/**
+ * 圆形形状的控制点：绕圆心均匀撒 `segments` 个点（默认 8 个）。
+ *
+ * 8 个点配 Catmull-Rom 已经足够圆，而且拖动时点不会密到看不清；
+ * 点坐标是**归一化** 0..1，和遮罩数据块的存储口径一致。
+ */
+export function circleShapePoints(
+  center: MaskPoint,
+  radius: number,
+  segments = 8,
+): MaskPoint[] {
+  const count = Math.max(4, Math.min(64, Math.round(segments)));
+  const r = Math.max(0.001, Math.abs(radius));
+  const points: MaskPoint[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const angle = (index / count) * Math.PI * 2 - Math.PI / 2;
+    points.push({ x: center.x + Math.cos(angle) * r, y: center.y + Math.sin(angle) * r });
+  }
+  return points;
+}
+
+/** 方形形状的控制点：四个角，按「左上 → 右上 → 右下 → 左下」排，直线连接（硬角）。 */
+export function boxShapePoints(
+  center: MaskPoint,
+  width: number,
+  height: number,
+): MaskPoint[] {
+  const halfW = Math.max(0.001, Math.abs(width)) / 2;
+  const halfH = Math.max(0.001, Math.abs(height)) / 2;
+  return [
+    { x: center.x - halfW, y: center.y - halfH },
+    { x: center.x + halfW, y: center.y - halfH },
+    { x: center.x + halfW, y: center.y + halfH },
+    { x: center.x - halfW, y: center.y + halfH },
+  ];
+}
+
+/** 圆 / 自由样条走平滑插值，方框走直线 —— 方框要是走贝塞尔就变成圆角了。 */
+export function shapeIsSmooth(kind: MaskShapeKind): boolean {
+  return kind !== 'box';
+}
+
+/**
+ * 形状的一段轮廓：`cp1/cp2` 有值就是三次贝塞尔（平滑形状），没有就是直线。
+ * 编辑器和栅格化共用这一份，保证「屏幕上看到的」和「输出图里的」是同一条边。
+ */
+export interface MaskOutlineSegment {
+  cp1?: MaskPoint;
+  cp2?: MaskPoint;
+  end: MaskPoint;
+}
+
+/** 控制点 → 轮廓段。闭合形状首尾相接（平滑时走 Catmull-Rom 环绕）。 */
+export function maskOutline(
+  points: readonly MaskPoint[],
+  options: { closed: boolean; smooth: boolean },
+): MaskOutlineSegment[] {
+  if (points.length < 2) return [];
+  const segments: MaskOutlineSegment[] = [];
+  if (!options.smooth) {
+    for (let index = 1; index < points.length; index += 1) {
+      segments.push({ end: points[index] });
+    }
+    if (options.closed) segments.push({ end: points[0] });
+    return segments;
+  }
+  if (options.closed && points.length >= 3) {
+    for (const [cp1, cp2, end] of splineBezierSegments(points)) {
+      segments.push({ cp1, cp2, end });
+    }
+    return segments;
+  }
+  // 没闭合的样条：逐段做 Catmull-Rom（两端没有环绕点，端点直接就直一点，不影响使用）
+  for (let index = 0; index + 1 < points.length; index += 1) {
+    const p0 = points[Math.max(0, index - 1)];
+    const p1 = points[index];
+    const p2 = points[index + 1];
+    const p3 = points[Math.min(points.length - 1, index + 2)];
+    segments.push({
+      cp1: { x: p1.x + (p2.x - p0.x) / 6, y: p1.y + (p2.y - p0.y) / 6 },
+      cp2: { x: p2.x - (p3.x - p1.x) / 6, y: p2.y - (p3.y - p1.y) / 6 },
+      end: p2,
+    });
+  }
+  return segments;
+}
+
+/** 把轮廓描进 2D 上下文：编辑器画预览、栅格化出黑白图都走它。 */
+export function traceMaskOutline(
+  context: CanvasRenderingContext2D,
+  points: readonly MaskPoint[],
+  options: { closed: boolean; smooth: boolean },
+): boolean {
+  if (!points.length) return false;
+  context.beginPath();
+  context.moveTo(points[0].x, points[0].y);
+  if (points.length > 1) {
+    for (const segment of maskOutline(points, options)) {
+      if (segment.cp1 && segment.cp2) {
+        context.bezierCurveTo(
+          segment.cp1.x,
+          segment.cp1.y,
+          segment.cp2.x,
+          segment.cp2.y,
+          segment.end.x,
+          segment.end.y,
+        );
+      } else {
+        context.lineTo(segment.end.x, segment.end.y);
+      }
+    }
+  }
+  if (options.closed) context.closePath();
+  return true;
+}

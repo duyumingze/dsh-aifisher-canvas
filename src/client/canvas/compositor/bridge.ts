@@ -117,7 +117,7 @@ export function installCompositorBridge(): { dispose: () => void } {
   // Ctrl+F5 才会重新 import）。有它就不必再猜是缓存还是没构建。
   try {
     console.info(
-      '[dsh-aifisher-canvas] v1.79 · 调色合成器已就绪（顶栏已让出系统标题栏；Shift+A 可打字搜节点；混合节点三输入 A/B/系数）',
+      '[dsh-aifisher-canvas] v1.95 · 调色合成器已就绪（顶栏已让出系统标题栏；Shift+A 可打字搜节点；混合节点三输入 A/B/系数；遮罩在预览左上角切「遮罩」直接画）',
     );
   } catch {
     // 控制台不可用不影响功能

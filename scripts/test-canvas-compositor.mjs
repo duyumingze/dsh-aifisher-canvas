@@ -597,9 +597,11 @@ if (button) {
     `outs=${overlay?.querySelectorAll('.cg-port.cg-out').length ?? 0}`,
   );
   check(
-    '上方只有一块预览画布（以预览节点为主）',
-    overlay?.querySelectorAll('.cg-preview canvas').length === 1,
-    `canvases=${overlay?.querySelectorAll('.cg-preview canvas').length ?? 0}`,
+    '上方只有一块合成预览画布（遮罩画布是它上面的编辑层，默认隐藏）',
+    overlay?.querySelectorAll('.cg-preview-canvas').length === 1 &&
+      overlay?.querySelectorAll('.cg-mask-canvas').length === 1 &&
+      overlay?.querySelector('.cg-mask-canvas')?.getAttribute('style')?.includes('display: none'),
+    `preview=${overlay?.querySelectorAll('.cg-preview-canvas').length ?? 0} mask=${overlay?.querySelectorAll('.cg-mask-canvas').length ?? 0} style=${overlay?.querySelector('.cg-mask-canvas')?.getAttribute('style')}`,
   );
   // 用户 2026-10-28 报「打开合成器一条线都没有」：默认图里明明有两条边，
   // 端口坐标却因为选择器写错（.cg-port.out vs 实际 cg-out）全被跳过。
@@ -1759,19 +1761,95 @@ if (button) {
       maskCard?.querySelectorAll('.cg-port.cg-out').length === 1,
     `${maskCard?.querySelector('.cg-port.cg-in')?.title} / out=${maskCard?.querySelectorAll('.cg-port.cg-out').length ?? 0}`,
   );
-  // jsdom 没有 2D 画布：点「编辑」要给出可读提示、不能把面板炸掉
+  // v1.95（用户 2026-11-11）：「点编辑然后跳转另外一个页面来画遮罩，我觉得直接在左上角的预览
+  // 切换成遮罩来上添加绘制就好了」——点「编辑」不再弹全屏层，而是把上方预览切成遮罩模式。
   dispatch('click', maskCard?.querySelector('.cg-mask-actions button'));
   await settle(30);
   check(
-    '没有 2D 画布时点「编辑」给出可读提示（面板不崩）',
-    !!doc.querySelector('.cg-root') &&
+    '点「编辑」把上方预览切成遮罩模式（不再弹全屏遮罩画布）',
+    !!doc.querySelector('.cg-preview-mask') &&
+      !!doc.querySelector('.cg-mask-hud') &&
       !doc.querySelector('.cg-maskpaint') &&
-      /2D 画布/.test(doc.querySelector('.cg-toast')?.textContent || ''),
-    doc.querySelector('.cg-toast')?.textContent || '',
+      report().maskMode === true,
+    JSON.stringify({ mode: report().maskMode, hud: !!doc.querySelector('.cg-mask-hud') }),
   );
+  check(
+    '遮罩模式：预览左上角有「预览 / 遮罩」切换，工具栏有 选择/画笔/圆形/方形',
+    [...(doc.querySelectorAll('.cg-preview-mode') || [])].map((button) => button.textContent).join(',') ===
+      '预览,遮罩' &&
+      [...(doc.querySelectorAll('.cg-maskbar-tool') || [])].map((button) => button.textContent).join(',') ===
+        '选择,画笔,圆形,方形',
+    [...(doc.querySelectorAll('.cg-maskbar-tool') || [])].map((button) => button.textContent).join(','),
+  );
+  check(
+    '遮罩模式：有前景/背景颜色工具 + 笔刷/羽化滑块 + 返回预览',
+    !!doc.querySelector('input[data-mask-color="fg"]') &&
+      !!doc.querySelector('input[data-mask-color="bg"]') &&
+      !!doc.querySelector('input[data-mask-brush]') &&
+      !!doc.querySelector('input[data-mask-feather]') &&
+      [...(doc.querySelectorAll('.cg-maskbar-actions button') || [])]
+        .map((button) => button.textContent)
+        .join(',') === '＋ 形状,清空,返回预览',
+    [...(doc.querySelectorAll('.cg-maskbar-actions button') || [])]
+      .map((button) => button.textContent)
+      .join(','),
+  );
+  // Shift+A 在预览里按同一套模糊搜索加形状（用户：「可以直接在画布预览区域 shift+a 搜索添加形状」）
+  {
+    const shapesBefore = (report().masks ?? [])[0]?.shapes ?? 0;
+    key({ key: 'a', shiftKey: true });
+    await settle(30);
+    const items = [...doc.querySelectorAll('.cg-mask-menu .cg-menu-item')];
+    check(
+      '遮罩模式下 Shift+A 弹出形状搜索（圆 / 方 / 样条）',
+      items.map((item) => item.textContent).join(',').includes('圆形遮罩') &&
+        items.some((item) => item.textContent.includes('方形遮罩')) &&
+        items.some((item) => item.textContent.includes('自由样条')),
+      items.map((item) => item.textContent).join('|'),
+    );
+    items.find((item) => item.textContent.includes('圆形遮罩'))?.dispatchEvent(
+      new window.MouseEvent('click', { bubbles: true }),
+    );
+    await settle(40);
+    const mask = (report().masks ?? [])[0];
+    check(
+      '选「圆形遮罩」后数据块里多一条圆形状（8 个控制点、闭合）',
+      mask?.shapes === shapesBefore + 1 &&
+        mask?.kinds?.[mask.kinds.length - 1] === 'circle' &&
+        mask?.closed === true,
+      JSON.stringify(mask),
+    );
+    check(
+      '加完形状自动回到选择工具（可以马上 G/R/S 挪它）',
+      report().maskTools?.tool === 'select',
+      JSON.stringify(report().maskTools),
+    );
+  }
+  // 工具切换：画笔 / 颜色
+  {
+    dispatch('click', doc.querySelector('[data-mask-tool="brush"]'));
+    await settle(20);
+    check('点「画笔」切到画笔工具', report().maskTools?.tool === 'brush', JSON.stringify(report().maskTools));
+    const color = doc.querySelector('input[data-mask-color="fg"]');
+    color.value = '#000000';
+    color.dispatchEvent(new window.Event('input', { bubbles: true }));
+    check('颜色工具能改前景色（画黑 = 擦掉）', report().maskTools?.foreground === '#000000',
+      JSON.stringify(report().maskTools));
+    // Esc 先退回选择工具，再 Esc 回到 VIEWER 预览
+    key({ key: 'Escape' });
+    await settle(20);
+    check('遮罩模式里按 Esc 先退回选择工具', report().maskTools?.tool === 'select',
+      JSON.stringify(report().maskTools));
+    key({ key: 'Escape' });
+    await settle(30);
+    check('再按 Esc 回到 VIEWER 预览（不再关掉整个调色面板）',
+      report().maskMode === false && !!doc.querySelector('.cg-root') &&
+        !doc.querySelector('.cg-preview-mask'),
+      JSON.stringify({ mode: report().maskMode }));
+  }
   // 遮罩下拉里能新建第二个遮罩（Blender 的「遮罩区里加一条遮罩」）
   {
-    const maskSelect = maskCard?.querySelector('.cg-select-button');
+    const maskSelect = doc.querySelector(`[data-node-id="${maskNode?.id}"] .cg-select-button`);
     dispatch('click', maskSelect);
     await settle(20);
     const options = [...doc.querySelectorAll('.cg-select-list .cg-select-option')];
@@ -1836,10 +1914,49 @@ if (button) {
     check('羽化按画面宽度换成像素（1% × 1024 = 10.24px）',
       Math.abs(canvasApp.featherPixels(0.01, 1024) - 10.24) < 1e-6,
       String(canvasApp.featherPixels(0.01, 1024)));
+
+    // v1.95：圆 / 方形状 + 统一轮廓（编辑器画的和栅格化出来的是同一条边）
+    const circle = canvasApp.circleShapePoints({ x: 0.5, y: 0.5 }, 0.25, 8);
+    check(
+      '圆形形状 = 8 个控制点均匀落在圆上（默认 8 点，够圆也不用拖太多）',
+      circle.length === 8 &&
+        circle.every((point) => Math.abs(Math.hypot(point.x - 0.5, point.y - 0.5) - 0.25) < 1e-6) &&
+        Math.abs(circle[0].x - 0.5) < 1e-9 && circle[0].y < 0.3,
+      JSON.stringify(circle.slice(0, 2)),
+    );
+    const box = canvasApp.boxShapePoints({ x: 0.5, y: 0.5 }, 0.4, 0.2);
+    check(
+      '方形形状 = 四个角（左上 → 右上 → 右下 → 左下）',
+      box.length === 4 &&
+        Math.abs(box[0].x - 0.3) < 1e-9 && Math.abs(box[0].y - 0.4) < 1e-9 &&
+        Math.abs(box[2].x - 0.7) < 1e-9 && Math.abs(box[2].y - 0.6) < 1e-9,
+      JSON.stringify(box),
+    );
+    check(
+      '圆 / 样条走平滑插值，方框走直线（方框不会变圆角）',
+      canvasApp.shapeIsSmooth('circle') && canvasApp.shapeIsSmooth('spline') &&
+        canvasApp.shapeIsSmooth('box') === false,
+    );
+    const smoothOutline = canvasApp.maskOutline(circle, { closed: true, smooth: true });
+    const boxOutline = canvasApp.maskOutline(box, { closed: true, smooth: false });
+    check(
+      '轮廓：平滑形状给贝塞尔段（带 cp1/cp2），方框给直线段（只有端点）',
+      smoothOutline.length === 8 &&
+        smoothOutline.every((segment) => segment.cp1 && segment.cp2) &&
+        boxOutline.length === 4 && boxOutline.every((segment) => !segment.cp1 && !segment.cp2),
+      `smooth=${smoothOutline.length} box=${boxOutline.length}`,
+    );
+    check(
+      '没闭合的样条轮廓不首尾相接（最后一个端点不回到起点）',
+      canvasApp.maskOutline(circle.slice(0, 3), { closed: false, smooth: true }).length === 2,
+      String(canvasApp.maskOutline(circle.slice(0, 3), { closed: false, smooth: true }).length),
+    );
   }
 
   // ③ Blender 手感：G 抓取移动（X/Y 锁轴）、Esc 取消、X 删除
-  const maskHead = maskCard?.querySelector('.cg-node-head');
+  // 卡片会被 renderNodes 重建过，这里按 node id 现取（别用上面那个旧引用）
+  const maskCardNow = () => doc.querySelector(`[data-node-id="${maskNode?.id}"]`);
+  const maskHead = maskCardNow()?.querySelector('.cg-node-head');
   dispatch('pointerdown', maskHead, { button: 0, clientX: 200, clientY: 300 });
   dispatch('pointerup', window, { button: 0, clientX: 200, clientY: 300 });
   await settle(20);

@@ -5264,26 +5264,34 @@ const HOST_PAGE = `<!doctype html>
         const items = [...document.querySelectorAll('.cg-menu-item')];
         const balance = items.find((item) => item.textContent === '色彩平衡');
         if (!balance) throw new Error('Shift+A 菜单里没有「色彩平衡」');
+        // v1.94 起落点取「点下去那一刻」的指针（用户 2026-11-11 报的「飘在鼠标上方很远」），
+        // 所以先把指针放到 stage 里的已知位置、紧跟着点菜单，中间不能有 await ——
+        // 宿主页每 250ms 会派发一次「把指针挪走」的 pointermove，夹进来就会改落点。
+        const addTarget = (() => {
+          const box = stage.getBoundingClientRect();
+          return {
+            x: Math.round(box.left + box.width * 0.58),
+            y: Math.round(box.top + box.height * 0.52),
+          };
+        })();
+        window.dispatchEvent(
+          new PointerEvent('pointermove', { clientX: addTarget.x, clientY: addTarget.y, bubbles: true }),
+        );
         balance.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-        await wait(200);
+        // 同步量：新建节点会挂在鼠标上跟着走，等 200ms 可能已经被「指针挪走」带偏
         const cardNodes = [...root.querySelectorAll('.cg-node')];
         const added = cardNodes[cardNodes.length - 1];
         // 用户 2026-10-30：「添加节点的时候节点位置不会以鼠标为中心点」——
-        // 这一场前面没有把指针挪进 stage，落点回落到 stage 正中：卡片中心应该就在那儿。
         // 卡片宽度用 offsetWidth（布局宽度）：getBoundingClientRect 会带上 fitView 的 world 缩放
         compositorSteps.nodeWidth = Math.round(added.offsetWidth);
         {
-          const stageBoxForAdd = stage.getBoundingClientRect();
           const addedBoxForAdd = added.getBoundingClientRect();
           compositorSteps.addedCenterDelta = {
-            dx: Math.round(
-              addedBoxForAdd.left + addedBoxForAdd.width / 2 - (stageBoxForAdd.left + stageBoxForAdd.width / 2),
-            ),
-            dy: Math.round(
-              addedBoxForAdd.top + addedBoxForAdd.height / 2 - (stageBoxForAdd.top + stageBoxForAdd.height / 2),
-            ),
+            dx: Math.round(addedBoxForAdd.left + addedBoxForAdd.width / 2 - addTarget.x),
+            dy: Math.round(addedBoxForAdd.top + addedBoxForAdd.height / 2 - addTarget.y),
           };
         }
+        await wait(200);
         compositorSteps.addedKind = added.dataset.nodeId || '';
         compositorSteps.paramsInNode = added.querySelectorAll('.cg-param').length;
         // v1.75：色彩平衡换成四轮调色（暗部/中灰/亮部/偏移），参数不再是 .cg-param 行
@@ -5888,6 +5896,9 @@ const HOST_PAGE = `<!doctype html>
 
         // ---- 顶栏能不能点：几何（是否让出系统标题栏）+ 命中测试 + 真点一下
         {
+          // 启动动画是 z-index 2147483000 的全屏层（播完 4.2s + 0.64s 淡出才摘掉），
+          // 它还在的时候 elementFromPoint 一律先命中它 —— 等它退场再验顶栏。
+          await until(() => !document.getElementById('afb-root'), 9000);
           const addButton = root.querySelector('[data-act="add"]');
           const box = addButton.getBoundingClientRect();
           compositorWheelsSteps.titlebarInset = root.style.getPropertyValue('--cg-titlebar-top') || '';
@@ -5897,6 +5908,19 @@ const HOST_PAGE = `<!doctype html>
           const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
           compositorWheelsSteps.addHit =
             hit === addButton || (hit && addButton.contains(hit)) ? 'button' : String(hit?.className || hit?.tagName || 'none');
+          compositorWheelsSteps.addHitDebug = {
+            at: [Math.round(box.left + box.width / 2), Math.round(box.top + box.height / 2)],
+            tag: hit ? hit.tagName : null,
+            chain: (() => {
+              const chain = [];
+              let node = hit;
+              while (node && chain.length < 6) {
+                chain.push(node.tagName + '.' + String(node.getAttribute?.('class') || ''));
+                node = node.parentElement;
+              }
+              return chain.join(' < ');
+            })(),
+          };
           addButton.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
           await wait(220);
           compositorWheelsSteps.addMenuOpened = !!document.querySelector('.cg-menu');
@@ -6182,9 +6206,17 @@ const HOST_PAGE = `<!doctype html>
       opened: false,
       created: false,
       painterOpened: false,
+      previewCanvasCount: 0,
+      toolLabels: '',
       pointSteps: 0,
       maskClosed: false,
       maskPoints: 0,
+      shapeMenu: '',
+      shapes: 0,
+      kinds: '',
+      strokes: 0,
+      paintBytes: 0,
+      backToViewer: false,
       whitePixels: 0,
       previewBytes: 0,
       viewerConnected: false,
@@ -6313,36 +6345,64 @@ const HOST_PAGE = `<!doctype html>
               window.__FISHERAI_COMPOSITOR__?.report?.()?.edges?.length ?? -1;
           }
         }
-        card
-          ?.querySelector('.cg-mask-actions button')
-          ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-        await until(() => document.querySelector('.cg-maskpaint'), 8000);
-        await wait(320);
-        const painter = document.querySelector('.cg-maskpaint');
-        compositorMaskSteps.painterOpened = !!painter;
-        const display = painter?.querySelector('.cg-maskpaint-canvas');
-        if (display) {
-          const surface = display.getBoundingClientRect();
+        // v1.95（用户 2026-11-11）：「直接在左上角的预览切换成遮罩来上添加绘制就好了」——
+        // 点「编辑」不再弹全屏层，而是把上方预览切成遮罩模式，直接在上面画。
+        const openMaskMode = async () => {
+          const cardNow = [...root.querySelectorAll('.cg-node')].find(
+            (element) => element.querySelector('.cg-node-title')?.textContent?.trim() === '遮罩',
+          );
+          cardNow
+            ?.querySelector('.cg-mask-actions button')
+            ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          await wait(320);
+        };
+        await openMaskMode();
+        await wait(260);
+        const maskCanvas = root.querySelector('.cg-mask-canvas');
+        compositorMaskSteps.painterOpened =
+          !!root.querySelector('.cg-preview-mask') && !!root.querySelector('.cg-mask-hud') && !root.querySelector('.cg-maskpaint');
+        compositorMaskSteps.previewCanvasCount = root.querySelectorAll('.cg-preview-canvas').length;
+        compositorMaskSteps.toolLabels = [...root.querySelectorAll('.cg-maskbar-tool')]
+          .map((button) => button.textContent)
+          .join(',');
+        if (maskCanvas) {
+          const surface = maskCanvas.getBoundingClientRect();
+          // 画布是 object-fit: contain：可点区域是里面那块「内容框」，不是整个元素盒
+          const fit = Math.min(surface.width / maskCanvas.width, surface.height / maskCanvas.height);
+          const contentWidth = maskCanvas.width * fit;
+          const contentHeight = maskCanvas.height * fit;
+          const contentLeft = surface.left + (surface.width - contentWidth) / 2;
+          const contentTop = surface.top + (surface.height - contentHeight) / 2;
           const point = (fx, fy) => ({
-            clientX: surface.left + surface.width * fx,
-            clientY: surface.top + surface.height * fy,
+            clientX: contentLeft + contentWidth * fx,
+            clientY: contentTop + contentHeight * fy,
           });
-          // Blender 的样条手感：在画面中间点四个角，围出一块区域
-          for (const [fx, fy] of [[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]]) {
-            const at = point(fx, fy);
-            display.dispatchEvent(
+          const press = (at, pointerId = 152) => {
+            maskCanvas.dispatchEvent(
               new PointerEvent('pointerdown', {
                 button: 0, buttons: 1, ...at,
-                pointerId: 152, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+                pointerId, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
               }),
             );
-            display.dispatchEvent(
+          };
+          const release = (at) => {
+            maskCanvas.dispatchEvent(
               new PointerEvent('pointerup', { button: 0, buttons: 0, ...at, bubbles: true }),
             );
+          };
+          const move = (at) => {
+            maskCanvas.dispatchEvent(
+              new PointerEvent('pointermove', { button: 0, buttons: 1, ...at, bubbles: true }),
+            );
+          };
+          // Blender 的样条手感：在画面中间点四个角，围出一块区域，再按 F 闭合
+          for (const [fx, fy] of [[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]]) {
+            const at = point(fx, fy);
+            press(at);
+            release(at);
             compositorMaskSteps.pointSteps += 1;
             await wait(90);
           }
-          // Blender 里 F = 把首尾两个端点连起来（没闭合的样条没有面积）
           document.dispatchEvent(
             new KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true }),
           );
@@ -6352,26 +6412,64 @@ const HOST_PAGE = `<!doctype html>
             compositorMaskSteps.maskPoints = Number(maskInfo[0]?.points ?? 0);
             compositorMaskSteps.maskClosed = maskInfo[0]?.closed === true;
           }
-          await wait(120);
           // 底图有没有真的垫在下面（参考口接上「输入图像」之后，画面上方几块色条应该看得见）
-          const displayContext = display.getContext('2d');
+          const displayContext = maskCanvas.getContext('2d');
           let brightest = 0;
           for (const [fx, fy] of [[0.5, 0.08], [0.2, 0.18], [0.8, 0.18], [0.5, 0.8]]) {
             const piece = displayContext.getImageData(
-              Math.round(display.width * fx),
-              Math.round(display.height * fy),
+              Math.round(maskCanvas.width * fx),
+              Math.round(maskCanvas.height * fy),
               1,
               1,
             ).data;
             brightest = Math.max(brightest, piece[0], piece[1], piece[2]);
           }
           compositorMaskSteps.baseVisible = brightest > 60;
+          // Shift+A 搜索加「圆形遮罩」：形状菜单和节点搜索是同一套外观
+          document.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'a', shiftKey: true, bubbles: true, cancelable: true }),
+          );
+          await wait(320);
+          const shapeItems = [...document.querySelectorAll('.cg-mask-menu .cg-menu-item')];
+          compositorMaskSteps.shapeMenu = shapeItems.map((item) => item.textContent).join('|');
+          shapeItems
+            .find((item) => item.textContent?.includes('圆形遮罩'))
+            ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          await wait(420);
+          {
+            const maskInfo = window.__FISHERAI_COMPOSITOR__?.report?.()?.masks ?? [];
+            compositorMaskSteps.shapes = Number(maskInfo[0]?.shapes ?? 0);
+            compositorMaskSteps.kinds = (maskInfo[0]?.kinds ?? []).join(',');
+          }
+          // 画笔：切到画笔工具，在预览上真实拖一笔（白笔画 = 加入遮罩）
+          root.querySelector('[data-mask-tool="brush"]')?.dispatchEvent(
+            new MouseEvent('click', { bubbles: true, cancelable: true }),
+          );
+          await wait(200);
+          {
+            const from = point(0.32, 0.62);
+            const to = point(0.68, 0.62);
+            press(from, 161);
+            move({ clientX: (from.clientX + to.clientX) / 2, clientY: from.clientY });
+            move(to);
+            release(to);
+            await wait(360);
+            const state = window.__FISHERAI_COMPOSITOR__?.report?.()?.maskTools ?? {};
+            compositorMaskSteps.strokes = Number(state.strokes ?? 0);
+            const maskInfo = window.__FISHERAI_COMPOSITOR__?.report?.()?.masks ?? [];
+            compositorMaskSteps.paintBytes = Number(maskInfo[0]?.paint ?? 0);
+          }
+          root.querySelector('[data-mask-tool="select"]')?.dispatchEvent(
+            new MouseEvent('click', { bubbles: true, cancelable: true }),
+          );
+          await wait(200);
         }
-        // 完成 → 卡片预览应该有黑板白线
-        painter
-          ?.querySelector('.cg-maskpaint-actions button[data-primary="true"]')
-          ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-        await wait(500);
+        // 返回 VIEWER → 卡片预览应该有黑板白线
+        root.querySelector('.cg-preview-mode[data-mask-view="viewer"]')?.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, cancelable: true }),
+        );
+        await wait(600);
+        compositorMaskSteps.backToViewer = !root.querySelector('.cg-preview-mask');
         const preview = root.querySelector('[data-fisherai-mask-preview]');
         const previewImage = preview?.querySelector('img');
         compositorMaskSteps.previewBytes = String(previewImage?.src ?? '').length;
@@ -6422,16 +6520,12 @@ const HOST_PAGE = `<!doctype html>
         compositorMaskSteps.center = sample(0.5, 0.5);
         compositorMaskSteps.corner = sample(0.15, 0.15);
 
-        // 再打开绘制层：蒙版要从存下来的黑白图里读回来（截图 = 交付图）
-        const finalCard = [...root.querySelectorAll('.cg-node')].find(
-          (element) => element.querySelector('.cg-node-title')?.textContent?.trim() === '遮罩',
-        );
-        finalCard
-          ?.querySelector('.cg-mask-actions button')
-          ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-        await until(() => document.querySelector('.cg-maskpaint'), 8000);
+        // 再进一次遮罩模式：形状要从数据块里读回来（截图 = 交付图）
+        await openMaskMode();
         await wait(400);
-        compositorMaskSteps.reopened = !!document.querySelector('.cg-maskpaint');
+        compositorMaskSteps.reopened =
+          !!root.querySelector('.cg-preview-mask') &&
+          Number(window.__FISHERAI_COMPOSITOR__?.report?.()?.maskTools?.points ?? 0) >= 4;
       } catch (error) {
         compositorMaskSteps.error = String((error && error.stack) || error);
       }
@@ -8602,7 +8696,7 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
       `params=${scene.paramsInNode} wheels=${scene.wheels} values=${scene.wheelValues} paramWidth=${scene.paramWidth} cardWidth=${scene.nodeWidth} scale=${scene.viewScale}`);
     report('四轮卡片宽度够横排四个色轮（≥700px）',
       Number(scene.nodeWidth) >= 700, String(scene.nodeWidth));
-    report('新卡片以指针为中心（指针没进过 stage → 中心落在 stage 正中）',
+    report('新卡片以指针为中心（点菜单那一刻的指针 → 卡片中心落在指针上）',
       !!scene.addedCenterDelta &&
         Math.abs(Number(scene.addedCenterDelta.dx)) <= 4 &&
         Math.abs(Number(scene.addedCenterDelta.dy)) <= 6,
@@ -8791,10 +8885,13 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
   }
 
   /**
-   * 遮罩（?xcompositor=mask，v1.94）：用户 2026-11-11 原文
-   * 「在调色面板做绘制功能…遮罩要用混合节点来实现，接入黑白遮罩图像来实现。
-   *  参考 blender 的遮罩操作方式」。这一场证明「画出来的黑白图真的成了遮罩」：
-   * 卡片预览里有白色像素，接进预览后画面中心是白的、角落是黑的。
+   * 遮罩（?xcompositor=mask，v1.95）：用户 2026-11-11 原文
+   * 「这里要点击然后跳转另外一个页面来画遮罩，我觉得直接在左上角的预览切换成遮罩来上添加
+   *  绘制就好了。添加圆形和方型的遮罩工具，可以直接在画布预览区域 shift+a 搜索添加形状。
+   *  添加画笔工具和颜色工具。」这一场证明三件事：
+   *   ① 点「编辑」不再跳页，而是把上方预览切成遮罩模式（工具/颜色/笔刷都在预览底部）；
+   *   ② 圆 / 方形状与画笔笔画真的写进了项目级遮罩数据块，再进一次能读回来；
+   *   ③ 画出来的黑白图接到混合系数口真的生效：中心亮、角落暗。
    */
   if (label === 'compositor-mask') {
     const report = (name, good, extra = '') => {
@@ -8805,18 +8902,32 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     report('遮罩场景跑完了（没有半途报错）', scene.done === true && !scene.error,
       String(scene.error ?? '').slice(0, 300));
     report('搜 zb 能建出「遮罩」节点', scene.created === true);
-    report('点「编辑」打开了遮罩编辑大画布', scene.painterOpened === true);
-    report('用真指针在画布上点了 4 个控制点', Number(scene.pointSteps) >= 4,
+    report('点「编辑」把上方预览切成遮罩模式（不再弹全屏绘制层、预览画布只有一块）',
+      scene.painterOpened === true && Number(scene.previewCanvasCount) === 1,
+      `opened=${scene.painterOpened} canvases=${scene.previewCanvasCount}`);
+    report('遮罩模式底部工具栏：选择 / 画笔 / 圆形 / 方形',
+      scene.toolLabels === '选择,画笔,圆形,方形', String(scene.toolLabels));
+    report('用真指针在预览上点了 4 个控制点', Number(scene.pointSteps) >= 4,
       `points=${scene.pointSteps}`);
     report('按 F 把首尾端点连起来（样条闭合、有面积）',
       scene.maskClosed === true && Number(scene.maskPoints) === 4,
       `closed=${scene.maskClosed} points=${scene.maskPoints}`);
+    report('Shift+A 在预览里弹出形状搜索，选「圆形遮罩」→ 数据块里多一条圆形状',
+      /圆形遮罩/.test(String(scene.shapeMenu)) &&
+        Number(scene.shapes) >= 2 &&
+        /circle/.test(String(scene.kinds)),
+      `menu=${scene.shapeMenu} shapes=${scene.shapes} kinds=${scene.kinds}`);
+    report('画笔工具在预览上画了一笔（笔画数 + 画笔层写进数据块）',
+      Number(scene.strokes) >= 1 && Number(scene.paintBytes) > 1000,
+      `strokes=${scene.strokes} paint=${scene.paintBytes}`);
     report('栅格化后的黑白图存回节点（卡片预览拿到 dataURL）',
       Number(scene.previewBytes) > 2000, `bytes=${scene.previewBytes}`);
-    report('参考口接上「输入图像」后，编辑大画布垫着底图（对位用）',
+    report('返回 VIEWER 后预览区回到合成结果（不再盖遮罩画布）',
+      scene.backToViewer === true);
+    report('参考口接上「输入图像」后，遮罩画布垫着底图（对位用）',
       scene.baseConnected === true && scene.baseVisible === true,
       `connected=${scene.baseConnected} visible=${scene.baseVisible} ports=${JSON.stringify(scene.portRects ?? null)} link=${scene.linkStarted} drop=${scene.dropTarget} edges=${scene.edgeCount}`);
-    report('预览图里有白色笔画（不是全黑）', Number(scene.whitePixels) > 200,
+    report('预览图里有白色区域（不是全黑）', Number(scene.whitePixels) > 200,
       `white=${scene.whitePixels}`);
     if (scene.center) {
       report('遮罩接到预览后：画面中心是亮的、角落是暗的（黑白遮罩真的生效）',
@@ -8825,7 +8936,8 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     } else {
       console.log(`[browser] SKIP  ${label}: 这个 headless 环境读不到预览像素`);
     }
-    report('再打开编辑层能读回已画的遮罩（截图 = 交付图）', scene.reopened === true);
+    report('再进一次遮罩模式，形状与画笔从数据块读回来（截图 = 交付图）',
+      scene.reopened === true);
   }
 
   /**
