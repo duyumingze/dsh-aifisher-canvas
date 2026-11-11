@@ -8529,7 +8529,7 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
 
   /**
    * 「OpenAI 通道」面板取证场景（?channels=1，v1.30）：设置 → 闭源服务 里的多通道面板。
-   * 断言面板真的挂上了、有实际尺寸、方言下拉五项、三个一键预设都在 —— 截图就是交付图。
+   * 断言面板真的挂上了、有实际尺寸、方言下拉六项、四个一键预设都在 —— 截图就是交付图。
    */
   if (label === 'channels') {
     const report = (name, good, extra = '') => {
@@ -8540,15 +8540,16 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     report('截图取证：设置 → 闭源服务 → OpenAI 通道面板在画面里（有实际尺寸）',
       shot.panel === true && Number(shot.width) > 600 && Number(shot.height) > 240 && Number(shot.cards) >= 1,
       `${shot.width}×${shot.height} cards=${shot.cards}`);
-    report('请求方言下拉有五项（自动 / OpenAI 兼容 / 魔搭 / FisherAI / 阿里云百炼）',
-      shot.dialectOptions === 5 && shot.dialectValue === '',
+    report('请求方言下拉有六项（自动 / OpenAI 兼容 / 魔搭 / FisherAI / 阿里云百炼 / Midjourney）',
+      shot.dialectOptions === 6 && shot.dialectValue === '',
       `options=${shot.dialectOptions} value=${shot.dialectValue}`);
-    report('三个一键预设都在（魔搭 API-Inference + FisherAI + 阿里云百炼）',
+    report('四个一键预设都在（魔搭 API-Inference + FisherAI + 阿里云百炼 + FisherAI Midjourney）',
       Array.isArray(shot.presetLabels) &&
-        shot.presetLabels.length === 3 &&
+        shot.presetLabels.length === 4 &&
         /魔搭/.test(String(shot.presetLabels[0] || '')) &&
         /FisherAI/.test(String(shot.presetLabels[1] || '')) &&
-        /百炼/.test(String(shot.presetLabels[2] || '')),
+        /百炼/.test(String(shot.presetLabels[2] || '')) &&
+        /Midjourney/.test(String(shot.presetLabels[3] || '')),
       JSON.stringify(shot.presetLabels));
     report('面板说明里写清了 FisherAI 的路径差异（/image/generations）',
       /image\/generations/.test(String(shot.text || '')),
@@ -8602,10 +8603,11 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
      * 于是「图片编辑」静默变成「重新画一张」。所以设置页必须能看见这一项、能改，
      * 并且「自动」要当场把判定结果写出来（预置通道的地址是魔搭域名 → 应判成魔搭）。
      * v1.30 多了一套 FisherAI（work-fisher）方言 → 选项从 3 变 4。
+     * v1.92 百炼 / v1.93 Midjourney 各加一套 → 现在 6 项。
      */
     const dialect = settings.channelDialect ?? {};
-    report('通道卡片里有「请求方言」下拉，默认停在「自动」（自动 + OpenAI/魔搭/FisherAI/百炼 五项）',
-      dialect.selectPresent === true && dialect.value === '' && dialect.optionCount === 5,
+    report('通道卡片里有「请求方言」下拉，默认停在「自动」（自动 + OpenAI/魔搭/FisherAI/百炼/Midjourney 六项）',
+      dialect.selectPresent === true && dialect.value === '' && dialect.optionCount === 6,
       JSON.stringify({ present: dialect.selectPresent, value: dialect.value, options: dialect.optionCount }));
     report('「自动」按地址判出来并写在界面上（魔搭域名 → 魔搭 ModelScope）',
       /自动/.test(dialect.hintText || '') && /魔搭 ModelScope/.test(dialect.hintText || ''),

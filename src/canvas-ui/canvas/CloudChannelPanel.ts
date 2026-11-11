@@ -29,7 +29,7 @@ import {
 export type CloudChannelKind = ChannelKind;
 
 /** 请求方言（与 host 的 ChannelDialect 同一套值）。 */
-export type ChannelDialect = 'openai' | 'modelscope' | 'workfisher' | 'dashscope';
+export type ChannelDialect = 'openai' | 'modelscope' | 'workfisher' | 'dashscope' | 'midjourney';
 
 const API = '/api/aifisher/canvas/cloud-channels';
 const PANEL_ATTRIBUTE = 'data-fisherai-cloud-channels';
@@ -48,6 +48,7 @@ const DIALECT_LABELS: Readonly<Record<ChannelDialect, string>> = Object.freeze({
   modelscope: '魔搭 ModelScope',
   workfisher: 'FisherAI（work-fisher）',
   dashscope: '阿里云百炼（DashScope）',
+  midjourney: 'Midjourney（/v1/midjourney）',
 });
 
 /**
@@ -85,6 +86,11 @@ function dialectHintText(draft: ChannelDraft): string {
     return '路径 /api/v1/services/aigc/image-generation/generation、异步头 X-DashScope-Async；'
       + '参数放 input.messages + parameters（n / aspect_ratio / resolution），轮询 /api/v1/tasks/{id}；'
       + '参考图只收公网 http(s) 直链。';
+  }
+  if (draft.dialect === 'midjourney') {
+    return '路径 /midjourney/generations（计费按路径，model 不参与路由）、参考图走 image_urls；'
+      + '任务号在 data[0].task_id，轮询 /midjourney/tasks/{id}；一个任务固定出 4 张候选，'
+      + '画布的「生成数量」只决定留几张。';
   }
   if (draft.dialect === 'openai') {
     return '参考图放 image（单张=字符串，多张=数组）。';
@@ -156,6 +162,23 @@ const DASHSCOPE_PRESET = Object.freeze({
   ]),
 });
 
+/**
+ * 「FisherAI Midjourney」一键预设（2026-11-11，用户原话「帮我再画布接一下 Midjourney 模型」
+ * + 价格页 https://api.work-fisher.com/pricing?search=Midjourney&kind=image）。
+ *
+ * 它和 FisherAI 的图像/视频**同一个域名、同一个密钥**，所以单独一条通道最省事；
+ * 但请求协议完全不同（`/midjourney/generations`、`data[0].task_id`、`/midjourney/tasks/{id}`、
+ * 参考图字段是 `image_urls`），而且**按域名猜不出来** —— 必须在保存时显式写 `dialect: 'midjourney'`。
+ *
+ * 只预设 `midjourney-imagine`（文生图/垫图）；upscale / variation / zoom 这些二次操作
+ * 都是 `/generations/{action}` 且要 task_id + index，画布还没接。
+ */
+const MIDJOURNEY_PRESET = Object.freeze({
+  label: 'FisherAI Midjourney',
+  baseUrl: 'https://api.work-fisher.com/v1',
+  models: Object.freeze([{ id: 'midjourney-imagine', kind: 'image' as ChannelKind }]),
+});
+
 interface ChannelModelDto {
   id: string;
   kind: ChannelKind;
@@ -218,6 +241,7 @@ const MAX_MODEL_LABEL_LENGTH = 80;
 /** 某套方言某媒体类型的默认路径（与 host 的 channelPath 对齐；界面只用于占位提示）。 */
 function defaultPathFor(dialect: ChannelDialect, kind: ChannelKind): string {
   if (dialect === 'workfisher' && kind === 'image') return '/image/generations';
+  if (dialect === 'midjourney' && kind === 'image') return '/midjourney/generations';
   if (dialect === 'dashscope') {
     if (kind === 'image') return '/api/v1/services/aigc/image-generation/generation';
     if (kind === 'text') return '/compatible-mode/v1/chat/completions';
@@ -420,6 +444,26 @@ function dashscopeDraft(index: number): ChannelDraft {
   return draft;
 }
 
+/** 「+ FisherAI Midjourney」预设草稿：调好的地址、方言与 Imagine 模型。 */
+function midjourneyDraft(index: number): ChannelDraft {
+  const draft = emptyDraft(index);
+  draft.key = `mj${index}`;
+  draft.label = MIDJOURNEY_PRESET.label;
+  draft.baseUrl = MIDJOURNEY_PRESET.baseUrl;
+  // 必须显式写 midjourney：同一个 work-fisher 域名按地址会被判成 workfisher（那是图像/视频那套）
+  draft.dialect = 'midjourney';
+  draft.models = new Map(
+    MIDJOURNEY_PRESET.models.map((model) => [model.id, { kind: model.kind, label: '' }]),
+  );
+  draft.probed = MIDJOURNEY_PRESET.models.map((model) => model.id);
+  draft.probedNote =
+    '预设的模型是 Midjourney 的 Imagine（文生图 / 垫图）。一个任务固定出 4 张候选，'
+    + '计费按任务（relax / fast / turbo 三档价不同），画布的「生成数量」只决定留几张。'
+    + '参考图走垫图：插件会先上传成本站公网直链再放进 image_urls。'
+    + 'upscale / variation / zoom 这些二次操作画布还没接，需要的话到端点后台用任务号操作。';
+  return draft;
+}
+
 // ------------------------------------------------------------------ 面板
 
 export function mountCloudChannelPanel(host: HTMLElement): () => void {
@@ -512,9 +556,11 @@ export function mountCloudChannelPanel(host: HTMLElement): () => void {
         '「请求方言」决定参考图落在哪个字段、路径与尺寸怎么写：OpenAI 兼容用 image、尺寸给 1024x576；'
           + '魔搭只认 image_url（数组）；FisherAI 走 /image/generations，宽高比给 size、档位给 resolution，'
           + '参考图要先换成公网直链；阿里云百炼走 /api/v1/services/aigc/image-generation/generation，'
-          + '参数在 input.messages + parameters，任务号在 output.task_id。'
+          + '参数在 input.messages + parameters，任务号在 output.task_id；'
+          + 'Midjourney 走 /midjourney/generations，参考图放在 image_urls，任务号在 data[0].task_id。'
           + '填错**不会报错** —— 魔搭会把参考图整张丢掉、FisherAI 会把路径错报成 404，'
-          + '看到的都像「编辑没生效」。选「自动」就按 Base URL 的域名判定。',
+          + '看到的都像「编辑没生效」。选「自动」就按 Base URL 的域名判定'
+          + '（Midjourney 和 FisherAI 同域名、猜不出来，必须显式选）。',
       ),
     );
     const actions = el('div', 'flex flex-wrap items-center gap-3');
@@ -558,6 +604,17 @@ export function mountCloudChannelPanel(host: HTMLElement): () => void {
       );
     });
     actions.append(dashscopePreset);
+    const midjourneyPreset = button('+ FisherAI Midjourney');
+    midjourneyPreset.setAttribute('data-fisherai-channel-preset', 'midjourney');
+    midjourneyPreset.addEventListener('click', () => {
+      drafts = [...drafts, midjourneyDraft(newCount++)];
+      render();
+      setStatus(
+        '已按 FisherAI Midjourney 预设填好地址（api.work-fisher.com/v1）与模型'
+          + '（midjourney-imagine）—— 填上 API Key、点「保存通道」即可在画布上用。',
+      );
+    });
+    actions.append(midjourneyPreset);
     const reload = button('重新读取');
     reload.addEventListener('click', () => {
       void (async () => {
@@ -851,7 +908,7 @@ export function mountCloudChannelPanel(host: HTMLElement): () => void {
     const dialectSelect = el('select', INPUT) as HTMLSelectElement;
     dialectSelect.setAttribute('data-fisherai-channel-dialect', draft.id || draft.key);
     dialectSelect.append(optionElement('自动（按地址判定）', ''));
-    for (const dialect of ['openai', 'modelscope', 'workfisher', 'dashscope'] as const) {
+    for (const dialect of ['openai', 'modelscope', 'workfisher', 'dashscope', 'midjourney'] as const) {
       dialectSelect.append(optionElement(DIALECT_LABELS[dialect], dialect));
     }
     dialectSelect.value = draft.dialect;

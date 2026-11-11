@@ -54,14 +54,19 @@ export interface CloudChannelModel {
  *     `1024x576` 像素串：路径是 `/image/generations`（单数）、宽高比走 `size:"16:9"`、
  *     档位走 `resolution:"1k"`，而且是**异步任务网关**（提交拿 task_id → 轮询 `/image/generations/{id}`）。
  *     参考素材只收**公网直链**（先 POST /files/upload 换链接），data URL 一律不收。
+ *   - Midjourney（同一个 work-fisher 网关的 `/v1/midjourney/*`）又是另一套：路径是
+ *     `/midjourney/generations`（计费 SKU 由路径决定，`body.model` 不参与路由）、任务号在
+ *     `data[0].task_id`、轮询 `/midjourney/tasks/{id}`、收尾给 `image_urls`（4 张）+ `grid_image_url`。
+ *     一个任务固定出 4 张候选，`n` 传了也无效。
  */
-export type ChannelDialect = 'openai' | 'modelscope' | 'workfisher' | 'dashscope';
+export type ChannelDialect = 'openai' | 'modelscope' | 'workfisher' | 'dashscope' | 'midjourney';
 
 export const CHANNEL_DIALECTS: readonly ChannelDialect[] = Object.freeze([
   'openai',
   'modelscope',
   'workfisher',
   'dashscope',
+  'midjourney',
 ]);
 
 export const CHANNEL_DIALECT_LABELS: Readonly<Record<ChannelDialect, string>> = Object.freeze({
@@ -69,6 +74,7 @@ export const CHANNEL_DIALECT_LABELS: Readonly<Record<ChannelDialect, string>> = 
   modelscope: '魔搭 ModelScope',
   workfisher: 'FisherAI（work-fisher）',
   dashscope: '阿里云百炼（DashScope）',
+  midjourney: 'Midjourney（/v1/midjourney）',
 });
 
 /**
@@ -89,7 +95,14 @@ export const CHANNEL_DIALECT_LABELS: Readonly<Record<ChannelDialect, string>> = 
 const DASHSCOPE_HOST_PATTERN =
   /(?:^|\.)(?:dashscope(?:-intl)?\.aliyuncs\.com|maas\.aliyuncs\.com|(?:dashscope|bailian|maas)\.(?:qianwenai|qianwenaiapi)\.com)$/;
 
-/** 按地址猜方言：魔搭 / FisherAI / 百炼。 */
+/**
+ * 按地址猜方言：魔搭 / FisherAI / 百炼。
+ *
+ * **`midjourney` 故意不在自动判定里**（2026-11-11 用户原话「帮我再画布接一下 Midjourney 模型」）：
+ * 它和 FisherAI 图像/视频**同一个域名、同一个密钥**，唯一的分界是路径 `/v1/midjourney/*`。
+ * 按域名猜只会把它判成 workfisher，然后把聊天/图像那套请求体打到 Midjourney 路径上 ——
+ * 所以这类通道必须在设置页显式选「Midjourney」，界面上也有「自动 → 判成了哪套」那行小字提醒。
+ */
 export function detectChannelDialect(baseUrl: string): ChannelDialect {
   try {
     const host = new URL(baseUrl).hostname.toLowerCase();
@@ -101,7 +114,6 @@ export function detectChannelDialect(baseUrl: string): ChannelDialect {
   }
   return 'openai';
 }
-
 /** 一条通道**实际**用哪套方言：显式配了就用它，没配就按地址判定。 */
 export function channelDialect(channel: Pick<CloudChannel, 'baseUrl' | 'dialect'>): ChannelDialect {
   return channel.dialect ?? detectChannelDialect(channel.baseUrl);
@@ -148,6 +160,12 @@ const DIALECT_PATHS: Readonly<Partial<Record<ChannelDialect, Partial<Record<Clou
     // 文本走它的 OpenAI 兼容模式，路径与 OpenAI 一样是 chat/completions。
     dashscope: Object.freeze({
       text: '/compatible-mode/v1/chat/completions',
+    }),
+    // Midjourney：计费 SKU 由**路径**决定（`/midjourney/generations` = `midjourney-imagine`），
+    // body.model 不参与路由。二次操作（upscale / variation / zoom …）是
+    // `/midjourney/generations/{action}`，画布目前只接文生图/垫图这一条。
+    midjourney: Object.freeze({
+      image: '/midjourney/generations',
     }),
   });
 
@@ -988,6 +1006,42 @@ export function buildChannelPayload(input: {
     return payload;
   }
   const count = countOf(body);
+  if (kind === 'image' && dialect === 'midjourney') {
+    /**
+     * Midjourney（`api.work-fisher.com` 的 `/v1/midjourney/*`，2026-11-11 用户给了价格页
+     * https://api.work-fisher.com/pricing?search=Midjourney&kind=image）。
+     *
+     * **与同域名下 FisherAI 的图像/视频不是一套协议**，官方文档也特意写了
+     * 「与历史 /mj/* Discord 代理协议不是同一套」：
+     *
+     *   POST {base}/midjourney/generations
+     *   { model:'midjourney', prompt, size:'16:9', version:'8.1', speed:'fast',
+     *     image_urls:[公网直链] }
+     *   → { code:200, data:[{ status:'submitted', task_id:'task_…' }] }
+     *   GET  {base}/midjourney/tasks/{task_id}
+     *   → { id, status:'SUCCESS'|'IN_PROGRESS'|'FAILURE'|'MODAL', progress,
+     *       grid_image_url, image_urls:[4 张], buttons:[{customId,label}] }
+     *
+     * 四处照抄（错一处都是 400 / 空结果，报错里看不出缺的是哪个）：
+     *   ① 计费 SKU 由**路径**决定（kebab-case action），`body.model` 不参与路由 —— 这里写文档里的 `midjourney`；
+     *   ② 任务号在 `data[0].task_id`（**数组**，不是工作流那套 `data.task_id`）；
+     *   ③ 轮询是 `/midjourney/tasks/{id}` —— 既不是「提交地址 + /{id}」，也不是 `/v1/tasks/{id}`（实测 404 Invalid URL）；
+     *   ④ 参考图走 `image_urls`（垫图），和 FisherAI 的 `images` 不是同一个字段名。
+     *
+     * 一个 Imagine 任务**固定出 4 张候选**（四宫格 + 4 张单图），`n` 传了也无效；
+     * 画布的「生成数量」在这里表示「保留几张」，由 cloudGenerationRouter 在收尾时按 `image_urls` 截取。
+     */
+    const payload: Record<string, unknown> = { model: 'midjourney', prompt };
+    const ratio = channelAspectRatio(body);
+    if (ratio) payload.size = ratio;
+    const version = typeof body?.version === 'string' ? body.version.trim() : '';
+    if (version) payload.version = version;
+    const speed = typeof body?.speed === 'string' ? body.speed.trim().toLowerCase() : '';
+    if (speed === 'relax' || speed === 'fast' || speed === 'turbo') payload.speed = speed;
+    // `count` 不发给端点（MJ 不收 n）；它只在 router 收尾时决定留几张。
+    if (images.length) payload.image_urls = [...images];
+    return payload;
+  }
   if (kind === 'image' && dialect === 'workfisher') {
     /*
      * FisherAI 图像任务。`nsfw_check: false` 是他们文档里的必填项（用户给的 curl 样例也带着它），
@@ -1184,7 +1238,8 @@ export function channelAsyncHeaders(dialect: ChannelDialect = 'modelscope'): Rec
   if (dialect === 'dashscope') return { 'X-DashScope-Async': 'enable' };
   // 只有 FisherAI 那套网关不认这个头；OpenAI 兼容的中转站一律忽略未知头，
   // 所以保持 v1.11 起的老行为（非文本请求都带），免得动到已经跑通的通道。
-  if (dialect === 'workfisher') return {};
+  // Midjourney 与 FisherAI 是同一个网关（/v1/midjourney/*），同样不带。
+  if (dialect === 'workfisher' || dialect === 'midjourney') return {};
   return { 'X-ModelScope-Async-Mode': 'true' };
 }
 
@@ -1197,6 +1252,14 @@ export function channelTaskPoll(input: {
   submitUrl?: string;
 }): { url: string; headers: Record<string, string> } {
   const dialect = channelDialect(input.channel);
+  if (dialect === 'midjourney') {
+    // GET {base}/midjourney/tasks/{task_id}（与提交路径 /midjourney/generations 并列，
+    // 不是「提交路径 + /{id}」）。baseUrl 里已含 /v1，所以完整地址是 /v1/midjourney/tasks/…
+    return {
+      url: `${input.channel.baseUrl.replace(/\/+$/u, '')}/midjourney/tasks/${encodeURIComponent(input.taskId)}`,
+      headers: { accept: 'application/json' },
+    };
+  }
   if (dialect === 'workfisher') {
     const submit =
       (input.submitUrl && input.submitUrl.trim()) || `${input.channel.baseUrl}/image/generations`;
@@ -1238,7 +1301,12 @@ export function channelTaskEnvelope(parsed: unknown): Record<string, unknown> {
   return body;
 }
 
-/** 从响应里取任务 ID（魔搭 / FisherAI 都是 `task_id`，FisherAI 还包在 data 里）。 */
+/**
+ * 从响应里取任务 ID（魔搭 / FisherAI 都是 `task_id`，FisherAI 还包在 data 里）。
+ *
+ * Midjourney 的提交回执是 `{code:200, data:[{status:'submitted', task_id}]}` ——
+ * `data` 是**数组**（`channelTaskEnvelope` 只认对象，所以这里单独扫一遍 data[]）。
+ */
 export function channelTaskId(parsed: unknown): string | null {
   const root = (parsed ?? {}) as Record<string, unknown>;
   for (const body of [channelTaskEnvelope(parsed), root]) {
@@ -1248,6 +1316,16 @@ export function channelTaskId(parsed: unknown): string | null {
     }
     if (typeof body.task_status === 'string' && typeof body.id === 'string' && body.id.trim()) {
       return body.id.trim();
+    }
+  }
+  if (Array.isArray(root.data)) {
+    for (const item of root.data as unknown[]) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+      const entry = item as Record<string, unknown>;
+      for (const key of ['task_id', 'taskId']) {
+        const value = entry[key];
+        if (typeof value === 'string' && value.trim()) return value.trim();
+      }
     }
   }
   /**
@@ -1264,10 +1342,14 @@ export type ChannelTaskState = 'running' | 'succeeded' | 'failed';
 
 /**
  * 任务状态归一（魔搭：PENDING/RUNNING/SUCCEED；FisherAI：SUBMITTED/IN_PROGRESS/SUCCESS/FAILURE；
- * 百炼：PENDING/RUNNING/SUCCEEDED/FAILED/CANCELED/UNKNOWN）。
+ * 百炼：PENDING/RUNNING/SUCCEEDED/FAILED/CANCELED/UNKNOWN；
+ * Midjourney：NOT_START/SUBMITTED/IN_PROGRESS/SUCCESS/FAILURE/MODAL）。
  *
  * 百炼「任务失败」还有一种没有 output 的形状：HTTP 200 + 根上 `{code, message, request_id}`。
  * 不把它当失败的话，轮询会一直读到「running」直到超时（15 分钟白等）。
+ *
+ * Midjourney 的 `MODAL` 是「任务在等补参数」（局部重绘要先给 mask）——画布不接二次补参，
+ * 当 running 会白等到超时，所以按失败报出来。
  */
 export function channelTaskState(parsed: unknown): { state: ChannelTaskState; raw: string } {
   const body = channelTaskEnvelope(parsed);
@@ -1277,9 +1359,18 @@ export function channelTaskState(parsed: unknown): { state: ChannelTaskState; ra
     return { state: 'succeeded', raw };
   }
   if (
-    ['FAILED', 'FAIL', 'FAILURE', 'ERROR', 'CANCELED', 'CANCELLED', 'REVOKED', 'TIMEOUT', 'UNKNOWN'].includes(
-      value,
-    )
+    [
+      'FAILED',
+      'FAIL',
+      'FAILURE',
+      'ERROR',
+      'CANCELED',
+      'CANCELLED',
+      'REVOKED',
+      'TIMEOUT',
+      'UNKNOWN',
+      'MODAL',
+    ].includes(value)
   ) {
     return { state: 'failed', raw };
   }
@@ -1297,7 +1388,7 @@ export function channelTaskState(parsed: unknown): { state: ChannelTaskState; ra
 export function channelTaskError(parsed: unknown): string {
   if (!parsed || typeof parsed !== 'object') return '';
   const body = channelTaskEnvelope(parsed);
-  for (const key of ['errors', 'fail_reason', 'failed_reason', 'message', 'error']) {
+  for (const key of ['errors', 'fail_reason', 'failReason', 'failed_reason', 'message', 'error']) {
     const value = body[key];
     if (typeof value === 'string' && value.trim()) return value.trim();
     if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -1314,6 +1405,22 @@ export function channelTaskError(parsed: unknown): string {
     if (typeof value === 'string' && value.trim()) return value.trim();
   }
   return '';
+}
+
+/**
+ * Midjourney 收尾里的单图列表（`image_urls`，一个 Imagine 任务固定 4 张）。
+ *
+ * 为什么不用通用的 `collectResultRefs`：它会把 `grid_image_url`（四宫格大图）也当成一条结果，
+ * 于是画布上多出一张 2×2 拼图，而它并不是用户要的「第 N 张」。这里只认 `image_urls`，
+ * 拿到之后再按画布的「生成数量」截取（见 cloudGenerationRouter）。
+ */
+export function midjourneyImageUrls(parsed: unknown): string[] {
+  const body = channelTaskEnvelope(parsed);
+  const list = body.image_urls;
+  if (!Array.isArray(list)) return [];
+  return list
+    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+    .filter((value) => value.length > 0);
 }
 
 /** 参考素材直链缓存：同一通道 + 同一份字节，12 小时内不重复上传（签名直链本身约 24h 过期）。 */

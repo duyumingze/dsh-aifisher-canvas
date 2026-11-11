@@ -61,6 +61,7 @@ import {
   describeFetchFailure,
   inlineChannelReferences,
   isConnectLevelFetchFailure,
+  midjourneyImageUrls,
   publicChannelReferences,
   readCloudChannels,
   resolveChannelModel,
@@ -433,6 +434,19 @@ async function handleChannelGeneration(
     });
     return true;
   }
+  // Midjourney 目前只翻了图像（`/midjourney/generations`）。同网关的
+  // `/midjourney/generations/video` 是另一套参数（video_type / batch_size），没接。
+  if (dialect === 'midjourney' && kind !== 'image') {
+    sendJson(res, 422, {
+      error: `通道「${channel.label}」的请求方言是 Midjourney，目前只支持图像生成；${KIND_LABELS[kind]}节点请换别的通道。`,
+      code: 'CHANNEL_KIND_UNSUPPORTED',
+      channel: channel.id,
+      channelLabel: channel.label,
+      model: model.id,
+      hint: 'Midjourney 的图生视频走 /midjourney/generations/video（video_type / batch_size），还没接。',
+    });
+    return true;
+  }
 
   let images: string[] = [];
   let videos: string[] = [];
@@ -443,8 +457,9 @@ async function handleChannelGeneration(
       // 魔搭/OpenAI 兼容要的是内联（或原样带公网链接）；
       // 百炼（可灵）同样只收公网直链，但它没有自己的上传口 —— 本机素材直接给可操作的 422，
       // 不把 data URL 发过去被当成「没传参考图」。
+      // Midjourney 与 FisherAI 同一个网关，`image_urls` 同样只认公网直链，走同一个上传口。
       images =
-        dialect === 'workfisher'
+        dialect === 'workfisher' || dialect === 'midjourney'
           ? await uploadChannelReferences(channel, references, {
               ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
               fetcher,
@@ -520,6 +535,43 @@ async function handleChannelGeneration(
 
   let parsed = settled.parsed;
   let raw = settled.raw;
+
+  /**
+   * Midjourney：一个 Imagine 任务**固定出 4 张候选**（`n` 传了也无效，计费按任务）。
+   * 画布上的「生成数量」在这里表示「保留几张」，所以收尾时按 `image_urls` 截取；
+   * 同时把 `grid_image_url`（四宫格大图）挡在结果之外 —— 通用提取会把它也算一条。
+   */
+  if (plan.dialect === 'midjourney') {
+    const candidates = midjourneyImageUrls(parsed);
+    /**
+     * 少数情况下上游只回四宫格、不给裁剪后的 `image_urls`（文档里两个字段是并列的，
+     * 但中转链路出过只有 grid 的状况）。这时**至少把那张四宫格交出去** ——
+     * 任务已经按次计费，回一句「没认出结果」等于白花一次钱。
+     */
+    const grid =
+      isObject(parsed) && typeof parsed.grid_image_url === 'string' && parsed.grid_image_url.trim()
+        ? parsed.grid_image_url.trim()
+        : '';
+    const pool = candidates.length ? candidates : grid ? [grid] : [];
+    if (!pool.length) {
+      return fail({
+        status: 502,
+        code: 'CLOUD_RESULT_UNRECOGNIZED',
+        message:
+          `通道「${channel.label}」的 Midjourney 任务已结束，但响应里既没有 image_urls 也没有 grid_image_url` +
+          '（可能是上游还在收尾，稍后重试；也可以拿着任务号到端点后台看）。',
+        endpoint: plan.endpoint,
+      });
+    }
+    if (!candidates.length) {
+      console.warn(
+        `[aifisher-canvas] Midjourney 任务没有 image_urls，回退为四宫格大图（${grid.slice(0, 80)}）`,
+      );
+    }
+    const keep = Math.min(channelRequestCount(body), pool.length);
+    parsed = { output_images: pool.slice(0, keep) };
+    raw = JSON.stringify(parsed);
+  }
 
   const wanted = kind === 'text' ? 1 : channelRequestCount(body);
   // 魔搭与 FisherAI 都不认「一次多张」：魔搭忽略 n，FisherAI 的低价扩展版一个任务只回一张。
@@ -689,12 +741,18 @@ async function pollChannelTask(input: {
     if (status.state === 'succeeded') return read;
     if (status.state === 'failed') {
       const reason = channelTaskError(read.parsed);
+      // Midjourney 的 MODAL 是「任务在等补参数」（局部重绘要先给 mask）；画布不接二次补参，
+      // 照通用文案说「端点没给原因」会让人以为任务挂了。
+      const modal = /^modal$/i.test(status.raw.trim());
       return {
         error: {
           status: 502,
           code: 'CHANNEL_TASK_FAILED',
           taskId,
-          message: `云端通道「${channel.label}」的任务失败${reason ? `：${reason}` : '（端点没给原因）'}。`,
+          message: modal
+            ? `云端通道「${channel.label}」的任务停在 MODAL（等待补参数，画布不支持二次补参）` +
+              `（任务号 ${taskId}）。`
+            : `云端通道「${channel.label}」的任务失败${reason ? `：${reason}` : '（端点没给原因）'}。`,
         },
       };
     }

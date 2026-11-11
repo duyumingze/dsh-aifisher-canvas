@@ -79,35 +79,91 @@ function imageEntry(name: string, channelLabel: string, dialect?: string) {
    * （CHANNEL_REFERENCE_NOT_PUBLIC），而不是让「图片编辑」悄悄变成「重新画一张」。
    */
   const dashscope = dialect === 'dashscope';
+  /**
+   * Midjourney（`/v1/midjourney/*`）与上面几套的差别落在节点上就是三件事：
+   *   - 没有「分辨率」概念（只出宽高比），所以只留一档 1K，别让人以为能选 4K；
+   *   - 一个任务**固定出 4 张候选**，`n` 无效，所以「生成数量」上限是 4（只决定留几张）；
+   *   - 版本（--v）与速度（relax/fast/turbo）是它自己的参数，垫图则是 `image_urls`。
+   * 参考图和 FisherAI 一样要公网直链，host 会自动上传并缓存 12h。
+   */
+  const midjourney = dialect === 'midjourney';
   return {
     ...baseEntry(name, channelLabel),
+    ...(midjourney
+      ? {
+          description:
+            `自配通道「${channelLabel}」提供的 Midjourney Imagine：一个任务固定出 4 张候选，`
+            + '「生成数量」只决定画布保留几张（计费按任务，与张数无关）。'
+            + '参考图走垫图（公网直链，插件自动上传并缓存 12h）。',
+        }
+      : {}),
     maxInputs: 14,
     supportedReferenceTypes: ['text', 'image'],
     supportedImageFormats: SUPPORTED_IMAGE_FORMATS,
     maxImageSizeMb: 20,
     maxResolution: '',
-    resolutions: ['1K', '2K', '4K'],
+    resolutions: midjourney ? ['1K'] : ['1K', '2K', '4K'],
     // 可灵 v3-omni 的 aspect_ratio 只有 16:9 / 9:16 / 1:1；选别的会被端点 400。
-    aspectRatios: dashscope
-      ? ['16:9', '9:16', '1:1']
-      : ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9'],
+    // Midjourney 收 MJ 自己的宽高比词表（与 vendor 内置的 Midjourney 条目同口径）。
+    aspectRatios: midjourney
+      ? ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9']
+      : dashscope
+        ? ['16:9', '9:16', '1:1']
+        : ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9'],
     // ★ 必需：没有 imageModes 时 composer 会认为「当前模型不支持文生图」，生成按钮直接禁用
     imageModes: [
       { label: '文生图', value: 'text-to-image', allowedInputs: { text: 14 } },
       { label: '图生图', value: 'image-to-image', allowedInputs: { text: 14, image: 14 } },
     ],
-    advancedParams: [
-      {
-        key: 'generateCount',
-        label: '生成数量',
-        type: 'number',
-        default: 1,
-        min: 1,
-        step: 1,
-        // 可灵的 n 收 1–9；别的方言 host 侧统一夹在 8，这里只对百炼放到 9
-        ...(dashscope ? { max: 9 } : {}),
-      },
-    ],
+    advancedParams: midjourney
+      ? [
+          {
+            key: 'generateCount',
+            label: '保留结果数',
+            type: 'slider',
+            default: 1,
+            // 一个任务固定 4 张候选，选 4 = 全留下
+            min: 1,
+            max: 4,
+          },
+          {
+            key: 'version',
+            label: '模型版本',
+            type: 'select',
+            default: '8.1',
+            options: [
+              { label: 'V8.2', value: '8.2' },
+              { label: 'V8.1', value: '8.1' },
+              { label: 'V7', value: '7' },
+              { label: 'V6.1', value: '6.1' },
+              { label: 'V5.2', value: '5.2' },
+              { label: 'V5.1', value: '5.1' },
+            ],
+          },
+          {
+            key: 'speed',
+            label: '生成速度',
+            type: 'select',
+            default: 'fast',
+            options: [
+              { label: 'Relax（最便宜，排队久）', value: 'relax' },
+              { label: 'Fast', value: 'fast' },
+              { label: 'Turbo（最快，约 2 倍价）', value: 'turbo' },
+            ],
+          },
+        ]
+      : [
+          {
+            key: 'generateCount',
+            label: '生成数量',
+            type: 'number',
+            default: 1,
+            min: 1,
+            step: 1,
+            // 可灵的 n 收 1–9；别的方言 host 侧统一夹在 8，这里只对百炼放到 9
+            ...(dashscope ? { max: 9 } : {}),
+          },
+        ],
   };
 }
 

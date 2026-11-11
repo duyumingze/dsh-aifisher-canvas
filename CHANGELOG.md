@@ -6,6 +6,32 @@
 > 对不上的（v1.70–v1.76 调色面板迭代、v1.82–v1.83 整页扩图）按批次合并并保留日期，
 > 不再写「未发布」这种既不是版本也不是日期的标题。
 
+## v1.93.0 — 2026-11-11
+
+### 新增「Midjourney」通道方言：接上 `midjourney-imagine`
+
+用户原话（2026-11-11）：「帮我再画布接一下Midjourney模型」+ 价格页
+`https://api.work-fisher.com/pricing?search=Midjourney&kind=image`。
+
+- 新增第 5 套请求方言 `midjourney`。它和同域名下的 FisherAI 图像/视频**不是一套协议**
+  （官方文档原话「与历史 /mj/* Discord 代理协议不是同一套」）：提交
+  `POST {base}/midjourney/generations`，请求体
+  `{ model:'midjourney', prompt, size, version, speed, image_urls }`；
+  **计费 SKU 由路径决定**（`midjourney-imagine`），`body.model` 不参与路由；
+  任务号在 `data[0].task_id`（数组）、轮询 `GET {base}/midjourney/tasks/{id}`、
+  收尾给 `image_urls`（4 张单图）+ `grid_image_url`（四宫格）。
+- **按域名猜不出来**：同一个 `api.work-fisher.com` 既跑 FisherAI 图像/视频，也跑 Midjourney，
+  所以「自动」永远判成 workfisher；这类通道必须在设置页显式选「Midjourney」（有预设一键填）。
+- 一个 Imagine 任务**固定出 4 张候选**，`n` 传了也无效。画布的「生成数量」因此表示「保留几张」：
+  host 收尾时按 `image_urls` 截取（1–4），四宫格大图不算结果；计费按任务，与张数无关。
+- 模型条目带 MJ 自己的参数：**模型版本**（8.2 / 8.1 / 7 / 6.1 / 5.2 / 5.1）与
+  **生成速度**（relax / fast / turbo，价不同），分辨率只留 1K（MJ 没有档位概念）。
+  参考图走垫图：先 `POST /files/upload` 换公网直链再放进 `image_urls`（不收 base64）。
+- 失败形状补齐：`MODAL`（等待补参数，画布不支持二次补参）按失败立即报，不白等到超时。
+  目前只接图像；视频节点连到这类通道会得到一条说清原因的 422。
+- 设置页新增「+ FisherAI Midjourney」一键预设，方言下拉 5 项 → 6 项。
+- 新回归 `scripts/test-cloud-channels-midjourney.mjs`（已登记 `scripts/suites.mjs`）。
+
 ## v1.92.0 — 2026-11-11
 
 ### 新增「阿里云百炼（DashScope）」通道方言：接上 `kling/kling-v3-omni-image-generation`
