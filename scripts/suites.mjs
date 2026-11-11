@@ -45,6 +45,7 @@ export const SUITES = [
   { file: 'scripts/test-ark-generation.mjs' },
   { file: 'scripts/test-ark-video.mjs' },
   { file: 'scripts/test-cloud-channels.mjs' },
+  { file: 'scripts/test-cloud-channels-dashscope.mjs', note: 'v1.92 百炼 DashScope 方言（可灵 v3-omni 图像）' },
   { file: 'scripts/test-canvas-cloud-generation.mjs' },
   { file: 'scripts/test-canvas-ui-services.mjs' },
   { file: 'scripts/test-canvas-grid.mjs' },

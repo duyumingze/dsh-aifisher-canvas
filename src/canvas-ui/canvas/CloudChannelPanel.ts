@@ -29,7 +29,7 @@ import {
 export type CloudChannelKind = ChannelKind;
 
 /** 请求方言（与 host 的 ChannelDialect 同一套值）。 */
-export type ChannelDialect = 'openai' | 'modelscope' | 'workfisher';
+export type ChannelDialect = 'openai' | 'modelscope' | 'workfisher' | 'dashscope';
 
 const API = '/api/aifisher/canvas/cloud-channels';
 const PANEL_ATTRIBUTE = 'data-fisherai-cloud-channels';
@@ -47,6 +47,7 @@ const DIALECT_LABELS: Readonly<Record<ChannelDialect, string>> = Object.freeze({
   openai: 'OpenAI 兼容',
   modelscope: '魔搭 ModelScope',
   workfisher: 'FisherAI（work-fisher）',
+  dashscope: '阿里云百炼（DashScope）',
 });
 
 /**
@@ -58,6 +59,13 @@ export function guessDialect(baseUrl: string): ChannelDialect {
     const host = new URL(baseUrl.trim()).hostname.toLowerCase();
     if (host === 'modelscope.cn' || host.endsWith('.modelscope.cn')) return 'modelscope';
     if (host === 'work-fisher.com' || host.endsWith('.work-fisher.com')) return 'workfisher';
+    if (
+      /(?:^|\.)(?:dashscope(?:-intl)?\.aliyuncs\.com|maas\.aliyuncs\.com|(?:dashscope|bailian|maas)\.(?:qianwenai|qianwenaiapi)\.com)$/.test(
+        host,
+      )
+    ) {
+      return 'dashscope';
+    }
   } catch {
     // 地址还没填完/填错：按 openai 显示，host 那边保存时会自己校验
   }
@@ -73,6 +81,11 @@ function dialectHintText(draft: ChannelDraft): string {
     return '路径 /image/generations、宽高比走 size、档位走 resolution（1k/2k/4k）；'
       + '参考图先传成公网直链（/files/upload）再放进 images；异步任务轮询 /image/generations/{id}。';
   }
+  if (draft.dialect === 'dashscope') {
+    return '路径 /api/v1/services/aigc/image-generation/generation、异步头 X-DashScope-Async；'
+      + '参数放 input.messages + parameters（n / aspect_ratio / resolution），轮询 /api/v1/tasks/{id}；'
+      + '参考图只收公网 http(s) 直链。';
+  }
   if (draft.dialect === 'openai') {
     return '参考图放 image（单张=字符串，多张=数组）。';
   }
@@ -82,7 +95,9 @@ function dialectHintText(draft: ChannelDraft): string {
       ? '参考图放 image_url（数组）'
       : detected === 'workfisher'
         ? '路径 /image/generations、size 收宽高比、resolution 收 1k/2k/4k、参考图走公网直链'
-        : '参考图放 image（单张=字符串）';
+        : detected === 'dashscope'
+          ? 'input.messages + parameters、异步头 X-DashScope-Async、轮询 /api/v1/tasks/{id}'
+          : '参考图放 image（单张=字符串）';
   return `自动：当前判为「${DIALECT_LABELS[detected]}」——${detail}。`;
 }
 
@@ -118,6 +133,26 @@ const WORKFISHER_PRESET = Object.freeze({
   baseUrl: 'https://api.work-fisher.com/v1',
   models: Object.freeze([
     { id: 'workfisher-image-g-v2.5-lowprice', kind: 'image' as ChannelKind },
+  ]),
+});
+
+/**
+ * 「阿里云百炼（DashScope）」一键预设。
+ *
+ * 它存在的理由：百炼这套与前面三条**没有一处相同** —— 提交路径
+ * `/api/v1/services/aigc/image-generation/generation`、请求体是 `input.messages` +
+ * `parameters`（n / aspect_ratio / resolution）、必须带 `X-DashScope-Async: enable`、
+ * 任务号在 `output.task_id`、轮询 `/api/v1/tasks/{id}`、
+ * 结果在 `output.choices[0].message.content[].image`。任何一处照 OpenAI 写都只会得到 400 / 空结果。
+ *
+ * 地址用千问云镜像（不需要业务空间 ID）；阿里云官方百炼的地址形如
+ * `https://{业务空间ID}.cn-beijing.maas.aliyuncs.com`，两种都被 host 判成 dashscope。
+ */
+const DASHSCOPE_PRESET = Object.freeze({
+  label: '百炼',
+  baseUrl: 'https://cn-beijing.maas.qianwenaiapi.com',
+  models: Object.freeze([
+    { id: 'kling/kling-v3-omni-image-generation', kind: 'image' as ChannelKind },
   ]),
 });
 
@@ -183,6 +218,10 @@ const MAX_MODEL_LABEL_LENGTH = 80;
 /** 某套方言某媒体类型的默认路径（与 host 的 channelPath 对齐；界面只用于占位提示）。 */
 function defaultPathFor(dialect: ChannelDialect, kind: ChannelKind): string {
   if (dialect === 'workfisher' && kind === 'image') return '/image/generations';
+  if (dialect === 'dashscope') {
+    if (kind === 'image') return '/api/v1/services/aigc/image-generation/generation';
+    if (kind === 'text') return '/compatible-mode/v1/chat/completions';
+  }
   if (kind === 'image') return '/images/generations';
   if (kind === 'video') return '/videos/generations';
   if (kind === 'audio') return '/audio/generations';
@@ -360,6 +399,27 @@ function workfisherDraft(index: number): ChannelDraft {
   return draft;
 }
 
+/** 「+ 阿里云百炼（DashScope）」预设草稿：调好的地址、方言与可灵 omni 图像模型。 */
+function dashscopeDraft(index: number): ChannelDraft {
+  const draft = emptyDraft(index);
+  draft.key = `ds${index}`;
+  draft.label = DASHSCOPE_PRESET.label;
+  draft.baseUrl = DASHSCOPE_PRESET.baseUrl;
+  // 显式写 dashscope：这套的地址可能是业务空间专属域名，显式配一次就不用赌域名判定
+  draft.dialect = 'dashscope';
+  draft.models = new Map(
+    DASHSCOPE_PRESET.models.map((model) => [model.id, { kind: model.kind, label: '' }]),
+  );
+  draft.probed = DASHSCOPE_PRESET.models.map((model) => model.id);
+  draft.probedNote =
+    '预设的地址是千问云镜像（不需要业务空间 ID）；用阿里云官方百炼就换成'
+    + ' https://{业务空间ID}.cn-beijing.maas.aliyuncs.com（控制台 → 业务空间里能看到 ID）。'
+    + '填好 API Key 后点「保存通道」。出图走异步任务（提交→轮询），'
+    + '参数是 n / aspect_ratio（16:9、9:16、1:1）/ resolution（1k、2k、4k）。'
+    + '参考图只收公网 http(s) 直链：连画布本机素材会拿到一条说清原因的 422（不静默丢图）。';
+  return draft;
+}
+
 // ------------------------------------------------------------------ 面板
 
 export function mountCloudChannelPanel(host: HTMLElement): () => void {
@@ -451,7 +511,9 @@ export function mountCloudChannelPanel(host: HTMLElement): () => void {
         MUTED,
         '「请求方言」决定参考图落在哪个字段、路径与尺寸怎么写：OpenAI 兼容用 image、尺寸给 1024x576；'
           + '魔搭只认 image_url（数组）；FisherAI 走 /image/generations，宽高比给 size、档位给 resolution，'
-          + '参考图要先换成公网直链。填错**不会报错** —— 魔搭会把参考图整张丢掉、FisherAI 会把路径错报成 404，'
+          + '参考图要先换成公网直链；阿里云百炼走 /api/v1/services/aigc/image-generation/generation，'
+          + '参数在 input.messages + parameters，任务号在 output.task_id。'
+          + '填错**不会报错** —— 魔搭会把参考图整张丢掉、FisherAI 会把路径错报成 404，'
           + '看到的都像「编辑没生效」。选「自动」就按 Base URL 的域名判定。',
       ),
     );
@@ -485,6 +547,17 @@ export function mountCloudChannelPanel(host: HTMLElement): () => void {
       );
     });
     actions.append(fisherPreset);
+    const dashscopePreset = button('+ 阿里云百炼（DashScope）');
+    dashscopePreset.setAttribute('data-fisherai-channel-preset', 'dashscope');
+    dashscopePreset.addEventListener('click', () => {
+      drafts = [...drafts, dashscopeDraft(newCount++)];
+      render();
+      setStatus(
+        '已按阿里云百炼预设填好地址（qianwenaiapi 镜像）与可灵图像模型'
+          + '（kling/kling-v3-omni-image-generation）—— 填上 API Key、点「保存通道」即可在画布上用。',
+      );
+    });
+    actions.append(dashscopePreset);
     const reload = button('重新读取');
     reload.addEventListener('click', () => {
       void (async () => {
@@ -744,7 +817,10 @@ export function mountCloudChannelPanel(host: HTMLElement): () => void {
     baseField.append(el('span', LABEL, 'Base URL'));
     const baseInput = el('input', INPUT) as HTMLInputElement;
     baseInput.value = draft.baseUrl;
-    baseInput.placeholder = 'https://api-inference.modelscope.cn/v1';
+    baseInput.placeholder =
+      draft.dialect === 'dashscope'
+        ? 'https://{业务空间ID}.cn-beijing.maas.aliyuncs.com'
+        : 'https://api-inference.modelscope.cn/v1';
     baseInput.addEventListener('input', () => {
       draft.baseUrl = baseInput.value;
       draft.dirty = true;
@@ -775,7 +851,7 @@ export function mountCloudChannelPanel(host: HTMLElement): () => void {
     const dialectSelect = el('select', INPUT) as HTMLSelectElement;
     dialectSelect.setAttribute('data-fisherai-channel-dialect', draft.id || draft.key);
     dialectSelect.append(optionElement('自动（按地址判定）', ''));
-    for (const dialect of ['openai', 'modelscope', 'workfisher'] as const) {
+    for (const dialect of ['openai', 'modelscope', 'workfisher', 'dashscope'] as const) {
       dialectSelect.append(optionElement(DIALECT_LABELS[dialect], dialect));
     }
     dialectSelect.value = draft.dialect;

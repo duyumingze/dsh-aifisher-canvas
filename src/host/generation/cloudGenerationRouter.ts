@@ -61,6 +61,7 @@ import {
   describeFetchFailure,
   inlineChannelReferences,
   isConnectLevelFetchFailure,
+  publicChannelReferences,
   readCloudChannels,
   resolveChannelModel,
   uploadChannelReferences,
@@ -419,6 +420,19 @@ async function handleChannelGeneration(
   const videoReferences = kind === 'video' ? urlList(body?.videos) : [];
   const audioReferences = kind === 'video' ? urlList(body?.audios) : [];
   const dialect = channelDialect(channel);
+  // 百炼方言目前只翻了图像（可灵 v3 系）与文本（兼容模式）两条路；视频/音频的提交形状不同，
+  // 与其打到 `/videos/generations` 拿一个 404，不如在这里说清楚。
+  if (dialect === 'dashscope' && kind !== 'image' && kind !== 'text') {
+    sendJson(res, 422, {
+      error: `通道「${channel.label}」的请求方言是阿里云百炼（DashScope），目前只支持图像生成；${KIND_LABELS[kind]}节点请换别的通道。`,
+      code: 'CHANNEL_KIND_UNSUPPORTED',
+      channel: channel.id,
+      channelLabel: channel.label,
+      model: model.id,
+      hint: '可灵 v3 系目前只有图像任务；百炼的视频任务（万相/MiniMax-H3）提交形状不同，还没翻。',
+    });
+    return true;
+  }
 
   let images: string[] = [];
   let videos: string[] = [];
@@ -426,16 +440,22 @@ async function handleChannelGeneration(
   try {
     if (references.length && (kind === 'image' || kind === 'video')) {
       // FisherAI 只收公网直链：data URL / 本站素材要先 /files/upload 换链接；
-      // 其它两套方言要的是内联（或原样带公网链接）。
+      // 魔搭/OpenAI 兼容要的是内联（或原样带公网链接）；
+      // 百炼（可灵）同样只收公网直链，但它没有自己的上传口 —— 本机素材直接给可操作的 422，
+      // 不把 data URL 发过去被当成「没传参考图」。
       images =
         dialect === 'workfisher'
           ? await uploadChannelReferences(channel, references, {
               ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
               fetcher,
             })
-          : await inlineChannelReferences(references, {
-              ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
-            });
+          : dialect === 'dashscope'
+            ? await publicChannelReferences(references, {
+                ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
+              })
+            : await inlineChannelReferences(references, {
+                ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
+              });
     }
     // 待编辑视频 / 参考音频同样只在 FisherAI 那套请求体里出现，也只收公网直链。
     if (kind === 'video' && dialect === 'workfisher' && (videoReferences.length || audioReferences.length)) {

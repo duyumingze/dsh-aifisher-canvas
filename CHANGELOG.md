@@ -6,6 +6,25 @@
 > 对不上的（v1.70–v1.76 调色面板迭代、v1.82–v1.83 整页扩图）按批次合并并保留日期，
 > 不再写「未发布」这种既不是版本也不是日期的标题。
 
+## v1.92.0 — 2026-11-11
+
+### 新增「阿里云百炼（DashScope）」通道方言：接上 `kling/kling-v3-omni-image-generation`
+
+用户原话（2026-11-11）：「帮我在画布接一下这个模型 `kling/kling-v3-omni-image-generation`」，并贴了百炼的异步 curl。
+
+- 新增第 4 套请求方言 `dashscope`。它和前三套**没有一处相同**：提交
+  `/api/v1/services/aigc/image-generation/generation`、必须带 `X-DashScope-Async: enable`、
+  请求体是 `input.messages` + `parameters`（`n` / `aspect_ratio` / `resolution`）；
+  任务号在 `output.task_id`、轮询 `GET /api/v1/tasks/{id}`、
+  结果是 `output.choices[0].message.content[].image`。Base URL 填域名根或带 `/api/v1` 都行，不会叠成两层。
+- 结果归一（`collectResultRefs`）补上 `output.choices[].message.content[].image` 这个形状。
+- 模型类型推断修正：`kling/…-image-generation` 以前会被 `kling` 这个视频词根猜成**视频**，勾进图片节点直接 422。
+- 这类通道的图片条目按端点能力收紧：宽高比只有 16:9 / 9:16 / 1:1、`n` 收 1–9。
+  参考图只收公网 http(s) 直链 —— 图生图照常给（连线不被静默挡住），
+  提交画布本机素材时返回可操作的 422（`CHANNEL_REFERENCE_NOT_PUBLIC`），而不是「图片编辑」悄悄变成「重新画一张」。
+- 设置页新增「+ 阿里云百炼（DashScope）」一键预设（qianwenai 镜像，可灵 v3-omni 模型），方言下拉 4 项 → 5 项。
+- 新回归 `scripts/test-cloud-channels-dashscope.mjs`（39 项，已登记 `scripts/suites.mjs`）。
+
 ## v1.91.3 — 2026-11-09
 
 ### 修「圆弧一出现就是完整状态」：先提交初值再挂过渡

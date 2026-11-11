@@ -55,26 +55,47 @@ export interface CloudChannelModel {
  *     档位走 `resolution:"1k"`，而且是**异步任务网关**（提交拿 task_id → 轮询 `/image/generations/{id}`）。
  *     参考素材只收**公网直链**（先 POST /files/upload 换链接），data URL 一律不收。
  */
-export type ChannelDialect = 'openai' | 'modelscope' | 'workfisher';
+export type ChannelDialect = 'openai' | 'modelscope' | 'workfisher' | 'dashscope';
 
 export const CHANNEL_DIALECTS: readonly ChannelDialect[] = Object.freeze([
   'openai',
   'modelscope',
   'workfisher',
+  'dashscope',
 ]);
 
 export const CHANNEL_DIALECT_LABELS: Readonly<Record<ChannelDialect, string>> = Object.freeze({
   openai: 'OpenAI 兼容',
   modelscope: '魔搭 ModelScope',
   workfisher: 'FisherAI（work-fisher）',
+  dashscope: '阿里云百炼（DashScope）',
 });
 
-/** 按地址猜方言：`api-inference.modelscope.cn` → 魔搭；`api.work-fisher.com` → FisherAI。 */
+/**
+ * 百炼 / DashScope 系的异步图像任务网关（2026-11-11 用户给的
+ * `kling/kling-v3-omni-image-generation` curl 就是这套）。
+ *
+ * 它和前面三套方言**没有一处相同**：提交路径是
+ * `/api/v1/services/aigc/image-generation/generation`、请求体是
+ * `{model, input:{messages:[{role,content:[{text}|{image}]}]}, parameters:{n,aspect_ratio,resolution}}`、
+ * 必须带 `X-DashScope-Async: enable`、任务号埋在 `output.task_id`、
+ * 轮询 `GET /api/v1/tasks/{id}`、结果在 `output.choices[0].message.content[].image`。
+ * 少一处都是 400 / 空结果，且报错信息不会告诉你少的是哪一处。
+ *
+ * 覆盖三类地址：官方 `dashscope.aliyuncs.com`、按业务空间分域的
+ * `{WorkspaceId}.cn-beijing.maas.aliyuncs.com`、以及同协议的千问云镜像
+ * `cn-beijing.maas.qianwenaiapi.com`。
+ */
+const DASHSCOPE_HOST_PATTERN =
+  /(?:^|\.)(?:dashscope(?:-intl)?\.aliyuncs\.com|maas\.aliyuncs\.com|(?:dashscope|bailian|maas)\.(?:qianwenai|qianwenaiapi)\.com)$/;
+
+/** 按地址猜方言：魔搭 / FisherAI / 百炼。 */
 export function detectChannelDialect(baseUrl: string): ChannelDialect {
   try {
     const host = new URL(baseUrl).hostname.toLowerCase();
     if (host === 'modelscope.cn' || host.endsWith('.modelscope.cn')) return 'modelscope';
     if (host === 'work-fisher.com' || host.endsWith('.work-fisher.com')) return 'workfisher';
+    if (DASHSCOPE_HOST_PATTERN.test(host)) return 'dashscope';
   } catch {
     // 地址不合法是 normalizeBaseUrl 的活，这里只负责猜不出来时回 openai
   }
@@ -122,6 +143,11 @@ const DIALECT_PATHS: Readonly<Partial<Record<ChannelDialect, Partial<Record<Clou
     workfisher: Object.freeze({
       image: '/image/generations',
       video: '/video/generations',
+    }),
+    // 百炼的图像路径含 `/api/v1` 前缀（见 dashscopeApiPath：baseUrl 已经带 /api/v1 时不再叠一层）；
+    // 文本走它的 OpenAI 兼容模式，路径与 OpenAI 一样是 chat/completions。
+    dashscope: Object.freeze({
+      text: '/compatible-mode/v1/chat/completions',
     }),
   });
 
@@ -269,7 +295,7 @@ export function sanitizeChannel(
   }
 
   const paths = sanitizePaths(record.paths !== undefined ? record.paths : previous?.paths);
-  // 方言：显式给 `openai` / `modelscope` 才写进去；给空串、给别的值、或不给 = **自动**
+  // 方言：显式给了 CHANNEL_DIALECTS 里的值才写进去；给空串、给别的值、或不给 = **自动**
   // （按地址判定）。这样界面上的「自动」是可回退的，不会有一个写死的旧值赖着不走。
   const rawDialect = typeof record.dialect === 'string' ? record.dialect.trim().toLowerCase() : '';
   const dialect = (CHANNEL_DIALECTS as readonly string[]).includes(rawDialect)
@@ -337,6 +363,12 @@ export async function writeCloudChannels(
  * 取图像，因为画布上图片节点是最常用的那类。
  */
 const KIND_HINTS: ReadonlyArray<readonly [RegExp, CloudKind]> = Object.freeze([
+  // 先把「名字里明说了是出图的」钉死：`kling/kling-v3-omni-image-generation` 同时带 kling（视频词根）
+  // 与 image-generation，按下面「视频优先」的顺序会被猜成视频，于是勾进来挂到图片节点上是 422。
+  [
+    /(?:image[-_]?generation|image[-_]?edit|image[-_]?synthesis|text[-_]?to[-_]?image|t2i)$/i,
+    'image' as CloudKind,
+  ],
   [
     /(?:^|[-_/.])(?:t2v|i2v|v2v|video|veo|sora|kling|seedance|wan2|hunyuanvideo|hailuo|cogvideo|ltx)/i,
     'video' as CloudKind,
@@ -706,6 +738,37 @@ export async function inlineChannelReferences(
 }
 
 /**
+ * 参考素材 → **公网 http(s) 直链**（百炼/可灵那条路只收这种）。
+ *
+ * 为什么不能像魔搭那样内联：可灵图像生成的 `content[].image` 文档写死了
+ * 「参考图像的 URL，支持 HTTP 或 HTTPS 协议」，data URL 会直接被拒（或当没传）。
+ * 画布上的素材都存在本机（`/api/aifisher/canvas/media/…`），外面看不见 ——
+ * 所以这里**宁可报错也不偷偷丢掉参考图**：静默丢图听起来像「画布坏了」，用户根本无从下手。
+ */
+export async function publicChannelReferences(
+  references: readonly string[],
+  deps: { mediaStore?: MediaStore } = {},
+): Promise<string[]> {
+  const assets = await resolveReferenceAssets(references, deps);
+  const urls: string[] = [];
+  for (const asset of assets) {
+    if (asset.kind === 'url') {
+      urls.push(asset.url);
+      continue;
+    }
+    const name = asset.kind === 'bytes' ? asset.filename : '（内联图）';
+    throw new ChannelRequestError(
+      `这条通道只收公网 http(s) 参考图，画布本机素材「${name}」不能直接提交。`,
+      422,
+      'CHANNEL_REFERENCE_NOT_PUBLIC',
+      '可灵/百炼的图像任务要求参考图是公网直链；画布上的图片存在本机、外面访问不到。'
+        + '先用「文生图」出图，或把这张图传到图床换成公网链接再连进来。',
+    );
+  }
+  return urls;
+}
+
+/**
  * 参考素材 → FisherAI 的 `images[]`（**只收公网直链**）。
  *
  * 已经是公网链接的原样用；data URL / 本站素材先解码成字节，再 `POST /files/upload` 换直链。
@@ -806,6 +869,26 @@ export function workfisherResolution(body: Record<string, unknown> | null): stri
   if (raw === '4k') return '4k';
   if (raw === '2k' || raw === '1440p') return '2k';
   return '1k';
+}
+
+/**
+ * 百炼的档位词：`1k` / `2k` / `4k`（可灵 v3-omni 三档都收，v3 只收前三档里的 1k/2k）。
+ * 视频档（720p/1080p）一律按 1k —— 这个端点不收像素档，原样发上去是 400。
+ */
+export function dashscopeResolution(body: Record<string, unknown> | null): string {
+  const raw = typeof body?.resolution === 'string' ? body.resolution.trim().toLowerCase() : '';
+  if (raw === '4k') return '4k';
+  if (raw === '2k' || raw === '1440p') return '2k';
+  return '1k';
+}
+
+/**
+ * 百炼的图像张数：端点收 1–9（`parameters.n`），比通用的 `countOf` 上限 8 多一张。
+ * 用户填 9 却只出 8 张是那种「没有任何报错」的失望，所以按端点自己的范围夹。
+ */
+export function dashscopeCount(body: Record<string, unknown> | null): number {
+  const raw = Number(body?.generateCount);
+  return Number.isFinite(raw) && raw > 1 ? Math.min(Math.trunc(raw), 9) : 1;
 }
 
 /** 画布的宽高比 → `16:9` 这种串（FisherAI 的 `size` 就收它；给不出 / 是 Auto 就不带）。 */
@@ -922,10 +1005,40 @@ export function buildChannelPayload(input: {
     if (ratio) payload.size = ratio;
     return { ...payload, ...referenceFields(dialect, images) };
   }
+  if (kind === 'image' && dialect === 'dashscope') {
+    /**
+     * 百炼（DashScope）异步图像任务 —— 与前面三套方言没有一处相同：
+     *
+     *   POST {base}/api/v1/services/aigc/image-generation/generation
+     *   header X-DashScope-Async: enable
+     *   { model, input: { messages: [{ role: 'user', content: [{ text }, { image }, …] }] },
+     *     parameters: { n, aspect_ratio: '16:9', resolution: '1k' } }
+     *   → { output: { task_id, task_status: 'PENDING' }, request_id }
+     *
+     * 四个必须照抄的点（缺一个都是 400 或空结果，报错里看不出缺的是哪个）：
+     *   ① `content` 是**数组**、文本与参考图放在同一个数组里（不是 OpenAI 的 prompt 字段）；
+     *   ② `n` / `aspect_ratio` / `resolution` 在 `parameters` 里，不在顶层；
+     *   ③ 异步头必须带（缺了会报 "current user api does not support synchronous calls"）；
+     *   ④ 一个 text 只能有**一个**，多传会报错 —— 所以这里只放一份 prompt。
+     *
+     * 参考图（`image`）只收公网 http(s) 直链，本机素材要先换链接（见 publicChannelReferences）；
+     * 画布上暂时只给这类通道开「文生图」，等有公网图床再开图生图。
+     */
+    const content: Array<Record<string, unknown>> = [{ text: prompt }];
+    for (const image of images) content.push({ image });
+    const parameters: Record<string, unknown> = { n: dashscopeCount(body) };
+    const ratio = channelAspectRatio(body);
+    if (ratio) parameters.aspect_ratio = ratio;
+    parameters.resolution = dashscopeResolution(body);
+    return {
+      model: model.id,
+      input: { messages: [{ role: 'user', content }] },
+      parameters,
+    };
+  }
   if (kind === 'video' && dialect === 'workfisher') {
     /**
      * FisherAI 视频任务（2026-10-20 用户给的 minimax-h3-ow-r2v curl + 用真 key 实测的收尾形状）：
-     *
      *   POST {base}/video/generations
      *   { model, prompt, images: [公网直链], seconds: "5",
      *     metadata: { resolution: "480p", ratio: "16:9", audio_urls: [...], video_url: [...] } }
@@ -995,11 +1108,34 @@ export interface ChannelRequestPlan {
   endpoint: string;
 }
 
+/**
+ * 百炼的 API 根：`https://host` 或 `https://host/api/v1` 都兼容。
+ *
+ * 文档给的提交地址带 `/api/v1`（`…/api/v1/services/aigc/image-generation/generation`），
+ * 而界面上的 Base URL 通常只填到域名 —— 两种写法都不该让人手动补。所以这里统一算出
+ * 「到 api/v1 为止」的前缀，再加各自的资源路径。
+ */
+export function dashscopeApiRoot(baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/u, '');
+  return /\/api\/v1$/i.test(base) ? base : `${base}/api/v1`;
+}
+
+/** 百炼异步图像任务的提交路径（相对 Base URL）。 */
+export function dashscopeImagePath(baseUrl: string): string {
+  const base = baseUrl.replace(/\/+$/u, '');
+  const prefix = /\/api\/v1$/i.test(base) ? '' : '/api/v1';
+  return `${prefix}/services/aigc/image-generation/generation`;
+}
+
 /** 该通道该媒体类型该打哪个路径：用户显式填的 > 方言自带的 > OpenAI 默认。 */
 export function channelPath(channel: CloudChannel, kind: CloudKind): string {
   const override = channel.paths?.[kind];
   if (override && override.startsWith('/')) return override;
-  return DIALECT_PATHS[channelDialect(channel)]?.[kind] ?? DEFAULT_PATHS[kind];
+  const dialect = channelDialect(channel);
+  // 百炼的图像路径依赖 baseUrl 是否已经带 /api/v1，必须按实例算（见 dashscopeImagePath）；
+  // 文本走兼容模式，路径固定。
+  if (dialect === 'dashscope' && kind === 'image') return dashscopeImagePath(channel.baseUrl);
+  return DIALECT_PATHS[dialect]?.[kind] ?? DEFAULT_PATHS[kind];
 }
 
 export function buildChannelRequest(input: {
@@ -1022,10 +1158,10 @@ export function buildChannelRequest(input: {
   };
 }
 
-// ------------------------------------------------------------------ 异步任务（魔搭 / FisherAI 那套）
+// ------------------------------------------------------------------ 异步任务（魔搭 / FisherAI / 百炼那套）
 
 /**
- * 两套异步网关都走「提交拿号 → 轮询取结果」，但细节没有一处相同：
+ * 三套异步网关都走「提交拿号 → 轮询取结果」，但细节没有一处相同：
  *
  *   - **魔搭**：POST 立刻回 `{task_id, task_status}`（而且 task_status 当场就写 SUCCEED，不能信），
  *     要带 `X-ModelScope-Async-Mode` 才真建任务；轮询 `GET /tasks/{id}`（带 `X-ModelScope-Task-Type`），
@@ -1034,11 +1170,18 @@ export function buildChannelRequest(input: {
  *     轮询 `GET /image/generations/{id}`；状态机是大写的 NOT_START / SUBMITTED / IN_PROGRESS /
  *     SUCCESS / FAILURE，收尾把图片埋在 `data.data.content.image_urls[]`（`data.result_url` 兜底）。
  *     结果直链带签名、约 24 小时过期，**必须立刻下载转存**。
+ *   - **百炼（DashScope）**：POST 回 `{output:{task_id, task_status:'PENDING'}}`，
+ *     要带 `X-DashScope-Async: enable`；轮询 `GET {base}/api/v1/tasks/{id}`；
+ *     状态在 `output.task_status`（PENDING/RUNNING/SUCCEEDED/FAILED/CANCELED/UNKNOWN），
+ *     收尾图片在 `output.choices[0].message.content[].image`。
  *
  * 所以头、轮询地址、状态字段、结果字段四处都按方言分流；只有「POST 没有结果素材却带着任务号
- * → 去轮询」这条判断是两家共用的。
+ * → 去轮询」这条判断是三家共用的。
  */
 export function channelAsyncHeaders(dialect: ChannelDialect = 'modelscope'): Record<string, string> {
+  // 百炼只认它自己的异步头；缺了这一句会直接报
+  // "current user api does not support synchronous calls"（图像任务只支持异步）。
+  if (dialect === 'dashscope') return { 'X-DashScope-Async': 'enable' };
   // 只有 FisherAI 那套网关不认这个头；OpenAI 兼容的中转站一律忽略未知头，
   // 所以保持 v1.11 起的老行为（非文本请求都带），免得动到已经跑通的通道。
   if (dialect === 'workfisher') return {};
@@ -1053,11 +1196,19 @@ export function channelTaskPoll(input: {
   /** 提交时用的地址；FisherAI 的轮询地址由它推导，缺省才退回 base + /image/generations。 */
   submitUrl?: string;
 }): { url: string; headers: Record<string, string> } {
-  if (channelDialect(input.channel) === 'workfisher') {
+  const dialect = channelDialect(input.channel);
+  if (dialect === 'workfisher') {
     const submit =
       (input.submitUrl && input.submitUrl.trim()) || `${input.channel.baseUrl}/image/generations`;
     return {
       url: `${submit.replace(/\/+$/, '')}/${encodeURIComponent(input.taskId)}`,
+      headers: { accept: 'application/json' },
+    };
+  }
+  if (dialect === 'dashscope') {
+    // GET {base}/api/v1/tasks/{task_id}（只要 Authorization，不要异步头）
+    return {
+      url: `${dashscopeApiRoot(input.channel.baseUrl)}/tasks/${encodeURIComponent(input.taskId)}`,
       headers: { accept: 'application/json' },
     };
   }
@@ -1070,11 +1221,20 @@ export function channelTaskPoll(input: {
   };
 }
 
-/** 响应可能被 `{code:'success', data:{…}}` 包一层（FisherAI 全程如此）。挑出真正装任务的那层。 */
+/**
+ * 挑出真正装任务的那层。
+ *
+ * 三种包法：FisherAI `{code:'success', data:{…}}`；百炼 `{output:{task_id, task_status, choices}}`
+ * （错误则只在根上回 `code`/`message`，没有 output）；魔搭直接在根上。
+ */
 export function channelTaskEnvelope(parsed: unknown): Record<string, unknown> {
   const body = (parsed ?? {}) as Record<string, unknown>;
-  const inner = body.data;
-  if (inner && typeof inner === 'object' && !Array.isArray(inner)) return inner as Record<string, unknown>;
+  for (const key of ['data', 'output']) {
+    const inner = body[key];
+    if (inner && typeof inner === 'object' && !Array.isArray(inner)) {
+      return inner as Record<string, unknown>;
+    }
+  }
   return body;
 }
 
@@ -1102,7 +1262,13 @@ export function channelTaskId(parsed: unknown): string | null {
 
 export type ChannelTaskState = 'running' | 'succeeded' | 'failed';
 
-/** 任务状态归一（魔搭：PENDING/RUNNING/SUCCEED；FisherAI：SUBMITTED/IN_PROGRESS/SUCCESS/FAILURE）。 */
+/**
+ * 任务状态归一（魔搭：PENDING/RUNNING/SUCCEED；FisherAI：SUBMITTED/IN_PROGRESS/SUCCESS/FAILURE；
+ * 百炼：PENDING/RUNNING/SUCCEEDED/FAILED/CANCELED/UNKNOWN）。
+ *
+ * 百炼「任务失败」还有一种没有 output 的形状：HTTP 200 + 根上 `{code, message, request_id}`。
+ * 不把它当失败的话，轮询会一直读到「running」直到超时（15 分钟白等）。
+ */
 export function channelTaskState(parsed: unknown): { state: ChannelTaskState; raw: string } {
   const body = channelTaskEnvelope(parsed);
   const raw = String(body.task_status ?? body.status ?? '').trim();
@@ -1111,11 +1277,18 @@ export function channelTaskState(parsed: unknown): { state: ChannelTaskState; ra
     return { state: 'succeeded', raw };
   }
   if (
-    ['FAILED', 'FAIL', 'FAILURE', 'ERROR', 'CANCELED', 'CANCELLED', 'REVOKED', 'TIMEOUT'].includes(
+    ['FAILED', 'FAIL', 'FAILURE', 'ERROR', 'CANCELED', 'CANCELLED', 'REVOKED', 'TIMEOUT', 'UNKNOWN'].includes(
       value,
     )
   ) {
     return { state: 'failed', raw };
+  }
+  if (!raw) {
+    const root = (parsed ?? {}) as Record<string, unknown>;
+    const code = typeof root.code === 'string' ? root.code.trim() : '';
+    if (code && typeof root.message === 'string' && root.message.trim()) {
+      return { state: 'failed', raw: code };
+    }
   }
   return { state: 'running', raw };
 }

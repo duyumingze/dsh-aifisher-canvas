@@ -71,7 +71,14 @@ function baseEntry(name: string, channelLabel: string) {
   } as Record<string, unknown>;
 }
 
-function imageEntry(name: string, channelLabel: string) {
+function imageEntry(name: string, channelLabel: string, dialect?: string) {
+  /**
+   * 百炼（DashScope）这套图像模型（可灵 v3 系）只收三种宽高比、三档分辨率；
+   * 参考图虽然模型支持，但端点只要公网 http(s) 直链，画布上的素材都在本机 ——
+   * 所以「图生图」照常给（连线不该被静默挡住），真提交时 host 会给一条说清原因的 422
+   * （CHANNEL_REFERENCE_NOT_PUBLIC），而不是让「图片编辑」悄悄变成「重新画一张」。
+   */
+  const dashscope = dialect === 'dashscope';
   return {
     ...baseEntry(name, channelLabel),
     maxInputs: 14,
@@ -80,14 +87,26 @@ function imageEntry(name: string, channelLabel: string) {
     maxImageSizeMb: 20,
     maxResolution: '',
     resolutions: ['1K', '2K', '4K'],
-    aspectRatios: ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9'],
+    // 可灵 v3-omni 的 aspect_ratio 只有 16:9 / 9:16 / 1:1；选别的会被端点 400。
+    aspectRatios: dashscope
+      ? ['16:9', '9:16', '1:1']
+      : ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9'],
     // ★ 必需：没有 imageModes 时 composer 会认为「当前模型不支持文生图」，生成按钮直接禁用
     imageModes: [
       { label: '文生图', value: 'text-to-image', allowedInputs: { text: 14 } },
       { label: '图生图', value: 'image-to-image', allowedInputs: { text: 14, image: 14 } },
     ],
     advancedParams: [
-      { key: 'generateCount', label: '生成数量', type: 'number', default: 1, min: 1, step: 1 },
+      {
+        key: 'generateCount',
+        label: '生成数量',
+        type: 'number',
+        default: 1,
+        min: 1,
+        step: 1,
+        // 可灵的 n 收 1–9；别的方言 host 侧统一夹在 8，这里只对百炼放到 9
+        ...(dashscope ? { max: 9 } : {}),
+      },
     ],
   };
 }
@@ -250,10 +269,14 @@ export function buildChannelModelEntries(
               : textEntry;
       // 视频模型的「视频参考」模式只给 workfisher（FisherAI）通道：只有那条链路会把本机视频
       // 上传成公网直链（host 侧 /files/upload），别的方言收到 videos 是静默忽略。
+      // 图像条目的宽高比/模式同样按方言收紧（百炼/可灵只收 16:9、9:16、1:1，参考图要公网直链）。
+      const dialect = channel.dialectDetected ?? '';
       const entry =
         kind === 'video'
-          ? (builder as typeof videoEntry)(name, channel.label, channel.dialectDetected === 'workfisher')
-          : builder(name, channel.label);
+          ? (builder as typeof videoEntry)(name, channel.label, dialect === 'workfisher')
+          : kind === 'image'
+            ? (builder as typeof imageEntry)(name, channel.label, dialect)
+            : builder(name, channel.label);
       result[kind].push({
         ...entry,
         cloudChannelId: channel.id,

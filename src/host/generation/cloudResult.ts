@@ -127,6 +127,9 @@ export function collectResultRefs(body: unknown): ResultRef[] {
     pushUrl(node.video_url);
     pushUrl(node.audio_url);
     pushUrl(node.image_url);
+    // 百炼（DashScope）的异步图像收尾：`output.choices[0].message.content[] = [{type:'image', image:'https://…'}]`。
+    // `image` 在 OpenAI 形状里可能是个对象（`{url}`），所以只在它是字符串时才算一条结果。
+    pushUrl(node.image);
     pushUrl(node.grid_image_url);
     pushUrl(node.file_url);
     pushUrl(node.output_url);
@@ -139,6 +142,9 @@ export function collectResultRefs(body: unknown): ResultRef[] {
    *
    * `video_urls` / `video_url` 是视频那套的收尾字段（FisherAI 视频任务与图片同构：
    * `{code, data:{status, data:{content:{video_urls:[…]}}}}`，单数 `video_url` 兜底）。
+   *
+   * `choices` / `message` 是百炼（DashScope）异步任务成功后的那一层
+   * （`output.choices[0].message.content[]`）；里面的 `image` 由上面的 pushUrl 收。
    */
   function visitList(node: Record<string, unknown>, depth: number) {
     for (const key of [
@@ -160,6 +166,8 @@ export function collectResultRefs(body: unknown): ResultRef[] {
       'artifacts',
       'results',
       'content',
+      'message',
+      'choices',
       'metadata',
     ]) {
       const value = node[key];

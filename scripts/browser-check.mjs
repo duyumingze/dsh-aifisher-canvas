@@ -8529,7 +8529,7 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
 
   /**
    * 「OpenAI 通道」面板取证场景（?channels=1，v1.30）：设置 → 闭源服务 里的多通道面板。
-   * 断言面板真的挂上了、有实际尺寸、方言下拉四项、两个一键预设都在 —— 截图就是交付图。
+   * 断言面板真的挂上了、有实际尺寸、方言下拉五项、三个一键预设都在 —— 截图就是交付图。
    */
   if (label === 'channels') {
     const report = (name, good, extra = '') => {
@@ -8540,14 +8540,15 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     report('截图取证：设置 → 闭源服务 → OpenAI 通道面板在画面里（有实际尺寸）',
       shot.panel === true && Number(shot.width) > 600 && Number(shot.height) > 240 && Number(shot.cards) >= 1,
       `${shot.width}×${shot.height} cards=${shot.cards}`);
-    report('请求方言下拉有四项（自动 / OpenAI 兼容 / 魔搭 / FisherAI）',
-      shot.dialectOptions === 4 && shot.dialectValue === '',
+    report('请求方言下拉有五项（自动 / OpenAI 兼容 / 魔搭 / FisherAI / 阿里云百炼）',
+      shot.dialectOptions === 5 && shot.dialectValue === '',
       `options=${shot.dialectOptions} value=${shot.dialectValue}`);
-    report('两个一键预设都在（魔搭 API-Inference + FisherAI）',
+    report('三个一键预设都在（魔搭 API-Inference + FisherAI + 阿里云百炼）',
       Array.isArray(shot.presetLabels) &&
-        shot.presetLabels.length === 2 &&
+        shot.presetLabels.length === 3 &&
         /魔搭/.test(String(shot.presetLabels[0] || '')) &&
-        /FisherAI/.test(String(shot.presetLabels[1] || '')),
+        /FisherAI/.test(String(shot.presetLabels[1] || '')) &&
+        /百炼/.test(String(shot.presetLabels[2] || '')),
       JSON.stringify(shot.presetLabels));
     report('面板说明里写清了 FisherAI 的路径差异（/image/generations）',
       /image\/generations/.test(String(shot.text || '')),
@@ -8603,8 +8604,8 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
      * v1.30 多了一套 FisherAI（work-fisher）方言 → 选项从 3 变 4。
      */
     const dialect = settings.channelDialect ?? {};
-    report('通道卡片里有「请求方言」下拉，默认停在「自动」（自动 + OpenAI/魔搭/FisherAI 四项）',
-      dialect.selectPresent === true && dialect.value === '' && dialect.optionCount === 4,
+    report('通道卡片里有「请求方言」下拉，默认停在「自动」（自动 + OpenAI/魔搭/FisherAI/百炼 五项）',
+      dialect.selectPresent === true && dialect.value === '' && dialect.optionCount === 5,
       JSON.stringify({ present: dialect.selectPresent, value: dialect.value, options: dialect.optionCount }));
     report('「自动」按地址判出来并写在界面上（魔搭域名 → 魔搭 ModelScope）',
       /自动/.test(dialect.hintText || '') && /魔搭 ModelScope/.test(dialect.hintText || ''),
