@@ -60,6 +60,8 @@ export interface MaskEditor {
   element: HTMLElement;
   activate: () => void;
   deactivate: () => void;
+  /** 换了一份遮罩（下拉切遮罩 / 换节点）时把编辑器状态重新读一遍。 */
+  reload: () => void;
   /** 帧尺寸 / 视图变了要重画一次。 */
   render: () => void;
   /** 键盘优先处理；true = 已消费。 */
@@ -476,7 +478,8 @@ export function createMaskEditor(options: MaskEditorOptions): MaskEditor {
 
   /** 把当前形状/画笔层写回遮罩数据块（`snapshot`=改之前先记一步撤销）。 */
   const commitMask = (takeSnapshot = true): void => {
-    const mask = currentMask ?? options.mask();
+    // 以节点当前引用的那份为准（下拉切过遮罩后，currentMask 可能是旧的）
+    const mask = options.mask() ?? currentMask;
     if (!mask) return;
     if (takeSnapshot) pushSnapshot();
     const { width: W, height: H } = size();
@@ -1433,14 +1436,27 @@ export function createMaskEditor(options: MaskEditorOptions): MaskEditor {
     active = true;
     canvas.style.display = 'block';
     canvas.classList.add('cg-mask-canvas-active');
+    loadBaseImage();
+    loadMask();
+  };
+
+  const loadBaseImage = (): void => {
     const url = options.baseImageUrl();
     baseImage = null;
-    if (url) {
-      const image = new Image();
-      image.onload = () => render();
-      image.src = url;
-      baseImage = image;
-    }
+    if (!url) return;
+    const image = new Image();
+    image.onload = () => render();
+    image.src = url;
+    baseImage = image;
+  };
+
+  /** 换了一份遮罩（下拉切遮罩 / 换节点）：重新读形状、画笔层与底图。 */
+  const reload = (): void => {
+    if (!active) return;
+    cancelTransient();
+    selected = [];
+    snapshots.length = 0;
+    loadBaseImage();
     loadMask();
   };
 
@@ -1485,6 +1501,7 @@ export function createMaskEditor(options: MaskEditorOptions): MaskEditor {
     element,
     activate,
     deactivate,
+    reload,
     render,
     handleKey,
     state: () => ({

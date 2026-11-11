@@ -1616,6 +1616,8 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       return;
     }
     ensureMaskFor(node);
+    const wasOn = session_.maskMode;
+    const changedTarget = session_.maskTarget !== node.id;
     session_.maskTarget = node.id;
     session_.maskMode = true;
     selectNode(node.id);
@@ -1625,6 +1627,8 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       maskCanvas.height = session_.size.height;
     }
     editor.activate();
+    // 已经在遮罩模式里又换了一个节点 / 重新点了编辑：按新引用重读，别改错数据块
+    if (wasOn && changedTarget) editor.reload();
     applyMaskMode();
     renderNodes();
   };
@@ -1692,6 +1696,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
             setParam(node.id, 'maskId', created.id);
             setParam(node.id, 'mask', '');
             setParam(node.id, 'maskRev', (Number(params.maskRev) || 0) + 1);
+            if (session_.maskMode && session_.maskTarget === node.id) maskEditor?.reload();
             renderNodes();
             schedule();
             session_.toast(`已新建 ${created.name}，点「编辑」或卡片预览开始画`);
@@ -1701,6 +1706,8 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
           if (!target) return;
           setParam(node.id, 'maskId', next);
           refreshMaskNodes(target);
+          // 正在画这份遮罩：切了引用就按新遮罩重读编辑器状态
+          if (session_.maskMode && session_.maskTarget === node.id) maskEditor?.reload();
           renderNodes();
           schedule();
         },
