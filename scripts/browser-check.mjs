@@ -1792,6 +1792,8 @@ const HOST_PAGE = `<!doctype html>
         compositorWheels: compositorWheelsSteps,
         /** v1.79：混合节点三输入 + 深色下拉（?xcompositor=mix 场景，见 buildCompositorMixScene） */
         compositorMix: compositorMixSteps,
+        /** v1.94：遮罩（Blender 样条；?xcompositor=mask 场景，见 buildCompositorMaskScene） */
+        compositorMask: compositorMaskSteps,
       };
       // 网格探针会临时把底盘钉到视口左上角（让 offsetX 可预测），
       // 所以必须放在 leaks 采完之后 —— 否则那次临时移动会被当成「越界压住侧边栏」。
@@ -6164,8 +6166,279 @@ const HOST_PAGE = `<!doctype html>
       compositorMixSteps.done = true;
     };
 
-    // ⚠️ 探针定时器必须在任何 await 之前立起来：headless 的 --virtual-time-budget
-    //    会等页面的微任务/定时器都跑完，如果前面有长 await 把这段脚本卡住，探针一次都发不出去
+    /**
+     * 遮罩（v1.94，?xcompositor=mask）：用户 2026-11-11 原话
+     * 「在调色面板做绘制功能。我需要遮罩功能，但是要用混合节点来实现，接入黑白遮罩图像来实现。
+     *  参考 blender 的遮罩操作方式。」
+     *
+     * 这一场真鼠标真画布地走一遍：
+     *   建「遮罩」节点 → 点「编辑」→ 在大画布上点四个控制点围出一块 → 完成 →
+     *   卡片预览里必须有白色像素（这条线真的进了黑白图）→ Shift+点击接到预览 →
+     *   预览中心的像素是白的、角落是黑的（= 遮罩通过 WebGL 真的生效）→ 再打开绘制层截图。
+     */
+    const compositorMaskScene =
+      new URLSearchParams(location.search).get('xcompositor') === 'mask';
+    const compositorMaskSteps = {
+      opened: false,
+      created: false,
+      painterOpened: false,
+      pointSteps: 0,
+      maskClosed: false,
+      maskPoints: 0,
+      whitePixels: 0,
+      previewBytes: 0,
+      viewerConnected: false,
+      baseConnected: false,
+      baseVisible: false,
+      linkStarted: false,
+      dropTarget: '',
+      edgeCount: -1,
+      center: null,
+      corner: null,
+      reopened: false,
+      error: '',
+      done: false,
+    };
+    const buildCompositorMaskScene = async () => {
+      if (!compositorMaskScene) return;
+      try {
+        applyDshDesktopEmulation();
+        await until(() => document.querySelector('[data-fisherai-open-compositor]'), 20000);
+        await wait(400);
+        document
+          .querySelector('[data-fisherai-open-compositor]')
+          .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await until(() => document.querySelector('.cg-root'), 8000);
+        await wait(600);
+        const root = document.querySelector('.cg-root');
+        const stage = root.querySelector('.cg-stage');
+        compositorMaskSteps.opened = true;
+
+        // 建「遮罩」节点（Shift+A → 搜 zb → Enter）
+        document.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'a', shiftKey: true, bubbles: true, cancelable: true }),
+        );
+        await wait(220);
+        const search = document.querySelector('.cg-menu-search input');
+        if (search) {
+          search.value = 'zb';
+          search.dispatchEvent(new Event('input', { bubbles: true }));
+          await wait(220);
+          search.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+          );
+          await wait(260);
+        }
+        const created = [...root.querySelectorAll('.cg-node')].find(
+          (element) => element.querySelector('.cg-node-title')?.textContent?.trim() === '遮罩',
+        );
+        compositorMaskSteps.created = !!created;
+        if (created) {
+          // 放到画面右下角的空白处（跟 mix 场景同一套「按矩形算位移」的放下方式）
+          const stageBox = stage.getBoundingClientRect();
+          const targetX = stageBox.left + stageBox.width - 340;
+          const targetY = stageBox.top + stageBox.height - 200;
+          const box = created.getBoundingClientRect();
+          const deltaX = targetX - (box.left + box.width / 2);
+          const deltaY = targetY - (box.top + box.height / 2);
+          window.dispatchEvent(
+            new PointerEvent('pointermove', { clientX: 200, clientY: 200, bubbles: true }),
+          );
+          window.dispatchEvent(
+            new PointerEvent('pointermove', {
+              clientX: 200 + deltaX,
+              clientY: 200 + deltaY,
+              bubbles: true,
+            }),
+          );
+          stage.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              button: 0, buttons: 1, clientX: 200 + deltaX, clientY: 200 + deltaY,
+              pointerId: 141, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+            }),
+          );
+          await wait(320);
+        }
+
+        // 点「编辑」开大画布，用真指针点四个控制点围出一块区域（Blender 的样条手感）
+        const card = [...root.querySelectorAll('.cg-node')].find(
+          (element) => element.querySelector('.cg-node-title')?.textContent?.trim() === '遮罩',
+        );
+        // 先把「输入图像」接到遮罩节点的参考口：绘制时底图垫在下面，好对准要调色的地方
+        {
+          const inputCard = [...root.querySelectorAll('.cg-node')].find(
+            (element) => element.querySelector('.cg-node-title')?.textContent?.trim() === '输入图像',
+          );
+          const outPort = inputCard?.querySelector('.cg-port.cg-out');
+          const inPort = card?.querySelector('.cg-port.cg-in');
+          if (outPort && inPort) {
+            const edgesBefore = root.querySelectorAll('path.cg-edge').length;
+            const from = outPort.getBoundingClientRect();
+            const to = inPort.getBoundingClientRect();
+            compositorMaskSteps.portRects = {
+              out: [Math.round(from.left), Math.round(from.top), Math.round(from.width)],
+              in: [Math.round(to.left), Math.round(to.top), Math.round(to.width)],
+            };
+            outPort.dispatchEvent(
+              new PointerEvent('pointerdown', {
+                button: 0, buttons: 1,
+                clientX: from.left + from.width / 2, clientY: from.top + from.height / 2,
+                pointerId: 151, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+              }),
+            );
+            compositorMaskSteps.linkStarted = !!root.querySelector('path.cg-edge-active');
+            window.dispatchEvent(
+              new PointerEvent('pointermove', {
+                buttons: 1,
+                clientX: to.left + to.width / 2, clientY: to.top + to.height / 2,
+                bubbles: true,
+              }),
+            );
+            window.dispatchEvent(
+              new PointerEvent('pointerup', {
+                button: 0, buttons: 0,
+                clientX: to.left + to.width / 2, clientY: to.top + to.height / 2,
+                bubbles: true,
+              }),
+            );
+            compositorMaskSteps.dropTarget = String(
+              document
+                .elementFromPoint(to.left + to.width / 2, to.top + to.height / 2)
+                ?.className ?? '(null)',
+            );
+            await wait(320);
+            compositorMaskSteps.baseConnected =
+              root.querySelectorAll('path.cg-edge').length > edgesBefore;
+            compositorMaskSteps.edgeCount =
+              window.__FISHERAI_COMPOSITOR__?.report?.()?.edges?.length ?? -1;
+          }
+        }
+        card
+          ?.querySelector('.cg-mask-actions button')
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await until(() => document.querySelector('.cg-maskpaint'), 8000);
+        await wait(320);
+        const painter = document.querySelector('.cg-maskpaint');
+        compositorMaskSteps.painterOpened = !!painter;
+        const display = painter?.querySelector('.cg-maskpaint-canvas');
+        if (display) {
+          const surface = display.getBoundingClientRect();
+          const point = (fx, fy) => ({
+            clientX: surface.left + surface.width * fx,
+            clientY: surface.top + surface.height * fy,
+          });
+          // Blender 的样条手感：在画面中间点四个角，围出一块区域
+          for (const [fx, fy] of [[0.25, 0.25], [0.75, 0.25], [0.75, 0.75], [0.25, 0.75]]) {
+            const at = point(fx, fy);
+            display.dispatchEvent(
+              new PointerEvent('pointerdown', {
+                button: 0, buttons: 1, ...at,
+                pointerId: 152, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+              }),
+            );
+            display.dispatchEvent(
+              new PointerEvent('pointerup', { button: 0, buttons: 0, ...at, bubbles: true }),
+            );
+            compositorMaskSteps.pointSteps += 1;
+            await wait(90);
+          }
+          // Blender 里 F = 把首尾两个端点连起来（没闭合的样条没有面积）
+          document.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'f', bubbles: true, cancelable: true }),
+          );
+          await wait(260);
+          {
+            const maskInfo = window.__FISHERAI_COMPOSITOR__?.report?.()?.masks ?? [];
+            compositorMaskSteps.maskPoints = Number(maskInfo[0]?.points ?? 0);
+            compositorMaskSteps.maskClosed = maskInfo[0]?.closed === true;
+          }
+          await wait(120);
+          // 底图有没有真的垫在下面（参考口接上「输入图像」之后，画面上方几块色条应该看得见）
+          const displayContext = display.getContext('2d');
+          let brightest = 0;
+          for (const [fx, fy] of [[0.5, 0.08], [0.2, 0.18], [0.8, 0.18], [0.5, 0.8]]) {
+            const piece = displayContext.getImageData(
+              Math.round(display.width * fx),
+              Math.round(display.height * fy),
+              1,
+              1,
+            ).data;
+            brightest = Math.max(brightest, piece[0], piece[1], piece[2]);
+          }
+          compositorMaskSteps.baseVisible = brightest > 60;
+        }
+        // 完成 → 卡片预览应该有黑板白线
+        painter
+          ?.querySelector('.cg-maskpaint-actions button[data-primary="true"]')
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await wait(500);
+        const preview = root.querySelector('[data-fisherai-mask-preview]');
+        const previewImage = preview?.querySelector('img');
+        compositorMaskSteps.previewBytes = String(previewImage?.src ?? '').length;
+        if (previewImage && previewImage.complete && previewImage.naturalWidth) {
+          const probeCanvas = document.createElement('canvas');
+          probeCanvas.width = previewImage.naturalWidth;
+          probeCanvas.height = previewImage.naturalHeight;
+          const probeContext = probeCanvas.getContext('2d');
+          probeContext.drawImage(previewImage, 0, 0);
+          const data = probeContext.getImageData(0, 0, probeCanvas.width, probeCanvas.height).data;
+          let white = 0;
+          for (let index = 0; index < data.length; index += 4 * 7) {
+            if (data[index] > 160) white += 1;
+          }
+          compositorMaskSteps.whitePixels = white;
+        }
+
+        // Shift+点击遮罩节点 = 接到预览：预览中心该是白的、角落该是黑的（遮罩真的参与求值）
+        const maskCard = [...root.querySelectorAll('.cg-node')].find(
+          (element) => element.querySelector('.cg-node-title')?.textContent?.trim() === '遮罩',
+        );
+        if (maskCard) {
+          const maskBox = maskCard.getBoundingClientRect();
+          maskCard.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              button: 0, buttons: 1, shiftKey: true,
+              clientX: maskBox.left + 20, clientY: maskBox.top + 12,
+              pointerId: 143, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+            }),
+          );
+          compositorMaskSteps.viewerConnected = true;
+        }
+        await wait(800);
+        compositorMaskSteps.viewerEdges =
+          window.__FISHERAI_COMPOSITOR__?.report?.()?.edges?.filter?.(
+            (edge) => edge.to === 'viewer' && edge.from === maskCard?.dataset?.nodeId,
+          ).length ?? -1;
+        const sample = (fx, fy) => {
+          const canvas = root.querySelector('.cg-preview-canvas');
+          const gl = canvas?.getContext('webgl2');
+          if (!canvas || !gl) return null;
+          const pixel = new Uint8Array(4);
+          const x = Math.min(canvas.width - 1, Math.max(0, Math.round(canvas.width * fx)));
+          const y = Math.min(canvas.height - 1, Math.max(0, Math.round(canvas.height * fy)));
+          gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+          return [pixel[0], pixel[1], pixel[2]];
+        };
+        compositorMaskSteps.center = sample(0.5, 0.5);
+        compositorMaskSteps.corner = sample(0.15, 0.15);
+
+        // 再打开绘制层：蒙版要从存下来的黑白图里读回来（截图 = 交付图）
+        const finalCard = [...root.querySelectorAll('.cg-node')].find(
+          (element) => element.querySelector('.cg-node-title')?.textContent?.trim() === '遮罩',
+        );
+        finalCard
+          ?.querySelector('.cg-mask-actions button')
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await until(() => document.querySelector('.cg-maskpaint'), 8000);
+        await wait(400);
+        compositorMaskSteps.reopened = !!document.querySelector('.cg-maskpaint');
+      } catch (error) {
+        compositorMaskSteps.error = String((error && error.stack) || error);
+      }
+      compositorMaskSteps.done = true;
+    };
+
+    // ⚠️ 探针定时器必须在任何 await 之前立起来：headless 的 --virtual-time-budget    //    会等页面的微任务/定时器都跑完，如果前面有长 await 把这段脚本卡住，探针一次都发不出去
     //    （现象：没收到页面探针）。所以这里先装探针，再启动那些要等 DOM 的场景流程。
     setInterval(leakReport, 250);
     setTimeout(leakReport, 1800);
@@ -6294,6 +6567,7 @@ const HOST_PAGE = `<!doctype html>
     void buildCompositorPanelScene();
     void buildCompositorWheelsScene();
     void buildCompositorMixScene();
+    void buildCompositorMaskScene();
   </script>
 </body>
 </html>`;
@@ -6779,6 +7053,14 @@ const SCENES = [
    */
   ['compositor-mix', `${ORIGIN}/?resume=${compositorPanelProjectId}&xcompositor=mix`, `?resume=${compositorPanelProjectId}&xcompositor=mix`,
     (probe) => probe.compositorMix?.done === true, 28000],
+  /**
+   * 遮罩（v1.94）：用户 2026-11-11「在调色面板做绘制功能。我需要遮罩功能，
+   * 但是要用混合节点来实现，接入黑白遮罩图像来实现。参考 blender 的遮罩操作方式」。
+   * 场景：建「遮罩」→ 开编辑大画布 → 点四个控制点围出一块 → 完成（卡片预览有白块）
+   * → Shift+点击接到预览（中心亮/角落暗 = 遮罩真的参与求值）→ 再开绘制层当交付图。
+   */
+  ['compositor-mask', `${ORIGIN}/?resume=${compositorPanelProjectId}&xcompositor=mask`, `?resume=${compositorPanelProjectId}&xcompositor=mask`,
+    (probe) => probe.compositorMask?.done === true, 30000],
 ];
 const onlyScenes = String(process.env.BROWSER_ONLY ?? '')
   .split(',')
@@ -8506,6 +8788,44 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
         /rgba?\(/.test(String(scene.dropdownBg)) &&
         !/255,\s*255,\s*255/.test(String(scene.dropdownBg)),
       `options=${scene.options} inViewport=${scene.dropdownInViewport} bg=${scene.dropdownBg}`);
+  }
+
+  /**
+   * 遮罩（?xcompositor=mask，v1.94）：用户 2026-11-11 原文
+   * 「在调色面板做绘制功能…遮罩要用混合节点来实现，接入黑白遮罩图像来实现。
+   *  参考 blender 的遮罩操作方式」。这一场证明「画出来的黑白图真的成了遮罩」：
+   * 卡片预览里有白色像素，接进预览后画面中心是白的、角落是黑的。
+   */
+  if (label === 'compositor-mask') {
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const scene = probe.compositorMask ?? {};
+    report('遮罩场景跑完了（没有半途报错）', scene.done === true && !scene.error,
+      String(scene.error ?? '').slice(0, 300));
+    report('搜 zb 能建出「遮罩」节点', scene.created === true);
+    report('点「编辑」打开了遮罩编辑大画布', scene.painterOpened === true);
+    report('用真指针在画布上点了 4 个控制点', Number(scene.pointSteps) >= 4,
+      `points=${scene.pointSteps}`);
+    report('按 F 把首尾端点连起来（样条闭合、有面积）',
+      scene.maskClosed === true && Number(scene.maskPoints) === 4,
+      `closed=${scene.maskClosed} points=${scene.maskPoints}`);
+    report('栅格化后的黑白图存回节点（卡片预览拿到 dataURL）',
+      Number(scene.previewBytes) > 2000, `bytes=${scene.previewBytes}`);
+    report('参考口接上「输入图像」后，编辑大画布垫着底图（对位用）',
+      scene.baseConnected === true && scene.baseVisible === true,
+      `connected=${scene.baseConnected} visible=${scene.baseVisible} ports=${JSON.stringify(scene.portRects ?? null)} link=${scene.linkStarted} drop=${scene.dropTarget} edges=${scene.edgeCount}`);
+    report('预览图里有白色笔画（不是全黑）', Number(scene.whitePixels) > 200,
+      `white=${scene.whitePixels}`);
+    if (scene.center) {
+      report('遮罩接到预览后：画面中心是亮的、角落是暗的（黑白遮罩真的生效）',
+        Number(scene.center[0]) > 150 && Number(scene.corner?.[0] ?? 255) < 100,
+        `center=${JSON.stringify(scene.center)} corner=${JSON.stringify(scene.corner)}`);
+    } else {
+      console.log(`[browser] SKIP  ${label}: 这个 headless 环境读不到预览像素`);
+    }
+    report('再打开编辑层能读回已画的遮罩（截图 = 交付图）', scene.reopened === true);
   }
 
   /**

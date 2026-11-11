@@ -40,6 +40,7 @@ const ALIASES: Record<string, string> = {
   ellipseMask: 'tymb ellipsemask ellipse mask 椭圆蒙版',
   boxMask: 'jxmb boxmask box rectangle mask 矩形蒙版',
   gradientMask: 'jbmb gradientmask gradient mask 渐变蒙版',
+  paintMask: 'zbmb zb mask 遮罩 蒙版 样条 绘制',
 };
 
 export interface NodeSearchHit {

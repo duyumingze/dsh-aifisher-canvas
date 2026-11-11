@@ -33,7 +33,8 @@ export type CompositorKind =
   | 'transform'
   | 'ellipseMask'
   | 'boxMask'
-  | 'gradientMask';
+  | 'gradientMask'
+  | 'paintMask';
 
 /** 参数值：标量、颜色（rgba 0..1）、曲线控制点（[x,y,…]）。 */
 export type CompositorParamValue = number | number[] | string | boolean;
@@ -58,10 +59,30 @@ export interface CompositorEdge {
   toPort: number;
 }
 
+/**
+ * 遮罩（Blender 的 Mask datablock）：**项目级共享资源**，不属于某个节点。
+ *
+ * 用户 2026-11-11：「它是在遮罩区添加遮罩之后在添加遮罩节点获取遮罩图像的」——
+ * 所以按 Blender 的形态拆开：遮罩对象存在 graph.masks 里（在编辑区里改它），
+ * 「遮罩」节点只是按 id **引用**（多个节点可以引用同一个遮罩，改一处全都跟着变）。
+ */
+export interface CompositorMask {
+  id: string;
+  name: string;
+  /** 归一化 0..1 的控制点 [x0,y0,x1,y1,…]。 */
+  spline: number[];
+  /** 是否闭合（Blender 里按 F 把首尾两个端点连起来）；没闭合的样条没有面积。 */
+  closed: boolean;
+  /** 羽化占画面宽度的比例（0..0.1），在编辑区里调。 */
+  feather: number;
+}
+
 export interface CompositorGraph {
   version: 1;
   nodes: CompositorNode[];
   edges: CompositorEdge[];
+  /** 项目里的遮罩（Blender 的 Mask 数据块；节点按 id 引用）。 */
+  masks?: CompositorMask[];
   /** 编辑器自己的视图状态（平移/缩放），与图像无关，但一起存省一次写。 */
   view?: { x: number; y: number; scale: number };
   /** 示波器面板状态：看哪张图、开没开、面板多大（用户 2026-10-29 要求面板能调大小）。 */
@@ -69,8 +90,7 @@ export interface CompositorGraph {
 }
 
 /** 主画布传进来的上游图片，顺序即输入节点的端口顺序。 */
-export interface CompositorInputImage {
-  nodeId: string;
+export interface CompositorInputImage {  nodeId: string;
   url: string;
   title?: string;
 }
@@ -207,6 +227,27 @@ export const NODE_SPECS: Record<CompositorKind, CompositorNodeSpec> = {
     outputs: 1,
     defaults: { angle: 90, offset: 0, softness: 0.8, invert: false },
   },
+  /**
+   * 遮罩（用户 2026-11-11：「在调色面板做绘制功能…遮罩要用混合节点来实现，
+   * 接入黑白遮罩图像」；随后补了 Blender 的 Mask Editor 截图，所以走**样条**形态）。
+   *
+   * 在卡片里点「编辑」开一块大画布，左键加点、拖控制点画出一圈闭合样条（绿线黄点，
+   * 和 Blender 一样），羽化柔化边缘；栅格化成一张**黑白图**存在 params.mask 里。
+   * 输出口接到「混合」节点的第三个口（系数）就按像素控混合量 ——
+   * 于是「局部调色」= A 口接调过色的链、B 口接原图、系数口接这张遮罩。
+   *
+   * 一个输入口：可选的底图（编辑时垫在下面帮你对位，不参与输出）。
+   * params.spline 是归一化控制点数组、params.feather 是羽化比例、params.mask 是黑白 PNG、
+   * params.maskRev 是改一次 +1 的版本号（引擎靠它失效缓存）。它们都不是数字/布尔里的
+   * 「界面参数」，所以只有 feather / invert 进 defaults。
+   */
+  paintMask: {
+    label: '遮罩',
+    category: '蒙版',
+    inputs: 1,
+    outputs: 1,
+    defaults: { feather: true, invert: false },
+  },
 };
 
 /** 能当「图像输出」被主画布下游消费的，只有 output 节点的结果。 */
@@ -221,6 +262,7 @@ export const OUTPUT_KIND: CompositorKind = 'output';
 export const INPUT_PORT_LABELS: Partial<Record<CompositorKind, readonly string[]>> = {
   mix: ['A 上层', 'B 底层', '系数（灰度 / 蒙版）'],
   alphaOver: ['A 上层', 'B 底层'],
+  paintMask: ['参考图（只用于对位，不参与输出）'],
 };
 
 /** 第 index 个输入口的显示名；没登记的走「输入 N」。 */
@@ -480,6 +522,20 @@ export function newCompositorId(kind: CompositorKind): string {
   return `${kind}-${Date.now().toString(36)}-${sequence.toString(36)}`;
 }
 
+/** 新的遮罩数据块（Blender 的 Mask）：空样条 + 默认羽化，命名按现有条数递增。 */
+export function createCompositorMask(masks: readonly CompositorMask[]): CompositorMask {
+  let index = masks.length + 1;
+  const names = new Set(masks.map((mask) => mask.name));
+  while (names.has(`遮罩 ${index}`)) index += 1;
+  return {
+    id: `mask-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+    name: `遮罩 ${index}`,
+    spline: [],
+    closed: false,
+    feather: 0.015,
+  };
+}
+
 /**
  * 默认图：输入 → 输出，输入 → 预览。
  * 输入节点的输出口数量由 upstream 图片数决定，节点本身只有一张卡片。
@@ -513,7 +569,7 @@ export function createDefaultGraph(inputCount: number): CompositorGraph {
       toPort: 0,
     });
   }
-  return { version: 1, nodes: [inputNode, outputNode, viewerNode], edges };
+  return { version: 1, nodes: [inputNode, outputNode, viewerNode], edges, masks: [] };
 }
 
 /** 兼容性修补：老图 / 外部写入的图进编辑器前先过一遍。 */export function normalizeGraph(value: unknown, inputCount: number): CompositorGraph {
@@ -553,10 +609,27 @@ export function createDefaultGraph(inputCount: number): CompositorGraph {
   }
   const view = record(source.view);
   const scope = record(source.scope);
+  // 遮罩数据块（Blender 的 Mask）：老图没有这一段 → 空数组；有就只挑认得的字段
+  const masks: CompositorMask[] = [];
+  for (const raw of Array.isArray(source.masks) ? source.masks : []) {
+    const item = record(raw);
+    const id = String(item.id || '');
+    if (!id) continue;
+    masks.push({
+      id,
+      name: typeof item.name === 'string' && item.name ? item.name : '遮罩',
+      spline: Array.isArray(item.spline)
+        ? item.spline.map((value) => Number(value)).filter((value) => Number.isFinite(value))
+        : [],
+      closed: item.closed === true,
+      feather: Number.isFinite(Number(item.feather)) ? Number(item.feather) : 0.015,
+    });
+  }
   return {
     version: 1,
     nodes,
     edges,
+    masks,
     view:
       Number.isFinite(Number(view.x)) && Number.isFinite(Number(view.scale))
         ? { x: Number(view.x), y: Number(view.y), scale: Number(view.scale) }

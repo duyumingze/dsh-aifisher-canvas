@@ -57,6 +57,7 @@ export const SUITES = [
   { file: 'scripts/test-canvas-video-frames.mjs' },
   { file: 'scripts/test-canvas-video-seek.mjs', note: 'v1.68 进度条拖拽' },
   { file: 'scripts/test-canvas-knife.mjs' },
+  { file: 'scripts/test-canvas-blender-keys.mjs', note: 'v1.94 主画布 G 抓取移动（X/Y 锁轴）/ X 删除' },
   { file: 'scripts/test-canvas-compositor.mjs', note: 'v1.70 调色节点 + 全屏合成器' },
   { file: 'scripts/test-canvas-reroute.mjs', note: 'v1.71 Shift+右键划选合并' },
   { file: 'scripts/test-canvas-outpaint.mjs' },

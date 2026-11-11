@@ -823,6 +823,10 @@ export function CanvasApplication(React: Runtime, dependencies: Dependencies) {
           groupNodes(ke, nodes, setNodes);
         }
       },
+      // G 抓取移动结束时把位置推进撤销栈（Ctrl+Z 能撤）
+      pushHistory: () => {
+        pushHistory();
+      },
     });
   useAutoSave({
     isDirty: dirty,

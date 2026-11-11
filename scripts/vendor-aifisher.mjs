@@ -4922,6 +4922,264 @@ const MARKDOWN_TEXT_PATCHES = [
   );
 }
 
+// ---------------------------------------------------------------- 3.8x) Blender 手感：G 抓取移动 / X 删除
+//
+// 用户 2026-11-11：「选中按 g 键移动，再次点击 x 或沿着对应的轴向移动。还有删除节点可以用 x 来删除。
+// 仿照 blender 的操作逻辑」。
+//
+// 主画布的键盘快捷键活在 vendor 的 canvasCommands.ts（React hook 里，握着 nodes / viewport /
+// setNodes / selectedNodeIds）。抓取移动必须改节点状态，所以只能在这里补 —— 和调色面板
+// （src/client/canvas/compositor/editor.ts 的 startGrab）同一套规则：
+//   G            = 选中节点跟着鼠标走；再按 X / Y 把位移锁到那个轴（同一个键再按解锁）
+//   左键 / Enter = 落下（这一下被吞掉，不会再开始拖节点或清选区），Esc / 右键 = 取消
+//   X            = 删除选中节点（和 Delete / Backspace 同义，只认不带修饰键的 X）
+//
+// 位移以「起手位置 + 起手指针」为基准算（不累加增量），中途缩放 / 锁轴都不会让节点漂。
+const BLENDER_KEYS_PATCHES = [
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `  focusOnNodes: (nodes: CanvasClipboardNode[], ids: string[]) => void;
+  groupSelectedNodes: (ids: string[]) => void;
+}`,
+    to: `  focusOnNodes: (nodes: CanvasClipboardNode[], ids: string[]) => void;
+  groupSelectedNodes: (ids: string[]) => void;
+  /** 结束一次编辑时把当前状态推进撤销栈（G 抓取移动用；不给就不记历史）。 */
+  pushHistory?: () => void;
+}`,
+    why: '画布命令的可选项里缺 pushHistory（G 抓取要能撤销）',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `    focusOnNodes,
+    groupSelectedNodes,
+  } = options;`,
+    to: `    focusOnNodes,
+    groupSelectedNodes,
+    pushHistory,
+  } = options;`,
+    why: '画布命令没解构 pushHistory',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `  hooks.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {`,
+    to: `  // ---- dsh-aifisher-canvas：Blender 手感（G 抓取移动 / X 删除），见补丁 3.8x --------
+  //
+  // 位移以「起手位置 + 起手指针」为基准算，不累加增量：中途锁轴 / 缩放都不会漂。
+  // 监听器只在抓取期间挂在 window 上（capture 阶段），落下 / 取消就摘掉；
+  // 不用 effect 依赖 —— 拖动会不停改 nodes，effect 每次重跑会把手势打断。
+  const grabRef = hooks.useRef<{
+    ids: string[];
+    positions: Map<string, { x: number; y: number }>;
+    startX: number;
+    startY: number;
+    zoom: number;
+    axis: 'x' | 'y' | null;
+    moved: boolean;
+    apply: () => void;
+    stop: () => void;
+  } | null>(null);
+
+  const stopGrab = hooks.useCallback(
+    (commit: boolean) => {
+      const grab = grabRef.current;
+      if (!grab) return;
+      grabRef.current = null;
+      grab.stop();
+      if (!commit) {
+        // 取消：把位置放回起手那一刻（不记历史）
+        setNodes((current) =>
+          current.map((node) => {
+            const start = grab.positions.get(node.id);
+            return start ? { ...node, x: start.x, y: start.y } : node;
+          }),
+        );
+        return;
+      }
+      if (!grab.moved) return;
+      const commitHistory = pushHistory;
+      if (!commitHistory) return;
+      // 等 React 把最后一帧位置提交完再记历史（和 vendor 拖节点松手后的 deferFrame 同一做法）
+      const run = () => commitHistory();
+      if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(run);
+      else window.setTimeout(run, 16);
+    },
+    [pushHistory, setNodes],
+  );
+
+  const startGrab = hooks.useCallback(() => {
+    if (grabRef.current) return;
+    const ids = selectedNodeIds.filter((id) => nodes.some((node) => node.id === id));
+    if (!ids.length) return;
+    const positions = new Map<string, { x: number; y: number }>();
+    for (const node of nodes) {
+      if (ids.includes(node.id)) positions.set(node.id, { x: node.x, y: node.y });
+    }
+    const origin = pointer.current ?? { clientX: 0, clientY: 0 };
+    const zoom = Number.isFinite(viewport.zoom) && viewport.zoom > 0 ? viewport.zoom : 1;
+    const grab: NonNullable<typeof grabRef.current> = {
+      ids,
+      positions,
+      startX: origin.clientX,
+      startY: origin.clientY,
+      zoom,
+      axis: null,
+      moved: false,
+      apply: () => undefined,
+      stop: () => undefined,
+    };
+    const applyAt = (clientX: number, clientY: number) => {
+      let dx = (clientX - grab.startX) / grab.zoom;
+      let dy = (clientY - grab.startY) / grab.zoom;
+      if (grab.axis === 'x') dy = 0;
+      else if (grab.axis === 'y') dx = 0;
+      if (Math.abs(dx) > 0.001 || Math.abs(dy) > 0.001) grab.moved = true;
+      setNodes((current) =>
+        current.map((node) => {
+          const home = grab.positions.get(node.id);
+          return home ? { ...node, x: home.x + dx, y: home.y + dy } : node;
+        }),
+      );
+    };
+    grab.apply = () => {
+      const at = pointer.current;
+      if (at) applyAt(at.clientX, at.clientY);
+    };
+    const onMove = (event: PointerEvent) => applyAt(event.clientX, event.clientY);
+    const onDown = (event: PointerEvent) => {
+      // 落下 / 取消这一下要吞掉：否则会立刻开始拖节点、或点空白把选区清掉
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.button === 0) stopGrab(true);
+      else stopGrab(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      if (key === 'x' || key === 'y') {
+        event.preventDefault();
+        event.stopPropagation();
+        grab.axis = grab.axis === key ? null : key;
+        grab.apply();
+        return;
+      }
+      if (event.key === 'Enter' || key === 'g') {
+        event.preventDefault();
+        event.stopPropagation();
+        stopGrab(true);
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        stopGrab(false);
+      }
+    };
+    const previousCursor = document.body.style.cursor;
+    grab.stop = () => {
+      window.removeEventListener('pointermove', onMove, true);
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('blur', onBlur);
+      document.body.style.cursor = previousCursor;
+    };
+    const onBlur = () => stopGrab(false);
+    window.addEventListener('pointermove', onMove, true);
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('blur', onBlur);
+    document.body.style.cursor = 'move';
+    grabRef.current = grab;
+  }, [nodes, pointer, selectedNodeIds, setNodes, stopGrab, viewport]);
+
+  // 卸载时把还挂着的抓取监听摘掉（不靠 effect 依赖：拖动中 nodes 会不停变）
+  hooks.useEffect(
+    () => () => {
+      grabRef.current?.stop();
+      grabRef.current = null;
+    },
+    [],
+  );
+
+  hooks.useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {`,
+    why: '画布命令里没有 G 抓取移动',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `      if (key === 'delete' || key === 'backspace') {
+        if (selectedNodeIds.length) {`,
+    to: `      // G = 抓取移动（Blender 同款；再按 X / Y 锁轴）
+      if (key === 'g' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        startGrab();
+        return;
+      }
+      // X 与 Delete / Backspace 同义（Blender 里 X 就是删；Ctrl+X 之类不拦）
+      if (
+        key === 'delete' ||
+        key === 'backspace' ||
+        (key === 'x' && !event.ctrlKey && !event.metaKey && !event.altKey)
+      ) {
+        if (selectedNodeIds.length) {`,
+    why: '画布命令的删除键没接 X',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `    groupSelectedNodes,
+    handleCopy,
+  ]);`,
+    to: `    groupSelectedNodes,
+    handleCopy,
+    startGrab,
+  ]);`,
+    why: '画布命令的快捷键 effect 依赖里缺 startGrab',
+  },
+  {
+    file: 'src/stable/canvas/canvasApplication.tsx',
+    from: `      groupSelectedNodes: (ke: string[]) => {
+        if (ke.length > 1) {
+          groupNodes(ke, nodes, setNodes);
+        }
+      },
+    });`,
+    to: `      groupSelectedNodes: (ke: string[]) => {
+        if (ke.length > 1) {
+          groupNodes(ke, nodes, setNodes);
+        }
+      },
+      // G 抓取移动结束时把位置推进撤销栈（Ctrl+Z 能撤）
+      pushHistory: () => {
+        pushHistory();
+      },
+    });`,
+    why: '画布命令调用处没把 pushHistory 传进去',
+  },
+];
+
+{
+  const problems = [];
+  for (const patch of BLENDER_KEYS_PATCHES) {
+    const target = path.join(VENDOR, patch.file);
+    if (!fs.existsSync(target)) {
+      problems.push(`${patch.file}（文件不存在）`);
+      continue;
+    }
+    const original = fs.readFileSync(target, 'utf8');
+    const hits = original.split(patch.from).length - 1;
+    if (hits !== 1) {
+      problems.push(`${patch.file}: ${patch.why} —— 锚点命中 ${hits} 次（预期 1 次）`);
+      continue;
+    }
+    fs.writeFileSync(target, original.split(patch.from).join(patch.to));
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `[vendor] Blender 手感（G/X）补丁没对齐（上游可能改了写法，请核对）：\n  - ${problems.join('\n  - ')}`,
+    );
+  }
+  console.log(`[vendor] Blender 手感（G 抓取 / X 删除）：${BLENDER_KEYS_PATCHES.length} 处`);
+}
+
 // ---------------------------------------------------------------- 
 console.log(
   [

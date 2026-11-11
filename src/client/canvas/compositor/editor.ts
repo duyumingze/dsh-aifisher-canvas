@@ -65,6 +65,7 @@ import {
   canInsertIntoEdge,
   chooseApplyTargets,
   connect,
+  createCompositorMask,
   createDefaultGraph,
   edgeId,
   evaluationOrder,
@@ -83,10 +84,21 @@ import {
   type CompositorGraph,
   type CompositorInputImage,
   type CompositorKind,
+  type CompositorMask,
   type CompositorNode,
   type CompositorParamValue,
 } from './graph';
 import { creatableNodeCount, searchNodeKinds, type NodeSearchHit } from './nodeSearch';
+import {
+  featherPixels,
+  hasMaskImage,
+  invertMaskPixels,
+  maskCanvasSize,
+  splineBezierSegments,
+  splineFromParam,
+  splineToParam,
+  type MaskPoint,
+} from './maskPaint';
 import {
   MAX_CURVE_POINTS,
   addCurvePoint,
@@ -239,7 +251,7 @@ const HEAD_COLORS: Record<string, string> = {
 };
 
 /** 蒙版节点的输出是灰度遮罩，连线用灰白，和图像线（黄绿）区分开。 */
-const MASK_KINDS = new Set<CompositorKind>(['ellipseMask', 'boxMask', 'gradientMask']);
+const MASK_KINDS = new Set<CompositorKind>(['ellipseMask', 'boxMask', 'gradientMask', 'paintMask']);
 
 function headColor(node: CompositorNode): string {
   return HEAD_COLORS[node.kind] ?? HEAD_COLORS[specOf(node.kind).category] ?? '#3f4650';
@@ -333,6 +345,26 @@ interface InsertTarget {
   edgeId: string;
 }
 
+/**
+ * Blender 的 G（抓取移动）：不按任何键，选中节点后按 G 跟着鼠标走。
+ *
+ * `axis` 是后按 X / Y 加上的轴向约束（相机空间，不是世界空间 —— 合成器里没有相机，
+ * 屏幕横竖就是 x/y）；再按同一个轴键解锁，和 Blender 一致。
+ */
+interface GrabDrag {
+  /** 抓取开始时选中的节点（只动它们，中途改选区不影响这次手势）。 */
+  ids: string[];
+  /** 起手时每个节点在世界坐标里的位置：位移始终相对它们算，不会累积漂移。 */
+  positions: Map<string, { x: number; y: number }>;
+  startX: number;
+  startY: number;
+  axis: 'x' | 'y' | null;
+  /** 抬手那一刻的图：落下时合成一步撤销；取消则整个丢掉。 */
+  before: GraphSnapshot;
+  /** 已经真的移动过（没动过就不进撤销栈，也不改 `edited`）。 */
+  moved: boolean;
+}
+
 /** 示波器面板的当前状态。 */
 interface ScopeState {
   kind: ScopeKind;
@@ -386,6 +418,8 @@ interface Session {
   linkDrag: LinkDrag | null;
   strokeDrag: StrokeDrag | null;
   nodeDrag: NodeDrag | null;
+  /** Blender 的 G 抓取移动（不按键跟随鼠标）。 */
+  grab: GrabDrag | null;
   panDrag: PanDrag | null;
   marquee: MarqueeDrag | null;
   placement: PlacementDrag | null;
@@ -418,6 +452,10 @@ const closePopup = (): void => {
   openSelectPopup = null;
   close();
 };
+
+/** 当前开着的蒙版绘制浮层（同一时刻只允许一个；关面板时一并收起）。 */
+let maskPainter: { close: (save?: boolean) => void; handleKey: (event: KeyboardEvent) => boolean } | null =
+  null;
 
 function clamp(value: number, low: number, high: number): number {
   return Math.max(low, Math.min(high, value));
@@ -586,7 +624,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   const hintbar = document.createElement('div');
   hintbar.className = 'cg-hintbar';
   hintbar.textContent =
-    '空白拖=框选 · 中键/空格=平移 · 滚轮=缩放 · Shift+A=添加节点 · 拖节点压线=插入连线 · 双击连线=断开 · Ctrl+右键划过=断开 · Shift+右键划过=合线 · Delete=删除 · Ctrl+Z=撤销';
+    '空白拖=框选 · 中键/空格=平移 · 滚轮=缩放 · Shift+A=添加节点 · 拖节点压线=插入连线 · 双击连线=断开 · Ctrl+右键划过=断开 · Shift+右键划过=合线 · G=移动(X/Y锁轴) · X/Delete=删除 · Ctrl+Z=撤销';
   stage.append(edgeLayer, world, hintbar);
 
   // 右下角缩放读数：和顶栏「适应视图」同一个动作，顺手可点。
@@ -660,6 +698,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     linkDrag: null,
     strokeDrag: null,
     nodeDrag: null,
+    grab: null,
     panDrag: null,
     marquee: null,
     placement: null,
@@ -1257,6 +1296,818 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     return wrapper;
   };
 
+  // ---- 遮罩（Blender 的 Mask：项目级遮罩数据块 + 样条编辑）----------------
+  /**
+   * 用户 2026-11-11：「在调色面板做绘制功能。我需要遮罩功能，但是要用混合节点来实现，
+   * 接入黑白遮罩图像来实现。参考 blender 的遮罩操作方式。」随后连发两张 Blender 截图并补充：
+   *   「它是在遮罩区添加遮罩之后在添加遮罩节点获取遮罩图像的，还有遮罩的形状是可以用
+   *    x 缩放，r 旋转，g 移动的，加上 x 或 y 还可以锁轴。每一个控制点可以单独控制。
+   *    还可以按 x 删除控制点，按 e 可以挤出一个新的控制点。按 m 可以合并控制点。
+   *    按 f 可以连接两个端点（只能首尾两个控制点）」
+   *
+   * 所以照 Blender 的模型做两层：
+   *   ① **遮罩数据块**（遮罩区）：存在 graph.masks 里，是项目级资源；一个遮罩 = 一圈控制点
+   *      + 闭合标志 + 羽化。「遮罩」节点只是按 id 引用它，多个节点引同一个遮罩时改一处全跟着变。
+   *   ② **编辑大画布**：点选/拖控制点，G 移动、R 旋转、S 缩放（按住 X / Y 锁轴），
+   *      X 删点、E 挤出、M 合并、F 连首尾闭合、A 全选、Alt+A 取消选择。
+   *      和 Blender 一样：变换中左键/回车确认、Esc/右键取消。
+   *
+   * 节点（遮罩）持有栅格化后的黑白图 + maskRev：引用同一遮罩的节点在遮罩被改时一起重画。
+   */
+
+  /** 蒙版节点的底图：只认「输入图像」直连的那一张（编辑时垫在下面帮你对位）。 */
+  const maskBaseImageUrl = (nodeId: string): string | null => {
+    const edge = session_.graph.edges.find((item) => item.toNode === nodeId && item.toPort === 0);
+    if (!edge) return null;
+    const upstream = session_.graph.nodes.find((item) => item.id === edge.fromNode);
+    if (upstream?.kind !== 'input') return null;
+    return session_.options.images[edge.fromPort]?.url ?? null;
+  };
+
+  const masksOf = (): CompositorMask[] => session_.graph.masks ?? [];
+  const setMasks = (masks: CompositorMask[]): void => {
+    session_.graph = { ...session_.graph, masks };
+  };
+  const maskById = (id: string): CompositorMask | undefined =>
+    masksOf().find((mask) => mask.id === id);
+
+  /** 节点引用的遮罩 id；老图（没有 maskId）回落到第一个遮罩。 */
+  const maskIdOf = (node: CompositorNode): string => {
+    const value = String(paramsOf(node).maskId || '');
+    return value || masksOf()[0]?.id || '';
+  };
+
+  /** 把遮罩栅格化成黑白 PNG（黑底白区域）。`useFeather` = 是否用遮罩自己的羽化。 */
+  const rasterizeMask = (mask: CompositorMask, useFeather: boolean): string | null => {
+    const { width: W, height: H } = maskCanvasSize(session_.size.width, session_.size.height);
+    const points = splineFromParam(mask.spline);
+    if (points.length < 3 || !mask.closed) return null;
+    const shape = document.createElement('canvas');
+    shape.width = W;
+    shape.height = H;
+    let sctx: CanvasRenderingContext2D | null = null;
+    try {
+      sctx = shape.getContext('2d');
+    } catch {
+      sctx = null;
+    }
+    if (!sctx) return null;
+    const pixels = points.map((point) => ({ x: point.x * W, y: point.y * H }));
+    sctx.fillStyle = '#fff';
+    sctx.beginPath();
+    sctx.moveTo(pixels[0].x, pixels[0].y);
+    for (const [cp1, cp2, end] of splineBezierSegments(pixels)) {
+      sctx.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, end.x, end.y);
+    }
+    sctx.closePath();
+    sctx.fill();
+
+    const out = document.createElement('canvas');
+    out.width = W;
+    out.height = H;
+    let octx: CanvasRenderingContext2D | null = null;
+    try {
+      octx = out.getContext('2d');
+    } catch {
+      octx = null;
+    }
+    if (!octx) return null;
+    octx.fillStyle = '#000';
+    octx.fillRect(0, 0, W, H);
+    const blur = useFeather ? featherPixels(mask.feather, W) : 0;
+    octx.filter = blur > 0.4 ? `blur(${blur}px)` : 'none';
+    octx.drawImage(shape, 0, 0);
+    octx.filter = 'none';
+    return out.toDataURL('image/png');
+  };
+
+  /** 某个遮罩被改动后，把引用它的节点全部重画一遍（同一档羽化只栅格化一次）。 */
+  const refreshMaskNodes = (mask: CompositorMask): void => {
+    const cache = new Map<boolean, string | null>();
+    for (const node of session_.graph.nodes) {
+      if (node.kind !== 'paintMask') continue;
+      if (maskIdOf(node) !== mask.id) continue;
+      const useFeather = paramsOf(node).feather !== false;
+      if (!cache.has(useFeather)) cache.set(useFeather, rasterizeMask(mask, useFeather));
+      const data = cache.get(useFeather) ?? null;
+      const rev = Number(paramsOf(node).maskRev) || 0;
+      setParam(node.id, 'mask', data ?? '');
+      setParam(node.id, 'maskRev', rev + 1);
+    }
+  };
+
+  /** 改遮罩数据块：写回 graph.masks 并让所有引用它的节点重画。 */
+  const updateMask = (next: CompositorMask): void => {
+    const masks = masksOf();
+    const index = masks.findIndex((mask) => mask.id === next.id);
+    if (index < 0) setMasks([...masks, next]);
+    else setMasks(masks.map((mask) => (mask.id === next.id ? next : mask)));
+    refreshMaskNodes(next);
+    schedule();
+  };
+
+  /** 「反相」按钮：把节点上这张黑白图整张翻过来（遮罩数据块不变，只改这一份输出）。 */
+  const invertStoredMask = (node: CompositorNode): void => {
+    const params = paramsOf(node);
+    if (!hasMaskImage(params.mask)) {
+      session_.toast('还没有遮罩：先点「编辑」画一圈', true);
+      return;
+    }
+    const src = params.mask;
+    const image = new Image();
+    image.onload = () => {
+      const width = image.naturalWidth || 1024;
+      const height = image.naturalHeight || 576;
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      let context: CanvasRenderingContext2D | null = null;
+      try {
+        context = canvas.getContext('2d');
+      } catch {
+        context = null;
+      }
+      if (!context) {
+        session_.toast('这个环境没有 2D 画布，无法反相遮罩', true);
+        return;
+      }
+      context.drawImage(image, 0, 0, width, height);
+      const pixels = context.getImageData(0, 0, width, height);
+      invertMaskPixels(pixels.data);
+      context.putImageData(pixels, 0, 0);
+      rememberParamEdit();
+      setParam(node.id, 'mask', canvas.toDataURL('image/png'));
+      setParam(node.id, 'maskRev', (Number(params.maskRev) || 0) + 1);
+      renderNodes();
+      schedule();
+      session_.toast('遮罩已反相');
+    };
+    image.onerror = () => session_.toast('遮罩图读不出来，无法反相', true);
+    image.src = src;
+  };
+
+  /**
+   * 遮罩编辑大画布（Blender Mask Editor 的手感）：
+   *   点控制点 = 选中并可直接拖动；Shift+点 = 加/减选；空白处左键 = 加点；
+   *   A 全选 / Alt+A 取消；G 移动、R 旋转、S（或 X）缩放，变换中再按 X / Y 锁轴；
+   *   X 删除选中点、E 挤出、M 合并、F 首尾闭合；变换中左键/回车确认、Esc/右键取消。
+   */
+  const openMaskPainter = (node: CompositorNode): void => {
+    if (maskPainter) maskPainter.close(true);
+    const maskId = maskIdOf(node);
+    const mask = maskById(maskId);
+    if (!mask) {
+      session_.toast('这个节点还没绑定遮罩：先点「新建遮罩」', true);
+      return;
+    }
+    const { width: W, height: H } = maskCanvasSize(session_.size.width, session_.size.height);
+    const display = document.createElement('canvas');
+    display.className = 'cg-maskpaint-canvas';
+    display.dataset.maskPainterCanvas = 'true';
+    display.width = W;
+    display.height = H;
+    let dctx: CanvasRenderingContext2D | null = null;
+    try {
+      dctx = display.getContext('2d');
+    } catch {
+      dctx = null;
+    }
+    if (!dctx) {
+      session_.toast('这个环境没有 2D 画布，无法编辑遮罩', true);
+      return;
+    }
+
+    let points = splineFromParam(mask.spline).map((point) => ({ x: point.x * W, y: point.y * H }));
+    let closed = mask.closed;
+    let feather = mask.feather;
+    let selected: number[] = [];
+    let dragIndex = -1;
+    /** 变换手势（G / R / S）：起手时的点、起点指针、轴向锁。 */
+    let transform: {
+      mode: 'move' | 'rotate' | 'scale';
+      origin: MaskPoint;
+      startPoints: MaskPoint[];
+      startPointer: MaskPoint;
+      axis: 'x' | 'y' | null;
+    } | null = null;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'cg-maskpaint';
+    overlay.setAttribute('data-fisherai-mask-painter', 'true');
+
+    const head = document.createElement('div');
+    head.className = 'cg-maskpaint-head';
+    const title = document.createElement('span');
+    title.className = 'cg-maskpaint-title';
+    title.textContent = `编辑遮罩 · ${mask.name}`;
+    const hint = document.createElement('span');
+    hint.className = 'cg-maskpaint-hint';
+    hint.textContent =
+      '左键加点/拖控制点 · Shift+点加/减选 · A 全选 · G 移动 R 旋转 S 缩放（再按 X/Y 锁轴）· X 删点 E 挤出 M 合并 F 闭合 · Esc/Enter 完成';
+
+    const featherField = document.createElement('label');
+    featherField.className = 'cg-maskpaint-field';
+    const featherLabel = document.createElement('span');
+    const featherInput = document.createElement('input');
+    featherInput.type = 'range';
+    featherInput.min = '0';
+    featherInput.max = '10';
+    featherInput.step = '0.5';
+    featherInput.dataset.maskFeather = 'true';
+    featherField.append(featherLabel, featherInput);
+
+    const actions = document.createElement('div');
+    actions.className = 'cg-maskpaint-actions';
+    const makeButton = (label: string, onClick: () => void, primary = false): HTMLButtonElement => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      if (primary) button.setAttribute('data-primary', 'true');
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        onClick();
+      });
+      return button;
+    };
+
+    const body2 = document.createElement('div');
+    body2.className = 'cg-maskpaint-body';
+    body2.append(display);
+    head.append(title, hint, featherField, actions);
+    overlay.append(head, body2);
+    root.append(overlay);
+
+    let baseImage: HTMLImageElement | null = null;
+    const baseUrl = maskBaseImageUrl(node.id);
+    if (baseUrl) {
+      baseImage = new Image();
+      baseImage.onload = () => paintDisplay();
+      baseImage.src = baseUrl;
+    }
+
+    const hitRadius = 14;
+    const toNormalized = (value: MaskPoint): MaskPoint => ({ x: value.x / W, y: value.y / H });
+
+    /** 当前选中点（没选中时把全部点当成选中，方便对整块形状做变换）。 */
+    const activeIndices = (): number[] => {
+      if (selected.length) return selected.filter((index) => index < points.length);
+      return points.map((_point, index) => index);
+    };
+
+    const selectedCenter = (): MaskPoint => {
+      const indices = activeIndices();
+      if (!indices.length) return { x: W / 2, y: H / 2 };
+      let sumX = 0;
+      let sumY = 0;
+      for (const index of indices) {
+        sumX += points[index].x;
+        sumY += points[index].y;
+      }
+      return { x: sumX / indices.length, y: sumY / indices.length };
+    };
+
+    let lastPointer: MaskPoint | null = null;
+    const applyTransform = (pointer: MaskPoint): void => {
+      if (!transform) return;
+      const { mode, origin, startPoints, startPointer } = transform;
+      const axis = transform.axis;
+      let dx = pointer.x - startPointer.x;
+      let dy = pointer.y - startPointer.y;
+      if (axis === 'x') dy = 0;
+      if (axis === 'y') dx = 0;
+      if (mode === 'move') {
+        points = startPoints.map((point) => ({
+          x: clamp(point.x + dx, 0, W),
+          y: clamp(point.y + dy, 0, H),
+        }));
+      } else if (mode === 'rotate') {
+        const startAngle = Math.atan2(startPointer.y - origin.y, startPointer.x - origin.x);
+        const nowAngle = Math.atan2(pointer.y - origin.y, pointer.x - origin.x);
+        const delta = nowAngle - startAngle;
+        const cos = Math.cos(delta);
+        const sin = Math.sin(delta);
+        points = startPoints.map((point) => {
+          const x = point.x - origin.x;
+          const y = point.y - origin.y;
+          return {
+            x: clamp(origin.x + x * cos - y * sin, 0, W),
+            y: clamp(origin.y + x * sin + y * cos, 0, H),
+          };
+        });
+      } else {
+        const startDistance = Math.hypot(startPointer.x - origin.x, startPointer.y - origin.y);
+        const nowDistance = Math.hypot(pointer.x - origin.x, pointer.y - origin.y);
+        let factor = startDistance > 0.5 ? nowDistance / startDistance : 1;
+        factor = clamp(factor, 0.02, 40);
+        const scaleX = axis === 'y' ? 1 : factor;
+        const scaleY = axis === 'x' ? 1 : factor;
+        points = startPoints.map((point) => ({
+          x: clamp(origin.x + (point.x - origin.x) * scaleX, 0, W),
+          y: clamp(origin.y + (point.y - origin.y) * scaleY, 0, H),
+        }));
+      }
+    };
+
+    const paintDisplay = (): void => {
+      dctx.globalCompositeOperation = 'source-over';
+      dctx.fillStyle = '#0b0f14';
+      dctx.fillRect(0, 0, W, H);
+      if (baseImage && baseImage.complete && baseImage.naturalWidth) {
+        dctx.drawImage(baseImage, 0, 0, W, H);
+        dctx.globalAlpha = 0.35;
+        dctx.fillStyle = '#000';
+        dctx.fillRect(0, 0, W, H);
+        dctx.globalAlpha = 1;
+      }
+      // 区域用半透明白铺一层（黑底白遮罩的预览），底图仍然看得见
+      if (closed && points.length >= 3) {
+        const shape = document.createElement('canvas');
+        shape.width = W;
+        shape.height = H;
+        const sctx = shape.getContext('2d');
+        if (sctx) {
+          sctx.fillStyle = '#fff';
+          sctx.beginPath();
+          sctx.moveTo(points[0].x, points[0].y);
+          for (const [cp1, cp2, end] of splineBezierSegments(points)) {
+            sctx.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, end.x, end.y);
+          }
+          sctx.closePath();
+          sctx.fill();
+          const blur = featherPixels(feather, W);
+          dctx.globalAlpha = 0.55;
+          dctx.filter = blur > 0.4 ? `blur(${blur}px)` : 'none';
+          dctx.drawImage(shape, 0, 0);
+          dctx.filter = 'none';
+          dctx.globalAlpha = 1;
+        }
+      }
+      // 样条轮廓 + 控制点：绿线 + 黄方块（和 Blender 的参照图一致）
+      if (points.length >= 2) {
+        dctx.beginPath();
+        dctx.moveTo(points[0].x, points[0].y);
+        for (const [cp1, cp2, end] of splineBezierSegments(points)) {
+          dctx.bezierCurveTo(cp1.x, cp1.y, cp2.x, cp2.y, end.x, end.y);
+        }
+        if (closed && points.length >= 3) dctx.closePath();
+        dctx.strokeStyle = 'rgba(94, 240, 110, .95)';
+        dctx.lineWidth = Math.max(1.5, W / 700);
+        dctx.stroke();
+      }
+      const size = Math.max(6, W / 110);
+      points.forEach((point, index) => {
+        const isSelected = selected.includes(index);
+        dctx.beginPath();
+        dctx.rect(point.x - size / 2, point.y - size / 2, size, size);
+        dctx.fillStyle = isSelected ? '#ffffff' : '#f5d642';
+        dctx.fill();
+        dctx.strokeStyle = isSelected ? '#5ef06e' : 'rgba(12, 16, 20, .85)';
+        dctx.lineWidth = Math.max(1, size / 6);
+        dctx.stroke();
+      });
+    };
+
+    /** 写回遮罩数据块（样条/闭合/羽化）+ 引用它的节点重画。 */
+    const commit = (): void => {
+      const spline = splineToParam(points.map(toNormalized));
+      updateMask({
+        ...mask,
+        spline,
+        closed,
+        feather,
+      });
+    };
+    const refresh = (): void => paintDisplay();
+
+    const syncFeather = (): void => {
+      featherInput.value = String(clamp(feather * 100, 0, 10));
+      featherLabel.textContent = `羽化 ${(feather * 100).toFixed(1)}%`;
+    };
+    syncFeather();
+
+    const toMaskPoint = (event: PointerEvent): MaskPoint => {
+      const rect = display.getBoundingClientRect();
+      const width = rect.width > 1 ? rect.width : W;
+      const height = rect.height > 1 ? rect.height : H;
+      return {
+        x: ((event.clientX - rect.left) / width) * W,
+        y: ((event.clientY - rect.top) / height) * H,
+      };
+    };
+
+    /** 命中控制点（像素距离），返回下标；没有就 -1。 */
+    const hitPoint = (point: MaskPoint): number => {
+      let best = -1;
+      let bestDistance = hitRadius;
+      points.forEach((candidate, index) => {
+        const distance = Math.hypot(candidate.x - point.x, candidate.y - point.y);
+        if (distance <= bestDistance) {
+          best = index;
+          bestDistance = distance;
+        }
+      });
+      return best;
+    };
+
+    const onDown = (event: PointerEvent): void => {
+      if (transform) {
+        // 变换中左键 = 确认（这一下不再加/选点）
+        event.preventDefault();
+        event.stopPropagation();
+        transform = null;
+        commit();
+        refresh();
+        return;
+      }
+      if (event.button === 2) {
+        if (selected.length) {
+          selected = [];
+          refresh();
+        }
+        return;
+      }
+      if (event.button !== 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      rememberParamEdit();
+      const point = toMaskPoint(event);
+      const hit = hitPoint(point);
+      if (hit >= 0) {
+        if (event.shiftKey) {
+          selected = selected.includes(hit) ? selected.filter((index) => index !== hit) : [...selected, hit];
+        } else if (!selected.includes(hit)) {
+          selected = [hit];
+        }
+        dragIndex = hit;
+        refresh();
+        return;
+      }
+      if (event.shiftKey) {
+        // Shift+点空白 = 只清选择（Blender 的点击空白处取消选择）
+        selected = [];
+        refresh();
+        return;
+      }
+      // 普通左键空白处 = 加点（加在点下去的位置，和 Blender 一样）
+      points = [...points, point];
+      selected = [points.length - 1];
+      commit();
+      refresh();
+      try {
+        display.setPointerCapture?.(event.pointerId);
+      } catch {
+        /* 合成事件里 pointerId 往往不活跃 */
+      }
+      dragIndex = points.length - 1;
+    };
+
+    const onMove = (event: PointerEvent): void => {
+      lastPointer = toMaskPoint(event);
+      if (transform) {
+        applyTransform(toMaskPoint(event));
+        refresh();
+        return;
+      }
+      if (dragIndex < 0 || dragIndex >= points.length) return;
+      const point = toMaskPoint(event);
+      points[dragIndex] = { x: clamp(point.x, 0, W), y: clamp(point.y, 0, H) };
+      refresh();
+    };
+
+    const onUp = (): void => {
+      if (dragIndex < 0) return;
+      dragIndex = -1;
+      commit();
+    };
+
+    const startTransform = (mode: 'move' | 'rotate' | 'scale'): void => {
+      const indices = activeIndices();
+      if (!indices.length) {
+        session_.toast('没有控制点：先在画布上点几下加点', true);
+        return;
+      }
+      rememberParamEdit();
+      // 起手指针：最后一次在画布上移动的位置；键盘直接按 G/R/S 时退回画布中心
+      transform = {
+        mode,
+        origin: selectedCenter(),
+        startPoints: points.map((point) => ({ ...point })),
+        startPointer: lastPointer ?? { x: W / 2, y: H / 2 },
+        axis: null,
+      };
+      refresh();
+      session_.toast(
+        mode === 'move' ? '移动：拖动鼠标 · X/Y 锁轴 · 左键/回车确认' :
+        mode === 'rotate' ? '旋转：拖动鼠标 · 左键/回车确认' :
+        '缩放：拖动鼠标 · X/Y 只缩一个方向 · 左键/回车确认',
+      );
+    };
+
+    const removeSelected = (): void => {
+      const indices = selected.filter((index) => index < points.length);
+      if (!indices.length) return;
+      rememberParamEdit();
+      points = points.filter((_point, index) => !indices.includes(index));
+      selected = [];
+      if (points.length < 3) closed = false;
+      commit();
+      refresh();
+    };
+
+    /** E：从最后一个选中点挤出一个新点（沿出边方向外推一点）。 */
+    const extrudePoint = (): void => {
+      const indices = activeIndices();
+      const from = indices.length ? indices[indices.length - 1] : points.length - 1;
+      if (from < 0 || !points.length) return;
+      rememberParamEdit();
+      const previous = points[(from - 1 + points.length) % points.length];
+      const base = points[from];
+      const dx = base.x - previous.x;
+      const dy = base.y - previous.y;
+      const length = Math.hypot(dx, dy) || 1;
+      const step = Math.max(24, Math.min(W, H) * 0.04);
+      const next = {
+        x: clamp(base.x + (dx / length) * step, 0, W),
+        y: clamp(base.y + (dy / length) * step, 0, H),
+      };
+      points = [...points.slice(0, from + 1), next, ...points.slice(from + 1)];
+      selected = [from + 1];
+      commit();
+      refresh();
+    };
+
+    /** M：把选中的控制点合并成它们的中心（少于两个就忽略）。 */
+    const mergeSelected = (): void => {
+      const indices = activeIndices();
+      if (indices.length < 2) {
+        session_.toast('合并需要至少选中两个控制点', true);
+        return;
+      }
+      rememberParamEdit();
+      const center = selectedCenter();
+      const first = indices[0];
+      points = points
+        .map((point, index) => (indices.includes(index) ? null : point))
+        .filter((point): point is MaskPoint => Boolean(point));
+      points.splice(Math.min(first, points.length), 0, center);
+      selected = [Math.min(first, points.length - 1)];
+      if (points.length < 3) closed = false;
+      commit();
+      refresh();
+    };
+
+    /** F：把首尾两个端点连起来（只对没闭合的样条有效，和 Blender 一样）。 */
+    const closeSpline = (): void => {
+      if (closed || points.length < 3) return;
+      rememberParamEdit();
+      closed = true;
+      commit();
+      refresh();
+    };
+
+    display.addEventListener('pointerdown', onDown);
+    display.addEventListener('pointermove', onMove);
+    display.addEventListener('pointerup', onUp);
+    display.addEventListener('pointercancel', onUp);
+    display.addEventListener('contextmenu', (event) => event.preventDefault());
+    featherInput.addEventListener('input', () => {
+      feather = clamp(Number(featherInput.value) / 100 || 0, 0, 0.1);
+      syncFeather();
+      refresh();
+    });
+    featherInput.addEventListener('change', () => commit());
+
+    const close = (save = true): void => {
+      if (save) commit();
+      overlay.remove();
+      maskPainter = null;
+      renderNodes();
+      schedule();
+    };
+
+    actions.append(
+      makeButton('清空', () => {
+        rememberParamEdit();
+        points = [];
+        selected = [];
+        closed = false;
+        commit();
+        refresh();
+      }),
+      makeButton('完成', () => close(true), true),
+    );
+
+    maskPainter = {
+      close,
+      handleKey: (event: KeyboardEvent): boolean => {
+        const key = event.key.toLowerCase();
+        if (transform) {
+          if (key === 'x' || key === 'y') {
+            event.preventDefault();
+            event.stopPropagation();
+            transform.axis = transform.axis === key ? null : key;
+            // 锁轴后立刻按当前指针重算一次（没有指针移动时也不会跳）
+            applyTransform(transform.startPointer);
+            refresh();
+            return true;
+          }
+          if (event.key === 'Enter' || key === 's') {
+            event.preventDefault();
+            event.stopPropagation();
+            transform = null;
+            commit();
+            refresh();
+            return true;
+          }
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            event.stopPropagation();
+            // 取消：回到起手时的形状
+            points = transform.startPoints.map((point) => ({ ...point }));
+            transform = null;
+            refresh();
+            return true;
+          }
+          return true;
+        }
+        if (event.key === 'Escape' || event.key === 'Enter') {
+          event.preventDefault();
+          event.stopPropagation();
+          close(true);
+          return true;
+        }
+        if (event.ctrlKey || event.metaKey) return false;
+        if (key === 'a') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (event.altKey) {
+            // Alt+A 在下面统一处理
+          }
+          selected = event.altKey ? [] : points.map((_point, index) => index);
+          refresh();
+          return true;
+        }
+        if (key === 'g' || key === 'r' || key === 's') {
+          event.preventDefault();
+          event.stopPropagation();
+          startTransform(key === 'g' ? 'move' : key === 'r' ? 'rotate' : 'scale');
+          return true;
+        }
+        if (key === 'x') {
+          event.preventDefault();
+          event.stopPropagation();
+          // Blender 同义：X 只删**选中的**控制点（没选中时什么都不做）
+          if (selected.length) removeSelected();
+          else session_.toast('先点选控制点，再按 X 删除', true);
+          return true;
+        }
+        if (key === 'e') {
+          event.preventDefault();
+          event.stopPropagation();
+          extrudePoint();
+          return true;
+        }
+        if (key === 'm') {
+          event.preventDefault();
+          event.stopPropagation();
+          mergeSelected();
+          return true;
+        }
+        if (key === 'f') {
+          event.preventDefault();
+          event.stopPropagation();
+          closeSpline();
+          return true;
+        }
+        return false;
+      },
+    };
+    refresh();
+  };
+
+  /** 「遮罩」节点的卡片内容：黑白预览 + 遮罩下拉 + 编辑/新建/清空/反相 + 羽化 + 输出反相。 */
+  const renderPaintMask = (node: CompositorNode, body: HTMLElement): boolean => {
+    const params = paramsOf(node);
+    const preview = document.createElement('div');
+    preview.className = 'cg-mask-preview';
+    preview.setAttribute('data-fisherai-mask-preview', 'true');
+    preview.title = '点这里编辑遮罩：左键加点、G/R/S 变换、F 闭合（接到「混合」的系数口使用）';
+    // 预览按合成画布的比例铺，和画出来的遮罩一一对应（不按 16:9 死板拉）
+    const frame = session_.size;
+    if (frame.width > 0 && frame.height > 0) {
+      preview.style.aspectRatio = `${frame.width} / ${frame.height}`;
+    }
+    if (hasMaskImage(params.mask)) {
+      const image = document.createElement('img');
+      image.src = params.mask;
+      image.alt = '遮罩';
+      image.draggable = false;
+      preview.append(image);
+    } else {
+      const empty = document.createElement('div');
+      empty.className = 'cg-mask-preview-empty';
+      empty.textContent = '还没有遮罩 · 点「编辑」画一圈';
+      preview.append(empty);
+    }
+    preview.addEventListener('pointerdown', (event) => event.stopPropagation());
+    preview.addEventListener('click', (event) => {
+      event.stopPropagation();
+      openMaskPainter(node);
+    });
+    body.append(preview);
+
+    // 遮罩下拉（Blender 的 Mask 数据块选择器）：同一份遮罩可以给多个节点用
+    const masks = masksOf();
+    const currentId = maskIdOf(node);
+    const row = paramRow('遮罩');
+    row.control.append(
+      createDropdown(
+        [
+          ...masks.map((mask) => ({ value: mask.id, label: mask.name })),
+          { value: '__new__', label: '＋ 新建遮罩' },
+        ],
+        currentId,
+        (next) => {
+          rememberParamEdit();
+          if (next === '__new__') {
+            const created = createCompositorMask(masks);
+            setMasks([...masks, created]);
+            setParam(node.id, 'maskId', created.id);
+            setParam(node.id, 'mask', '');
+            setParam(node.id, 'maskRev', (Number(params.maskRev) || 0) + 1);
+            renderNodes();
+            schedule();
+            session_.toast(`已新建 ${created.name}，点「编辑」开始画`);
+            return;
+          }
+          const target = maskById(next);
+          if (!target) return;
+          setParam(node.id, 'maskId', next);
+          refreshMaskNodes(target);
+          renderNodes();
+          schedule();
+        },
+      ),
+    );
+    body.append(row.element);
+
+    const actionRow = document.createElement('div');
+    actionRow.className = 'cg-mask-actions';
+    const makeButton = (label: string, onClick: () => void): HTMLButtonElement => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.textContent = label;
+      button.addEventListener('pointerdown', (event) => event.stopPropagation());
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        onClick();
+      });
+      return button;
+    };
+    actionRow.append(
+      makeButton('编辑', () => openMaskPainter(node)),
+      makeButton('清空', () => {
+        const target = maskById(maskIdOf(node));
+        if (!target) return;
+        rememberParamEdit();
+        updateMask({ ...target, spline: [], closed: false });
+        renderNodes();
+        schedule();
+        session_.toast('遮罩已清空');
+      }),
+      makeButton('反相', () => invertStoredMask(node)),
+    );
+    body.append(actionRow);
+
+    // 节点级「羽化」：用不用遮罩自己的羽化（Blender Mask 节点上的 Feather 勾选）
+    const featherRow = paramRow('羽化');
+    const featherInput = document.createElement('input');
+    featherInput.type = 'checkbox';
+    featherInput.dataset.maskFeatherNode = 'true';
+    featherInput.checked = params.feather !== false;
+    featherInput.addEventListener('change', () => {
+      rememberParamEdit();
+      setParam(node.id, 'feather', featherInput.checked);
+      const target = maskById(maskIdOf(node));
+      if (target) refreshMaskNodes(target);
+      renderNodes();
+      schedule();
+    });
+    featherRow.control.append(featherInput);
+    body.append(featherRow.element);
+
+    // 输出反相：不改画的东西，只把输出翻过来（Blender Mask 节点的 Invert）
+    const invertRow = paramRow('输出反相');
+    const invertInput = document.createElement('input');
+    invertInput.type = 'checkbox';
+    invertInput.dataset.maskInvert = 'true';
+    invertInput.checked = params.invert === true;
+    invertInput.addEventListener('change', () => setParam(node.id, 'invert', invertInput.checked));
+    invertRow.control.append(invertInput);
+    body.append(invertRow.element);
+    return true;
+  };
+
   /**
    * 参数控件直接长在节点身体里（Blender 的节点内控件），不再有右侧属性面板。
    *
@@ -1268,6 +2119,8 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
    */
   const renderNodeParams = (node: CompositorNode, body: HTMLElement): boolean => {
     if (node.kind === 'curves') return renderCurvesEditor(node, body);
+    // 遮罩：黑白预览 + 编辑/清除 + 羽化 + 输出反相
+    if (node.kind === 'paintMask') return renderPaintMask(node, body);
     // 四轮调色：色轮 / 数字 / 细滑轨 / 亮度长条（参照图那套），不用通用滑块行
     if (node.kind === 'colorBalance') {
       body.append(renderColorWheels(node, (key, value) => setParam(node.id, key, value)));
@@ -2035,7 +2888,8 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     let hits: NodeSearchHit[] = [];
     let active = 0;
     const pick = (kind: CompositorKind): void => {
-      addNode(kind, worldPoint);
+      // 落点取「点下去这一刻」的指针（见 menuPlacementPoint）；打开菜单时的 worldPoint 只作兜底
+      addNode(kind, menuPlacementPoint(worldPoint));
       closeMenu();
     };
     const paintActive = (): void => {
@@ -2200,6 +3054,15 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
         ]),
       ),
     };
+    if (kind === 'paintMask') {
+      // Blender 的流程：先有遮罩（遮罩区），节点再引用它。没有就顺手建一个。
+      let masks = masksOf();
+      if (!masks.length) {
+        masks = [createCompositorMask(masks)];
+        setMasks(masks);
+      }
+      node.params.maskId = masks[0].id;
+    }
     const before = cloneHistorySnapshot();
     session_.graph = { ...session_.graph, nodes: [...session_.graph.nodes, node] };
     session_.edited = true;
@@ -2222,7 +3085,31 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     };
   };
 
-  /** 指针在 stage 里的最后位置（新节点落点：用户刚看的地方，不是死板的窗口中心）。 */
+  /**
+   * 菜单点选那一刻的落点。
+   *
+   * 用户 2026-11-11：「选择在列表靠下的节点，我点击后节点会出现在鼠标上方，隔着鼠标很远」。
+   * 根因：落点是**打开菜单时**算一次（openAddMenuAtPointer 传进来的 worldPoint），
+   * 点候选时不再更新 —— 列表一长（三十来个节点），为了点靠下的候选，鼠标已经下移几百像素，
+   * 节点却仍落在打开菜单那一点，看着就是「飘在鼠标上方很远」。
+   * 现在：点下去这一刻的光标 → 世界坐标；指针跑到 stage 外面（菜单贴着边缘弹、列表往下铺）
+   * 就夹回 stage 可见区，保证节点落在看得见的地方。取不到指针才退回打开时的落点。
+   */
+  const menuPlacementPoint = (
+    fallback?: { x: number; y: number },
+  ): { x: number; y: number } | undefined => {
+    if (!stagePointer) return fallback;
+    const rect = stage.getBoundingClientRect();
+    // jsdom 没有布局（rect 全 0）：直接按指针换算，和 openAddMenuAtPointer 的判定一致
+    if (!(rect.width > 1 && rect.height > 1)) return toWorld(stagePointer.x, stagePointer.y);
+    const margin = 16;
+    return toWorld(
+      clamp(stagePointer.x, rect.left + margin, rect.right - margin),
+      clamp(stagePointer.y, rect.top + margin, rect.bottom - margin),
+    );
+  };
+
+  /** 指针在窗口里的最后位置（新节点落点：用户刚看的地方，不是死板的窗口中心）。 */
   let stagePointer: { x: number; y: number } | null = null;
 
   const stopPlacement = (): void => {
@@ -2402,13 +3289,18 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       y: number,
     ): { nodeId: string; port: number } | null => {
       let best: { nodeId: string; port: number; distance: number } | null = null;
+      // 传进来的是 clientX/clientY，而 portScreen 是 **stage 局部坐标**：
+      // 以前直接相减，真浏览器里两者差着 stage 的左上偏移（几百像素），第三级吸附等于永远不生效
+      // （jsdom 里 rect 全是 0，所以回归一直没抓到；真机脚本往端口上松手命中又被连线挡住时才露馅）。
+      const localX = x - rect.left;
+      const localY = y - rect.top;
       for (const node of session_.graph.nodes) {
         if (node.id === nodeId) continue;
         const spec = specOf(node.kind);
         for (let index = 0; index < spec.inputs; index += 1) {
           const screen = portScreen(node.id, index);
           if (!screen) continue;
-          const distance = Math.hypot(screen.x - x, screen.y - y);
+          const distance = Math.hypot(screen.x - localX, screen.y - localY);
           if (distance <= LINK_SNAP_RADIUS && (!best || distance < best.distance)) {
             best = { nodeId: node.id, port: index, distance };
           }
@@ -2589,6 +3481,11 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   };
 
   const onPointerMove = (event: PointerEvent): void => {
+    // G 抓取：不按任何键，节点跟着鼠标走（优先级最高，其它拖拽都在按键状态里）
+    if (session_.grab) {
+      applyGrab(event.clientX, event.clientY);
+      return;
+    }
     if (scopeResize) {
       updateScopeResize(event);
       return;
@@ -3100,12 +3997,154 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     drag.hint.remove();
   };
 
+  /**
+   * Blender 的 G 抓取移动（用户 2026-11-11：「选中按 g 键移动，再次点击 x 或沿着对应的轴向移动」）。
+   *
+   * 和「按住左键拖节点」的区别：G 之后**不按任何键**，节点就跟着鼠标走，
+   * 再按 X / Y 把位移锁到那个轴上（同一个键再按一次解锁），左键 / Enter 落下、
+   * Esc / 右键取消。取消要把位置放回起手那一刻 —— 所以起手先记一份 positions。
+   *
+   * 位移始终以「起手位置 + 起手指针」为基准算，不用增量累加：中途锁轴/解锁、
+   * 滚轮缩放都不会让节点漂。
+   */
+  const GRAB_KEYS_HINT = '移动鼠标 · 左键/Enter 落下 · X/Y 锁轴 · Esc 取消';
+
+  const applyGrab = (clientX: number, clientY: number): void => {
+    const grab = session_.grab;
+    if (!grab) return;
+    let dx = (clientX - grab.startX) / session_.view.scale;
+    let dy = (clientY - grab.startY) / session_.view.scale;
+    if (grab.axis === 'x') dy = 0;
+    else if (grab.axis === 'y') dx = 0;
+    if (Math.abs(dx) > 0.001 || Math.abs(dy) > 0.001) grab.moved = true;
+    for (const id of grab.ids) {
+      const node = session_.graph.nodes.find((item) => item.id === id);
+      const start = grab.positions.get(id);
+      if (!node || !start) continue;
+      node.x = start.x + dx;
+      node.y = start.y + dy;
+      const element = nodeElement(id);
+      if (element) {
+        element.style.left = `${node.x}px`;
+        element.style.top = `${node.y}px`;
+      }
+    }
+    renderEdges();
+  };
+
+  const startGrab = (): void => {
+    if (
+      session_.grab ||
+      session_.nodeDrag ||
+      session_.linkDrag ||
+      session_.marquee ||
+      session_.placement ||
+      session_.strokeDrag
+    ) {
+      return;
+    }
+    const ids = session_.selection.filter((id) => {
+      const node = session_.graph.nodes.find((item) => item.id === id);
+      return !!node && !FIXED_NODES.has(node.kind);
+    });
+    if (!ids.length) return;
+    const positions = new Map<string, { x: number; y: number }>();
+    for (const id of ids) {
+      const node = session_.graph.nodes.find((item) => item.id === id);
+      if (node) positions.set(id, { x: node.x, y: node.y });
+    }
+    // 起手指针：键盘按 G 时鼠标可能还没动过，退回 stage 中心
+    const rect = stage.getBoundingClientRect();
+    const start =
+      stagePointer ??
+      { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    session_.grab = {
+      ids,
+      positions,
+      startX: start.x,
+      startY: start.y,
+      axis: null,
+      before: cloneHistorySnapshot(),
+      moved: false,
+    };
+    stage.classList.add('cg-grabbing');
+    session_.toast(`抓取移动 · ${GRAB_KEYS_HINT}`);
+  };
+
+  /** 锁轴：再按同一个键解锁（Blender 里 X 连按两次就是回到自由移动）。 */
+  const toggleGrabAxis = (axis: 'x' | 'y'): void => {
+    const grab = session_.grab;
+    if (!grab) return;
+    grab.axis = grab.axis === axis ? null : axis;
+    session_.toast(
+      grab.axis === 'x'
+        ? `锁定 X 轴 · ${GRAB_KEYS_HINT}`
+        : grab.axis === 'y'
+          ? `锁定 Y 轴 · ${GRAB_KEYS_HINT}`
+          : `自由移动 · ${GRAB_KEYS_HINT}`,
+    );
+  };
+
+  const finishGrab = (commit: boolean): void => {
+    const grab = session_.grab;
+    if (!grab) return;
+    session_.grab = null;
+    stage.classList.remove('cg-grabbing');
+    if (!commit) {
+      for (const [id, start] of grab.positions) {
+        const node = session_.graph.nodes.find((item) => item.id === id);
+        if (!node) continue;
+        node.x = start.x;
+        node.y = start.y;
+        const element = nodeElement(id);
+        if (element) {
+          element.style.left = `${node.x}px`;
+          element.style.top = `${node.y}px`;
+        }
+      }
+      renderEdges();
+      session_.toast('已取消移动');
+      return;
+    }
+    if (!grab.moved) return;
+    session_.edited = true;
+    commitHistory(grab.before);
+    session_.toast('已移动 · Ctrl+Z 撤销');
+  };
+
+  /** 抓取中按左键 = 落下（这一下不能再开始框选/拖节点，所以 capture 阶段就吞掉）。 */
+  const onGrabPointerDown = (event: PointerEvent): void => {
+    const grab = session_.grab;
+    if (!grab) return;
+    if (event.button === 0) {
+      event.preventDefault();
+      event.stopPropagation();
+      finishGrab(true);
+      return;
+    }
+    if (event.button === 2) {
+      event.stopPropagation();
+      event.preventDefault();
+      finishGrab(false);
+      return;
+    }
+    // 中键等：结束抓取但不吞事件（平移照常）
+    finishGrab(false);
+  };
+
   const onKeyDown = (event: KeyboardEvent): void => {
+    // 蒙版绘制浮层开着时它优先吃键（Esc/Enter 完成、[ ] 改笔刷），
+    // 否则在画布上按 Esc 会把整个调色面板关掉。
+    if (maskPainter && maskPainter.handleKey(event)) return;
     // 参数面板里的输入框优先：否则 Shift+A / T / 空格会把正在输入的字符吞成快捷键
     const tag = (event.target as HTMLElement | null)?.tagName?.toLowerCase();
     const typing = tag === 'input' || tag === 'select' || tag === 'textarea';
     if (event.key === 'Escape') {
       event.preventDefault();
+      if (session_.grab) {
+        finishGrab(false);
+        return;
+      }
       if (menu) {
         closeMenu();
         return;
@@ -3124,6 +4163,23 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       return;
     }
     if (typing) return;
+    // 抓取中只认 X/Y（锁轴）、Enter（落下）、G（再按一次 = 落下，和 Blender 的「G 再按 G」同义）
+    if (session_.grab) {
+      const grabKey = event.key.toLowerCase();
+      if (grabKey === 'x' || grabKey === 'y') {
+        event.preventDefault();
+        event.stopPropagation();
+        toggleGrabAxis(grabKey);
+        return;
+      }
+      if (event.key === 'Enter' || grabKey === 'g') {
+        event.preventDefault();
+        event.stopPropagation();
+        finishGrab(true);
+        return;
+      }
+      return;
+    }
     // 撤销 / 重做：Ctrl+Z、Ctrl+Shift+Z、Ctrl+Y（输入框里走浏览器原生撤销，不拦）
     if ((event.ctrlKey || event.metaKey) && !event.altKey) {
       const key = event.key.toLowerCase();
@@ -3145,7 +4201,24 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       stage.classList.add('cg-space');
       return;
     }
-    if (event.key === 'Delete' || event.key === 'Backspace') {
+    // G = 抓取移动（Blender 同款；再按 X/Y 锁轴）
+    if (
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey &&
+      event.key.toLowerCase() === 'g'
+    ) {
+      event.preventDefault();
+      startGrab();
+      return;
+    }
+    // X 与 Delete 同义删除选中节点（Blender 里 X 就是删；这里只认不带修饰键的 X，
+    // Ctrl+X 之类留给系统/浏览器）
+    if (
+      (event.key === 'Delete' ||
+        event.key === 'Backspace' ||
+        (event.key.toLowerCase() === 'x' && !event.ctrlKey && !event.metaKey && !event.altKey))
+    ) {
       const ids = session_.selection.filter((id) => {
         const node = session_.graph.nodes.find((item) => item.id === id);
         return node ? !FIXED_NODES.has(node.kind) : false;
@@ -3321,9 +4394,14 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   const signal = session_.controller.signal;
   world.addEventListener('pointerdown', onNodePointerDown, { signal });
   stage.addEventListener('pointerdown', onStagePointerDown, { signal });
+  // G 抓取中按左键＝落下：capture 阶段就吞掉，别让它又起手框选/拖节点
+  window.addEventListener('pointerdown', onGrabPointerDown, { signal, capture: true });
   stage.addEventListener('wheel', onWheel, { passive: false, signal });
-  // 新节点的落点跟着指针走：菜单在窗口中心弹，但用户的眼睛（和鼠标）可能在别处
-  stage.addEventListener(
+  // 新节点的落点跟着指针走：菜单在窗口中心弹，但用户的眼睛（和鼠标）可能在别处。
+  // 挂在 window 上而不是 stage 上：菜单本身是 body 级浮层，鼠标移到候选行上时
+  // 事件不再经过 stage —— 只认 stage 的话「点靠下的候选」那一刻读到的还是旧坐标
+  // （用户 2026-11-11 报的「节点飘在鼠标上方很远」就是这个）。
+  window.addEventListener(
     'pointermove',
     (event: PointerEvent) => {
       stagePointer = { x: event.clientX, y: event.clientY };
@@ -3387,6 +4465,12 @@ export function closeCompositorEditor(): void {
   session = null;
   current.destroyed = true;
   closePopup();
+  // 蒙版绘制浮层挂在 root 里，会跟着 root 一起消失；模块级指针要清掉，
+  // 否则下一次开调色面板时「已经开着一个绘制层」的误解会让 Esc 被吞掉。
+  // 每一笔画完就已经写回参数了，这里直接丢弃浮层不会丢笔画。
+  const painterOpen = !!maskPainter;
+  maskPainter = null;
+  if (painterOpen) document.querySelectorAll('.cg-maskpaint').forEach((element) => element.remove());
   // 菜单与下拉列表挂在 body 上（不随 root 一起消失），关面板时一并清掉
   document.querySelectorAll('.cg-menu, .cg-select-list').forEach((element) => element.remove());
   current.placementController?.abort();
@@ -3440,6 +4524,17 @@ export function compositorReport(): Record<string, unknown> {
       clipHighlight: Number(session.scope.clipHighlight.toFixed(4)),
     },
     placing: session.placement ? session.placement.id : null,
+    /** 项目里的遮罩数据块（回归用）。 */
+    masks: (session.graph.masks ?? []).map((mask) => ({
+      id: mask.id,
+      name: mask.name,
+      points: mask.spline.length / 2,
+      closed: mask.closed,
+    })),
+    /** 进行中的 G 抓取：锁了哪个轴、有没有真的动过（回归用）。 */
+    grab: session.grab
+      ? { ids: session.grab.ids, axis: session.grab.axis, moved: session.grab.moved }
+      : null,
     /** 进行中的右键划选：merge / cut / null（回归用）。 */
     stroke: session.strokeDrag ? session.strokeDrag.mode : null,
     history: {

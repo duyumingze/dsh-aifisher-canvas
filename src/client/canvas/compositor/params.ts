@@ -55,6 +55,8 @@ export const PARAM_META: Record<string, ParamMeta> = {
   rotation: { label: '旋转', min: -180, max: 180, step: 1, unit: '°', digits: 0 },
   temperature: { label: '色温', min: 2000, max: 12000, step: 50, unit: 'K', digits: 0 },
   tint: { label: '色调', min: -100, max: 100, step: 1, scale: 100, unit: '%', digits: 0 },
+  // 遮罩：羽化按画面宽度的百分比存（0–0.08），界面 0–8%
+  feather: { label: '羽化', min: 0, max: 8, step: 0.5, scale: 100, unit: '%', digits: 1 },
   // 布尔参数只用到标签（控件是勾选框）
   invert: { label: '反相', min: 0, max: 1, step: 1, digits: 0 },
 };

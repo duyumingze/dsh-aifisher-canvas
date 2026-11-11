@@ -799,6 +799,34 @@ if (button) {
     `${JSON.stringify([following?.x, following?.y, settled?.x, settled?.y])}`,
   );
 
+  // 用户 2026-11-11 报：「选择在列表靠下的节点，我点击后节点会出现在鼠标上方，隔着鼠标很远」。
+  // 根因：落点是**打开菜单时**算一次，点靠下的候选时鼠标早移下去好几百像素了。
+  // 现在按「点下去那一刻」的指针落（并且夹回 stage 可见区）。
+  {
+    const beforePick = new Set(report().nodes.map((node) => node.id));
+    send('pointermove', window, { clientX: 320, clientY: 220 });
+    doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'a', shiftKey: true, bubbles: true }));
+    await settle(40);
+    // 为了点列表靠下的候选，鼠标先移到列表下部再点（真实操作就是这样）
+    const pickAt = { x: 320, y: 620 };
+    send('pointermove', window, { clientX: pickAt.x, clientY: pickAt.y });
+    [...doc.querySelectorAll('.cg-menu-item')].find((item) => item.textContent === '模糊')?.dispatchEvent(
+      new window.MouseEvent('click', { bubbles: true }),
+    );
+    await settle(40);
+    const picked = report().nodes.find((node) => !beforePick.has(node.id));
+    const view = report().view;
+    const expectedCenterX = (pickAt.x - view.x) / view.scale;
+    check(
+      '点列表靠下的候选：节点落在点下去那一刻的光标处（不再飘回菜单打开处）',
+      !!picked && Math.abs(picked.x + 112 - expectedCenterX) <= 2,
+      JSON.stringify({ picked, expectedCenterX, pickAt, view }),
+    );
+    // 放稳，别把跟随状态带给后面的手势
+    send('pointerdown', stageElement, { button: 0, clientX: pickAt.x, clientY: pickAt.y + 40 });
+    await settle(30);
+  }
+
   const beforePan = report().view;
   send('pointerdown', stageElement, { button: 1, clientX: 100, clientY: 100 });
   send('pointermove', window, { clientX: 140, clientY: 130 });
@@ -952,14 +980,16 @@ if (button) {
 
   // 放下这个节点（先挪到右下角，别压到连线上）—— 注意：跟随状态下第一次左键永远是「放下」，
   // 所以在放稳之前不能去拖滑块（和主画布一致）。
+  const hueStart = report().nodes.find((node) => node.id === added?.id);
   dispatch('pointermove', window, { clientX: 100, clientY: 100 });
   dispatch('pointermove', window, { clientX: 1060, clientY: 640 });
   dispatch('pointerdown', stageElement, { button: 0, clientX: 1060, clientY: 640 });
   check('放到了空白处：没有误连', report().edgeCount === 2, `edges=${report().edgeCount}`);
   check(
-    '放下后位置正确（位移 ÷ 缩放）',
-    report().nodes.find((node) => node.id === added?.id)?.x === 788,
-    JSON.stringify(report().nodes.find((node) => node.id === added?.id)),
+    '放下后位置正确（位移 ÷ 缩放：+960 / +540 屏幕像素，缩放 1）',
+    report().nodes.find((node) => node.id === added?.id)?.x - hueStart.x === 960 &&
+      report().nodes.find((node) => node.id === added?.id)?.y - hueStart.y === 540,
+    JSON.stringify({ start: [hueStart.x, hueStart.y], end: report().nodes.find((node) => node.id === added?.id) }),
   );
 
   // 滑块拖动：点轨道 75% = 绝对值；Shift 拖动 = 0.12× 微调。
@@ -995,13 +1025,26 @@ if (button) {
     `${hueBeforeFine} -> ${hueAfterFine}`,
   );
 
-  // ---- 把节点拖到「输入→预览」这条线上松手：自动串进去
+  // ---- 把节点拖到「输入→输出」这条线上松手：自动串进去
+  //
+  // 落点不能写死坐标（节点现在落在「点候选那一刻的指针」附近，位置随上面几次手势变）：
+  // 按 report() 里的真实节点位置算出「连线中点」，再反推指针该走到哪儿。
+  // 节点拖动是「起手点 + 位移 ÷ 缩放」，中心 = 左上角 + 112 / +90（jsdom 量不到高度，按 180 估）。
   const card = hueNode();
+  const beforeSplice = report();
+  const hueNow = beforeSplice.nodes.find((node) => node.id === added?.id);
+  const inputNode = beforeSplice.nodes.find((node) => node.id === 'input');
+  const outputNode = beforeSplice.nodes.find((node) => node.id === 'output');
+  const scale = beforeSplice.view.scale;
+  const linkMid = {
+    x: ((inputNode.x + 224 + outputNode.x) / 2 - (hueNow.x + 112)) * scale + 900,
+    y: ((inputNode.y + 17 + outputNode.y + 17) / 2 - (hueNow.y + 90)) * scale + 520,
+  };
   dispatch('pointerdown', card, { button: 0, clientX: 900, clientY: 520 });
-  dispatch('pointermove', window, { clientX: 500, clientY: 375 });
+  dispatch('pointermove', window, { clientX: linkMid.x, clientY: linkMid.y });
   const splicing = !!overlay?.querySelector('.cg-edge-splice');
   check('拖到线上时那条线高亮（松手就插）', splicing || report().insertTarget !== null, `splice=${splicing}`);
-  dispatch('pointerup', window, { button: 0, clientX: 500, clientY: 375 });
+  dispatch('pointerup', window, { button: 0, clientX: linkMid.x, clientY: linkMid.y });
   await settle(60);
   check(
     '松手后节点串进连线：边数 2 → 3',
@@ -1527,8 +1570,13 @@ if (button) {
   check(
     '节点搜索：空查询列出全部可建节点（不含输入/输出/预览）',
     canvasApp.searchNodeKinds('').length === canvasApp.creatableNodeCount() &&
-      canvasApp.creatableNodeCount() === 18,
+      canvasApp.creatableNodeCount() === 19,
     `${canvasApp.searchNodeKinds('').length} / ${canvasApp.creatableNodeCount()}`,
+  );
+  check(
+    '节点搜索：遮罩也能搜到（zb / 样条 / 遮罩）',
+    firstKind('zb') === 'paintMask' && firstKind('样条') === 'paintMask' && firstKind('遮罩') === 'paintMask',
+    `${firstKind('zb')} / ${firstKind('样条')} / ${firstKind('遮罩')}`,
   );
   check(
     '节点搜索：字母子序列打乱也算命中（近似容错）',
@@ -1656,6 +1704,203 @@ if (button) {
     '选「正片叠底」后按钮标题跟着变',
     modeSelect?.querySelector('.cg-select-label')?.textContent === '正片叠底',
     String(modeSelect?.querySelector('.cg-select-label')?.textContent),
+  );
+
+  // ---- 用户 2026-11-11：遮罩（Blender 样条）+ Blender 手感（G 抓取 / X 锁轴 / X 删除）
+  const key = (options) =>
+    doc.dispatchEvent(new window.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...options }));
+
+  // ① 建「遮罩」节点：Blender 的模型是「先有遮罩数据块，节点引用它」
+  const masksBefore = (report().masks ?? []).length;
+  const maskKnown = new Set(report().nodes.map((node) => node.id));
+  key({ key: 'a', shiftKey: true });
+  await settle(40);
+  [...doc.querySelectorAll('.cg-menu-item')].find((item) => item.textContent === '遮罩')?.dispatchEvent(
+    new window.MouseEvent('click', { bubbles: true }),
+  );
+  await settle(60);
+  const maskNode = report().nodes.find((node) => !maskKnown.has(node.id));
+  check('搜索能建出「遮罩」节点', maskNode?.kind === 'paintMask', JSON.stringify(maskNode));
+  check(
+    '建节点时顺手建出项目级遮罩数据块（Blender 的 mask datablock）',
+    (report().masks ?? []).length === masksBefore + 1,
+    JSON.stringify(report().masks),
+  );
+  // 放到左下角空白处（跟随状态下第一次左键＝放下）
+  dispatch('pointermove', window, { clientX: 120, clientY: 760 });
+  dispatch('pointermove', window, { clientX: 160, clientY: 720 });
+  dispatch('pointerdown', stageElement, { button: 0, clientX: 160, clientY: 720 });
+  await settle(40);
+  const maskCard = doc.querySelector(`[data-node-id="${maskNode?.id}"]`);
+  check(
+    '遮罩卡片：黑白预览 + 编辑/清空/反相三个按钮',
+    !!maskCard?.querySelector('[data-fisherai-mask-preview]') &&
+      [...(maskCard?.querySelectorAll('.cg-mask-actions button') || [])]
+        .map((button) => button.textContent)
+        .join(',') === '编辑,清空,反相',
+    [...(maskCard?.querySelectorAll('.cg-mask-actions button') || [])]
+      .map((button) => button.textContent)
+      .join(','),
+  );
+  check(
+    '遮罩卡片：遮罩下拉（引用数据块）+ 羽化勾选 + 输出反相勾选',
+    !!maskCard?.querySelector('.cg-select') &&
+      !!maskCard?.querySelector('input[data-mask-feather-node]') &&
+      !!maskCard?.querySelector('input[data-mask-invert]'),
+    JSON.stringify({
+      select: !!maskCard?.querySelector('.cg-select'),
+      feather: !!maskCard?.querySelector('input[data-mask-feather-node]'),
+      invert: !!maskCard?.querySelector('input[data-mask-invert]'),
+    }),
+  );
+  check(
+    '遮罩的输入口写着「参考图（只用于对位）」，输出口是遮罩色',
+    maskCard?.querySelector('.cg-port.cg-in')?.title === '参考图（只用于对位，不参与输出）' &&
+      maskCard?.querySelectorAll('.cg-port.cg-out').length === 1,
+    `${maskCard?.querySelector('.cg-port.cg-in')?.title} / out=${maskCard?.querySelectorAll('.cg-port.cg-out').length ?? 0}`,
+  );
+  // jsdom 没有 2D 画布：点「编辑」要给出可读提示、不能把面板炸掉
+  dispatch('click', maskCard?.querySelector('.cg-mask-actions button'));
+  await settle(30);
+  check(
+    '没有 2D 画布时点「编辑」给出可读提示（面板不崩）',
+    !!doc.querySelector('.cg-root') &&
+      !doc.querySelector('.cg-maskpaint') &&
+      /2D 画布/.test(doc.querySelector('.cg-toast')?.textContent || ''),
+    doc.querySelector('.cg-toast')?.textContent || '',
+  );
+  // 遮罩下拉里能新建第二个遮罩（Blender 的「遮罩区里加一条遮罩」）
+  {
+    const maskSelect = maskCard?.querySelector('.cg-select-button');
+    dispatch('click', maskSelect);
+    await settle(20);
+    const options = [...doc.querySelectorAll('.cg-select-list .cg-select-option')];
+    check('遮罩下拉里有「＋ 新建遮罩」', options.some((option) => option.textContent.includes('新建遮罩')),
+      options.map((option) => option.textContent).join('|'));
+    dispatch('click', options.find((option) => option.textContent.includes('新建遮罩')));
+    await settle(30);
+    check('新建后项目里多出第二条遮罩', (report().masks ?? []).length === masksBefore + 2,
+      JSON.stringify(report().masks));
+  }
+
+  // ② 纯逻辑：黑白遮罩接到「混合」的系数口（按像素控混合量 = 局部调色）
+  {
+    const base = {
+      version: 1,
+      nodes: [
+        { id: 'paint', kind: 'paintMask', x: 0, y: 0, params: {} },
+        { id: 'mixer', kind: 'mix', x: 0, y: 0, params: {} },
+      ],
+      edges: [],
+    };
+    const wired = canvasApp.connect(base, 'paint', 0, 'mixer', 2);
+    check(
+      '遮罩能接到混合的系数口（黑白图按像素控混合量）',
+      wired.edges.length === 1 && wired.edges[0].toPort === 2 && wired.edges[0].fromNode === 'paint',
+      JSON.stringify(wired.edges),
+    );
+    const size = canvasApp.maskCanvasSize(1920, 1080);
+    check('蒙版画布跟着帧比例（1024×576）', size.width === 1024 && size.height === 576, JSON.stringify(size));
+    const points = canvasApp.strokePoints({ x: 0, y: 0 }, { x: 10, y: 0 }, 2);
+    check('笔画按间距插值（10px / 2px → 5 个补点）', points.length === 5, `points=${points.length}`);
+    check(
+      '笔刷硬度 100% = 实心',
+      JSON.stringify(canvasApp.brushGradientStops(1)) === '[[0,1],[1,1]]',
+      JSON.stringify(canvasApp.brushGradientStops(1)),
+    );
+    const pixels = new Uint8ClampedArray([0, 0, 0, 255, 255, 255, 255, 255]);
+    canvasApp.invertMaskPixels(pixels);
+    check(
+      '反相把黑白翻过来（alpha 不动）',
+      pixels[0] === 255 && pixels[3] === 255 && pixels[4] === 0 && pixels[7] === 255,
+      Array.from(pixels).join(','),
+    );
+
+    // 样条遮罩（参照 Blender 的 Mask Editor：一圈控制点 + 羽化）
+    const square = canvasApp.splineFromParam([0, 0, 1, 0, 1, 1, 0, 1]);
+    check('样条控制点按归一化坐标往返（存的就是 0..1）',
+      JSON.stringify(canvasApp.splineToParam(square)) === '[0,0,1,0,1,1,0,1]',
+      JSON.stringify(canvasApp.splineToParam(square)));
+    const insertedOnEdge = canvasApp.insertSplinePoint(square, { x: 0.5, y: 0 });
+    check('点边上 = 插在最近那条边后面（上边中点插到第 2 个位置）',
+      insertedOnEdge.index === 1 &&
+        Math.abs(insertedOnEdge.points[1].x - 0.5) < 1e-6 &&
+        Math.abs(insertedOnEdge.points[1].y) < 1e-6,
+      JSON.stringify(insertedOnEdge));
+    check('命中控制点按半径判断（点在圈里不算、点在控制点上算）',
+      canvasApp.hitSplinePoint(square, { x: 0.01, y: 0.01 }, 0.03) === 0 &&
+        canvasApp.hitSplinePoint(square, { x: 0.5, y: 0.5 }, 0.03) === -1);
+    check('至少三个点才闭合成区域（两个点没有贝塞尔段）',
+      canvasApp.splineBezierSegments(square.slice(0, 2)).length === 0 &&
+        canvasApp.splineBezierSegments(square).length === 4);
+    check('羽化按画面宽度换成像素（1% × 1024 = 10.24px）',
+      Math.abs(canvasApp.featherPixels(0.01, 1024) - 10.24) < 1e-6,
+      String(canvasApp.featherPixels(0.01, 1024)));
+  }
+
+  // ③ Blender 手感：G 抓取移动（X/Y 锁轴）、Esc 取消、X 删除
+  const maskHead = maskCard?.querySelector('.cg-node-head');
+  dispatch('pointerdown', maskHead, { button: 0, clientX: 200, clientY: 300 });
+  dispatch('pointerup', window, { button: 0, clientX: 200, clientY: 300 });
+  await settle(20);
+  check('点节点卡片头部能选中它', report().selection?.includes(maskNode?.id), JSON.stringify(report().selection));
+  const grabStart = report().nodes.find((node) => node.id === maskNode?.id);
+  dispatch('pointermove', window, { clientX: 300, clientY: 300 });
+  key({ key: 'g' });
+  check('按 G 进入抓取状态', !!report().grab && report().grab.axis === null, JSON.stringify(report().grab));
+  dispatch('pointermove', window, { clientX: 420, clientY: 380 });
+  {
+    const moved = report().nodes.find((node) => node.id === maskNode?.id);
+    check(
+      '抓取中节点跟着指针走（位移 ÷ 缩放）',
+      moved.x - grabStart.x === 120 && moved.y - grabStart.y === 80,
+      JSON.stringify({ start: grabStart, now: moved }),
+    );
+  }
+  key({ key: 'x' });
+  check('抓取中按 X 锁到 X 轴', report().grab?.axis === 'x', JSON.stringify(report().grab));
+  dispatch('pointermove', window, { clientX: 500, clientY: 460 });
+  {
+    const locked = report().nodes.find((node) => node.id === maskNode?.id);
+    check(
+      '锁 X 轴后只走横向（纵向停在起手高度）',
+      locked.x - grabStart.x === 200 && locked.y === grabStart.y,
+      JSON.stringify(locked),
+    );
+  }
+  key({ key: 'x' });
+  check('再按一次 X 解锁（自由移动）', report().grab?.axis === null);
+  dispatch('pointermove', window, { clientX: 500, clientY: 420 });
+  dispatch('pointerdown', stageElement, { button: 0, clientX: 500, clientY: 420 });
+  check(
+    '左键落下结束抓取（且这一下不起框选）',
+    report().grab === null && !overlay?.querySelector('.cg-marquee'),
+    JSON.stringify(report().grab),
+  );
+  // Esc 取消：位置回到起手那一刻
+  const beforeCancel = report().nodes.find((node) => node.id === maskNode?.id);
+  dispatch('pointermove', window, { clientX: 600, clientY: 400 });
+  key({ key: 'g' });
+  dispatch('pointermove', window, { clientX: 760, clientY: 520 });
+  key({ key: 'Escape' });
+  {
+    const restored = report().nodes.find((node) => node.id === maskNode?.id);
+    check(
+      'G 抓取中按 Esc 取消：位置完全还原',
+      report().grab === null && restored.x === beforeCancel.x && restored.y === beforeCancel.y,
+      JSON.stringify({ before: beforeCancel, after: restored }),
+    );
+  }
+  check('Esc 取消不会把调色面板关掉', !!doc.querySelector('.cg-root'));
+  // X 删除
+  const nodesBeforeDelete = report().nodes.length;
+  key({ key: 'x' });
+  await settle(30);
+  check(
+    '按 X 删除选中节点（Blender 同款）',
+    report().nodes.length === nodesBeforeDelete - 1 &&
+      !report().nodes.some((node) => node.id === maskNode?.id),
+    `nodes=${nodesBeforeDelete} -> ${report().nodes.length}`,
   );
 
   // ---- 样式表：圆形控件必须带 corner-shape: round（DSH 主题把 50% 变超椭圆）

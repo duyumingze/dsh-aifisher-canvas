@@ -98,6 +98,7 @@ const PARAM_ORDER: Partial<Record<CompositorKind, string[]>> = {
   ellipseMask: ['width', 'height', 'softness', 'invert'],
   boxMask: ['width', 'height', 'softness', 'invert'],
   gradientMask: ['angle', 'offset', 'softness', 'invert'],
+  paintMask: ['invert'],
 };
 
 /** 混合模式 → shader 里的整数 id（W3C Compositing Level 1 的顺序）。 */
@@ -273,6 +274,13 @@ const EFFECT_BODIES: Partial<Record<CompositorKind, string>> = {
     if (u_p[3] > 0.5) v = 1.0 - v;
     fragColor = vec4(vec3(v), v);
   `,
+  // 手绘蒙版：u_tex 绑的不是上游图像，而是节点里那张**黑白蒙版图**（见 ensureMask），
+  // 上游只用来当绘制时的底图。输出是灰度遮罩，接「混合」的系数口按像素控混合量。
+  paintMask: `
+    float v = clamp(texture(u_tex, v_uv).r, 0.0, 1.0);
+    if (u_p[0] > 0.5) v = 1.0 - v;
+    fragColor = vec4(vec3(v), v);
+  `,
 };
 
 /**
@@ -353,6 +361,13 @@ interface InputCache {
   loading: boolean;
 }
 
+/** 手绘蒙版的黑白图缓存：一张 dataURL 只上传一次，改一笔（maskRev 变）才换。 */
+interface MaskCache {
+  data: string;
+  texture: WebGLTexture;
+  loading: boolean;
+}
+
 export class CompositorEngineError extends Error {
   constructor(message: string) {
     super(message);
@@ -371,6 +386,8 @@ export class CompositorEngine {
   private programs = new Map<string, ProgramBundle>();
   private targets = new Map<string, TargetCache>();
   private inputs = new Map<number, InputCache>();
+  /** 手绘蒙版节点的黑白图（key = 节点 id）。 */
+  private masks = new Map<string, MaskCache>();
   /** 1×1 全白纹理：mix 的系数口没接线时用它，shader 里乘出来就等于「只用滑块」。 */
   private white: WebGLTexture | null = null;
   /** 曲线 LUT：key = 四组控制点，最多留 12 张（拖滑块时每条曲线一张，够用）。 */
@@ -659,6 +676,55 @@ export class CompositorEngine {
     return placeholder;
   }
 
+  /**
+   * 手绘蒙版节点的纹理：dataURL（黑白 PNG）→ 纹理，按节点缓存。
+   *
+   * 和 ensureInput 同一套「先给占位、载入完再重画」的做法：蒙版是一张普通图片，
+   * 只是来源是节点参数而不是主画布素材。空蒙版 = 全黑（= 什么都不混合），
+   * 没画过的节点接进混合系数口不会把整张图翻掉。
+   */
+  private ensureMask(node: CompositorNode): WebGLTexture {
+    const params = paramsOf(node);
+    const data = typeof params.mask === 'string' ? params.mask : '';
+    const cached = this.masks.get(node.id);
+    if (cached && cached.data === data) return cached.texture;
+    const gl = this.gl;
+    if (cached) {
+      gl.deleteTexture(cached.texture);
+      this.masks.delete(node.id);
+    }
+    if (!data) {
+      // 一条都没画：绑占位透明纹理（.r = 0），系数口拿到 0 = B 层原样
+      const texture = this.emptyTexture();
+      this.masks.set(node.id, { data: '', texture, loading: false });
+      return texture;
+    }
+    const placeholder = this.emptyTexture();
+    this.masks.set(node.id, { data, texture: placeholder, loading: true });
+    const element = new Image();
+    element.decoding = 'async';
+    element.onload = () => {
+      if (this.disposed) return;
+      try {
+        const texture = this.uploadImage(element);
+        const current = this.masks.get(node.id);
+        if (current && current.texture !== texture) gl.deleteTexture(current.texture);
+        this.masks.set(node.id, { data, texture, loading: false });
+        this.targets.clear();
+        this.onInvalidate?.();
+      } catch (error) {
+        this.lastError = error instanceof Error ? error.message : String(error);
+        this.onInvalidate?.();
+      }
+    };
+    element.onerror = () => {
+      this.lastError = '手绘蒙版加载失败';
+      this.onInvalidate?.();
+    };
+    element.src = data;
+    return placeholder;
+  }
+
   private paramFloats(node: CompositorNode): Float32Array {
     const values = new Float32Array(MAX_PARAMS);
     const order = PARAM_ORDER[node.kind] || [];
@@ -683,6 +749,13 @@ export class CompositorEngine {
 
   /** 缓存 key：参数 + 上游版本。上游变了，整条下游都要重算。 */
   private keyOf(node: CompositorNode, upstream: (UpstreamRef | null)[]): string {
+    // 手绘蒙版的黑白 PNG 是几十 KB 的 dataURL：整串 JSON.stringify 进 key 太贵，
+    // 只取版本号（编辑器改一笔 +1）+ 长度，改过就一定不同。
+    if (node.kind === 'paintMask') {
+      const params = paramsOf(node);
+      const mask = typeof params.mask === 'string' ? params.mask : '';
+      return ['paintMask', String(params.invert), String(params.maskRev ?? 0), mask.length].join('|');
+    }
     const versions = upstream.map((ref) => {
       if (!ref) return 'null';
       const node = this.graph.nodes.find((item) => item.id === ref.node);
@@ -701,7 +774,6 @@ export class CompositorEngine {
     if (node?.kind === 'input') return this.ensureInput(ref.port);
     return this.targets.get(ref.node)?.target.texture ?? null;
   }
-
   private renderNode(node: CompositorNode, upstream: (UpstreamRef | null)[]): RenderTarget {
     const gl = this.gl;
     const bundle = this.programFor(node.kind);
@@ -721,7 +793,11 @@ export class CompositorEngine {
     gl.useProgram(bundle.program);
     gl.bindVertexArray(this.vao);
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.textureOf(upstream[0]));
+    // 手绘蒙版：u_tex 绑的是节点里那张黑白图（上游只当绘制底图，不参与输出）
+    gl.bindTexture(
+      gl.TEXTURE_2D,
+      node.kind === 'paintMask' ? this.ensureMask(node) : this.textureOf(upstream[0]),
+    );
     if (bundle.uTex) gl.uniform1i(bundle.uTex, 0);
     if (bundle.uTex2) {
       gl.activeTexture(gl.TEXTURE1);
@@ -771,7 +847,8 @@ export class CompositorEngine {
         const edge = graph.edges.find((item) => item.toNode === id && item.toPort === port);
         upstream.push(this.refOf(edge ? edge.fromNode : null, edge ? edge.fromPort : port));
       }
-      if (spec.inputs > 0 && !upstream.some(Boolean)) continue;
+      // 手绘蒙版的上游是可选的（底图只用于绘制对位）：没接也照常求值
+      if (spec.inputs > 0 && !upstream.some(Boolean) && node.kind !== 'paintMask') continue;
       const key = this.keyOf(node, upstream);
       const cached = this.targets.get(id);
       if (cached && cached.key === key) continue;
@@ -900,6 +977,7 @@ export class CompositorEngine {
       gl.deleteTexture(target.target.texture);
     }
     for (const input of this.inputs.values()) gl.deleteTexture(input.texture);
+    for (const mask of this.masks.values()) gl.deleteTexture(mask.texture);
     if (this.white) {
       gl.deleteTexture(this.white);
       this.white = null;
@@ -914,6 +992,7 @@ export class CompositorEngine {
     this.programs.clear();
     this.targets.clear();
     this.inputs.clear();
+    this.masks.clear();
     this.curveLuts.clear();
   }
 }

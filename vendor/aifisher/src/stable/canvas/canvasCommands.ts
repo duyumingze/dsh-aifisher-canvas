@@ -30,6 +30,8 @@ export interface CanvasCommandOptions {
   handleSaveWorkflow: () => void;
   focusOnNodes: (nodes: CanvasClipboardNode[], ids: string[]) => void;
   groupSelectedNodes: (ids: string[]) => void;
+  /** 结束一次编辑时把当前状态推进撤销栈（G 抓取移动用；不给就不记历史）。 */
+  pushHistory?: () => void;
 }
 
 function snapshot(nodes: CanvasClipboardNode[]): CanvasClipboardNode[] {
@@ -67,6 +69,7 @@ export function useCanvasCommands(
     handleSaveWorkflow,
     focusOnNodes,
     groupSelectedNodes,
+    pushHistory,
   } = options;
 
   hooks.useEffect(() => {
@@ -116,6 +119,143 @@ export function useCanvasCommands(
   const handlePaste = hooks.useCallback(() => insertCopy(clipboard.current, true), [insertCopy]);
   const hasCopiedNodes = hooks.useCallback(() => clipboard.current.length > 0, []);
 
+  // ---- dsh-aifisher-canvas：Blender 手感（G 抓取移动 / X 删除），见补丁 3.8x --------
+  //
+  // 位移以「起手位置 + 起手指针」为基准算，不累加增量：中途锁轴 / 缩放都不会漂。
+  // 监听器只在抓取期间挂在 window 上（capture 阶段），落下 / 取消就摘掉；
+  // 不用 effect 依赖 —— 拖动会不停改 nodes，effect 每次重跑会把手势打断。
+  const grabRef = hooks.useRef<{
+    ids: string[];
+    positions: Map<string, { x: number; y: number }>;
+    startX: number;
+    startY: number;
+    zoom: number;
+    axis: 'x' | 'y' | null;
+    moved: boolean;
+    apply: () => void;
+    stop: () => void;
+  } | null>(null);
+
+  const stopGrab = hooks.useCallback(
+    (commit: boolean) => {
+      const grab = grabRef.current;
+      if (!grab) return;
+      grabRef.current = null;
+      grab.stop();
+      if (!commit) {
+        // 取消：把位置放回起手那一刻（不记历史）
+        setNodes((current) =>
+          current.map((node) => {
+            const start = grab.positions.get(node.id);
+            return start ? { ...node, x: start.x, y: start.y } : node;
+          }),
+        );
+        return;
+      }
+      if (!grab.moved) return;
+      const commitHistory = pushHistory;
+      if (!commitHistory) return;
+      // 等 React 把最后一帧位置提交完再记历史（和 vendor 拖节点松手后的 deferFrame 同一做法）
+      const run = () => commitHistory();
+      if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(run);
+      else window.setTimeout(run, 16);
+    },
+    [pushHistory, setNodes],
+  );
+
+  const startGrab = hooks.useCallback(() => {
+    if (grabRef.current) return;
+    const ids = selectedNodeIds.filter((id) => nodes.some((node) => node.id === id));
+    if (!ids.length) return;
+    const positions = new Map<string, { x: number; y: number }>();
+    for (const node of nodes) {
+      if (ids.includes(node.id)) positions.set(node.id, { x: node.x, y: node.y });
+    }
+    const origin = pointer.current ?? { clientX: 0, clientY: 0 };
+    const zoom = Number.isFinite(viewport.zoom) && viewport.zoom > 0 ? viewport.zoom : 1;
+    const grab: NonNullable<typeof grabRef.current> = {
+      ids,
+      positions,
+      startX: origin.clientX,
+      startY: origin.clientY,
+      zoom,
+      axis: null,
+      moved: false,
+      apply: () => undefined,
+      stop: () => undefined,
+    };
+    const applyAt = (clientX: number, clientY: number) => {
+      let dx = (clientX - grab.startX) / grab.zoom;
+      let dy = (clientY - grab.startY) / grab.zoom;
+      if (grab.axis === 'x') dy = 0;
+      else if (grab.axis === 'y') dx = 0;
+      if (Math.abs(dx) > 0.001 || Math.abs(dy) > 0.001) grab.moved = true;
+      setNodes((current) =>
+        current.map((node) => {
+          const home = grab.positions.get(node.id);
+          return home ? { ...node, x: home.x + dx, y: home.y + dy } : node;
+        }),
+      );
+    };
+    grab.apply = () => {
+      const at = pointer.current;
+      if (at) applyAt(at.clientX, at.clientY);
+    };
+    const onMove = (event: PointerEvent) => applyAt(event.clientX, event.clientY);
+    const onDown = (event: PointerEvent) => {
+      // 落下 / 取消这一下要吞掉：否则会立刻开始拖节点、或点空白把选区清掉
+      event.preventDefault();
+      event.stopPropagation();
+      if (event.button === 0) stopGrab(true);
+      else stopGrab(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      const key = event.key.toLowerCase();
+      if (key === 'x' || key === 'y') {
+        event.preventDefault();
+        event.stopPropagation();
+        grab.axis = grab.axis === key ? null : key;
+        grab.apply();
+        return;
+      }
+      if (event.key === 'Enter' || key === 'g') {
+        event.preventDefault();
+        event.stopPropagation();
+        stopGrab(true);
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        stopGrab(false);
+      }
+    };
+    const previousCursor = document.body.style.cursor;
+    grab.stop = () => {
+      window.removeEventListener('pointermove', onMove, true);
+      window.removeEventListener('pointerdown', onDown, true);
+      window.removeEventListener('keydown', onKey, true);
+      window.removeEventListener('blur', onBlur);
+      document.body.style.cursor = previousCursor;
+    };
+    const onBlur = () => stopGrab(false);
+    window.addEventListener('pointermove', onMove, true);
+    window.addEventListener('pointerdown', onDown, true);
+    window.addEventListener('keydown', onKey, true);
+    window.addEventListener('blur', onBlur);
+    document.body.style.cursor = 'move';
+    grabRef.current = grab;
+  }, [nodes, pointer, selectedNodeIds, setNodes, stopGrab, viewport]);
+
+  // 卸载时把还挂着的抓取监听摘掉（不靠 effect 依赖：拖动中 nodes 会不停变）
+  hooks.useEffect(
+    () => () => {
+      grabRef.current?.stop();
+      grabRef.current = null;
+    },
+    [],
+  );
+
   hooks.useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (
@@ -158,7 +298,18 @@ export function useCanvasCommands(
         focusOnNodes(nodes, selectedNodeIds);
         return;
       }
-      if (key === 'delete' || key === 'backspace') {
+      // G = 抓取移动（Blender 同款；再按 X / Y 锁轴）
+      if (key === 'g' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        startGrab();
+        return;
+      }
+      // X 与 Delete / Backspace 同义（Blender 里 X 就是删；Ctrl+X 之类不拦）
+      if (
+        key === 'delete' ||
+        key === 'backspace' ||
+        (key === 'x' && !event.ctrlKey && !event.metaKey && !event.altKey)
+      ) {
         if (selectedNodeIds.length) {
           deleteNodes(selectedNodeIds);
           setContextMenu((menu) => ({ ...menu, isOpen: false }));
@@ -188,6 +339,7 @@ export function useCanvasCommands(
     focusOnNodes,
     groupSelectedNodes,
     handleCopy,
+    startGrab,
   ]);
 
   return { handleCopy, handlePaste, hasCopiedNodes };

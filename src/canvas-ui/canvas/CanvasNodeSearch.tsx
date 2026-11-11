@@ -198,8 +198,15 @@ export function CanvasNodeSearch(react: Runtime, props: Props) {
   const [placement, setPlacement] = react.useState<PanelPlacement>(() =>
     panelPlacement(undefined, null),
   );
-  /** 开面板那一刻鼠标位置换算出来的世界坐标（节点落点）。 */
+  /** 开面板那一刻鼠标位置换算出来的世界坐标（节点落点；工具栏入口则回落到画布正中）。 */
   const pointRef = react.useRef<{ x: number; y: number } | undefined>(undefined);
+  /**
+   * 这次面板是「工具栏按钮」打开的（落点固定在画布正中，不跟指针）。
+   *
+   * 工具栏按钮离鼠标很远，此时若按「点候选那一刻的指针」落节点，节点会跑到按钮附近，
+   * 与用户点按钮时的预期相反 —— 所以只有 Shift+A（贴着光标打开）才用实时指针。
+   */
+  const centerModeRef = react.useRef(false);
   /**
    * 一次打开只提交一次。
    *
@@ -310,6 +317,7 @@ export function CanvasNodeSearch(react: Runtime, props: Props) {
       pointRef.current = target
         ? toWorldPoint(target.x, target.y, props.viewport, origin)
         : toWorldPoint(origin.left + width / 2, origin.top + height / 2, props.viewport, origin);
+      centerModeRef.current = center;
       setPlacement(panelPlacement(target, props.containerRef?.current ?? null));
       setQuery('');
       setActiveIndex(0);
@@ -351,12 +359,37 @@ export function CanvasNodeSearch(react: Runtime, props: Props) {
     openAt(true);
   }, [openRequestValue, openAt]);
 
+  /**
+   * 建节点那一刻的光标位置（世界坐标）。
+   *
+   * 用户 2026-11-11：「如我选择在列表靠下的节点，我点击后节点会出现在鼠标上方，隔着鼠标很远」。
+   * 根因：落点是在**打开面板时**算一次（pointRef），点候选时不再更新 —— 列表一长，
+   * 用户为了点靠下的候选把鼠标移下去好几百像素，节点却仍然落在打开面板那一点。
+   * 现在按「点下去这一下」的指针重算；指针不在画布上（或从没移动过）才退回打开时的落点。
+   */
+  const pointAtCommit = react.useCallback(() => {
+    if (centerModeRef.current) return pointRef.current;
+    const live = lastCanvasPointer;
+    if (!live) return pointRef.current;
+    const origin = canvasOrigin();
+    const bounds = document.querySelector('.af-canvas-mount')?.getBoundingClientRect();
+    let x = live.x;
+    let y = live.y;
+    // 面板/列表可能把指针带到画布边缘之外：夹回画布内，节点才不会落在看不见的地方
+    if (bounds && bounds.width > 0 && bounds.height > 0) {
+      const margin = 8;
+      x = Math.min(Math.max(x, bounds.left + margin), bounds.right - margin);
+      y = Math.min(Math.max(y, bounds.top + margin), bounds.bottom - margin);
+    }
+    return toWorldPoint(x, y, props.viewport, origin) ?? pointRef.current;
+  }, [props.viewport]);
+
   const commit = react.useCallback(
     (entry: CanvasNodeSearchEntry) => {
       // 同一个面板会话只建一个节点（Enter 曾因冒泡被处理两次 → 建两个，见 committedRef）
       if (committedRef.current) return;
       committedRef.current = true;
-      const point = pointRef.current;
+      const point = pointAtCommit();
       const detail = {
         type: entry.type,
         ...(entry.mode ? { comfyMode: entry.mode } : {}),
@@ -367,7 +400,7 @@ export function CanvasNodeSearch(react: Runtime, props: Props) {
       close();
       window.dispatchEvent(new CustomEvent('fisherai:add-canvas-node', { detail }));
     },
-    [close],
+    [close, pointAtCommit],
   );
 
   const onPanelKeyDown = (event: ReactTypes.KeyboardEvent) => {

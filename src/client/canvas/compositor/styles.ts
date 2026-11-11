@@ -1094,5 +1094,158 @@ export const COMPOSITOR_STYLE = `
 }
 .cg-toast.cg-show { opacity: 1; }
 .cg-toast.cg-error { border-color: rgba(255, 120, 120, .45); color: #ffd0d0; }
-`;
 
+/* ---- Blender 的 G 抓取移动：整个画布换成移动光标，节点跟着指针走 ---------- */
+.cg-stage.cg-grabbing,
+.cg-stage.cg-grabbing .cg-node { cursor: move; }
+.cg-stage.cg-grabbing .cg-node-head { cursor: move; }
+
+/* ---- 手绘蒙版节点：卡片里一块黑白预览 + 三个动作 ------------------------- */
+.cg-mask-preview {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  margin: 2px 0 6px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  background-color: #05070a;
+  background-image:
+    linear-gradient(45deg, rgba(255, 255, 255, .035) 25%, transparent 25%,
+      transparent 75%, rgba(255, 255, 255, .035) 75%),
+    linear-gradient(45deg, rgba(255, 255, 255, .035) 25%, transparent 25%,
+      transparent 75%, rgba(255, 255, 255, .035) 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 8px 8px;
+  overflow: hidden;
+  cursor: crosshair;
+}
+.cg-mask-preview img {
+  width: 100%;
+  height: 100%;
+  object-fit: fill;
+  display: block;
+  pointer-events: none;
+}
+.cg-mask-preview-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #6b7484;
+  font-size: 10px;
+  letter-spacing: .3px;
+}
+.cg-mask-actions {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+.cg-mask-actions button {
+  flex: 1 1 0;
+  height: 22px;
+  padding: 0 6px;
+  border-radius: 5px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  background: rgba(255, 255, 255, .05);
+  color: #cfd8e3;
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.cg-mask-actions button:hover {
+  border-color: rgba(94, 234, 212, .5);
+  background: rgba(94, 234, 212, .12);
+  color: #fff;
+}
+
+/* ---- 蒙版绘制大画布（Blender Mask Editor 那套：左键画白、右键擦黑） ------- */
+.cg-maskpaint {
+  position: fixed;
+  inset: 0;
+  z-index: 2147482300;
+  display: flex;
+  flex-direction: column;
+  background: rgba(6, 8, 11, .97);
+  backdrop-filter: blur(6px);
+  color: #e6edf6;
+}
+.cg-maskpaint-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid rgba(255, 255, 255, .09);
+  font-size: 11.5px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.cg-maskpaint-title { font-weight: 600; letter-spacing: .2px; flex: 0 0 auto; }
+.cg-maskpaint-hint {
+  color: #7c8694;
+  font-size: 10.5px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cg-maskpaint-actions { margin-left: auto; display: flex; gap: 6px; }
+.cg-maskpaint-actions button,
+.cg-maskpaint-field button {
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, .12);
+  background: rgba(255, 255, 255, .05);
+  color: #d6dee8;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.cg-maskpaint-actions button:hover,
+.cg-maskpaint-field button:hover {
+  border-color: rgba(94, 234, 212, .5);
+  background: rgba(94, 234, 212, .12);
+  color: #fff;
+}
+.cg-maskpaint-actions button[data-primary='true'] {
+  border-color: rgba(94, 234, 212, .6);
+  background: rgba(94, 234, 212, .18);
+  color: #affeef;
+}
+.cg-maskpaint-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  cursor: crosshair;
+  touch-action: none;
+}
+.cg-maskpaint-body canvas {
+  /* 蒙版画布是 1024 级的大图：按可用面积等比缩放（指针换算走 getBoundingClientRect，
+     缩放多少都不影响落笔位置） */
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  border-radius: 4px;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, .6);
+  background: #000;
+  image-rendering: auto;
+}
+.cg-maskpaint-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #96a0ae;
+  font-size: 10.5px;
+}
+.cg-maskpaint-field input[type='range'] {
+  width: 96px;
+  accent-color: #5eead4;
+}
+`;
