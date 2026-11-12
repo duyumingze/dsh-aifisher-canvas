@@ -370,6 +370,9 @@ interface GrabDrag {
   positions: Map<string, { x: number; y: number }>;
   startX: number;
   startY: number;
+  /** 起手指针在 stage 里的位置（画锁轴辅助线用）。 */
+  originScreenX: number;
+  originScreenY: number;
   axis: 'x' | 'y' | null;
   /** 抬手那一刻的图：落下时合成一步撤销；取消则整个丢掉。 */
   before: GraphSnapshot;
@@ -670,8 +673,12 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   const hintbar = document.createElement('div');
   hintbar.className = 'cg-hintbar';
   hintbar.textContent =
-    '空白拖=框选 · 中键/空格=平移 · 滚轮=缩放 · Shift+A=添加节点 · 拖节点压线=插入连线 · 双击连线=断开 · Ctrl+右键划过=断开 · Shift+右键划过=合线 · G=移动(X/Y锁轴) · X/Delete=删除 · Ctrl+Z=撤销';
-  stage.append(edgeLayer, world, hintbar);
+    '空白拖=框选 · 中键/空格=平移 · 滚轮=缩放 · A=全选(Alt+A 取消) · Shift+A=添加节点 · 拖节点压线=插入连线 · 双击连线=断开 · Ctrl+右键划过=断开 · Shift+右键划过=合线 · G=移动(X/Y锁轴) · X/Delete=删除 · Ctrl+Z=撤销';
+  // 锁轴辅助线：G 之后按 X / Y，画一条贯穿画布的线，锁没锁一眼看得见（Blender 同款）
+  const axisGuide = document.createElement('div');
+  axisGuide.className = 'cg-axis-guide';
+  axisGuide.hidden = true;
+  stage.append(edgeLayer, world, axisGuide, hintbar);
 
   // 右下角缩放读数：和顶栏「适应视图」同一个动作，顺手可点。
   // 它也是「放大不糊」这件事的可见落点 —— 用户放大节点时最先看的就是这个数。
@@ -3697,6 +3704,42 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
    */
   const GRAB_KEYS_HINT = '移动鼠标 · 左键/Enter 落下 · X/Y 锁轴 · Esc 取消';
 
+  /**
+   * 键盘上按的是哪个字母。
+   *
+   * 中文输入法开着时 `event.key` 会是 `Process` / `Unidentified`（合成中），
+   * 只剩 `event.code`（KeyG / KeyX / KeyY）还认得出来 —— 用户 2026-11-12 报
+   * 「按 g 之后按 xy 没有锁轴」就有这一层可能，所以两种都认。
+   */
+  const hotkeyLetter = (event: KeyboardEvent): string => {
+    const key = event.key.toLowerCase();
+    if (/^[a-z]$/.test(key)) return key;
+    const code = event.code || '';
+    if (code.length === 4 && code.startsWith('Key')) return code.slice(3).toLowerCase();
+    if (code.length === 6 && code.startsWith('Digit')) return code.slice(5);
+    return key;
+  };
+
+  /** 把锁轴辅助线摆到起手点（Blender 也画这条线：锁了轴要一眼看得见）。 */
+  const paintAxisGuide = (): void => {
+    const grab = session_.grab;
+    if (!grab || !grab.axis) {
+      axisGuide.hidden = true;
+      return;
+    }
+    axisGuide.hidden = false;
+    axisGuide.classList.toggle('cg-axis-guide-x', grab.axis === 'x');
+    axisGuide.classList.toggle('cg-axis-guide-y', grab.axis === 'y');
+    axisGuide.style.transform =
+      grab.axis === 'x'
+        ? `translateY(${Math.round(grab.originScreenY)}px)`
+        : `translateX(${Math.round(grab.originScreenX)}px)`;
+    axisGuide.textContent = '';
+    const label = document.createElement('span');
+    label.textContent = grab.axis === 'x' ? 'X 轴锁定（只走横向）' : 'Y 轴锁定（只走纵向）';
+    axisGuide.append(label);
+  };
+
   const applyGrab = (clientX: number, clientY: number): void => {
     const grab = session_.grab;
     if (!grab) return;
@@ -3731,11 +3774,15 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     ) {
       return;
     }
-    const ids = session_.selection.filter((id) => {
-      const node = session_.graph.nodes.find((item) => item.id === id);
-      return !!node && !FIXED_NODES.has(node.kind);
-    });
-    if (!ids.length) return;
+    // 全选之后要整体移动：输入 / 输出 / 预览也能跟着走（Blender 里这几个节点本来就能拖），
+    // 只是不许删（删除那边仍按 FIXED_NODES 过滤）。
+    const ids = session_.selection.filter((id) =>
+      session_.graph.nodes.some((item) => item.id === id),
+    );
+    if (!ids.length) {
+      session_.toast('先选中节点再按 G（A = 全选）');
+      return;
+    }
     const positions = new Map<string, { x: number; y: number }>();
     for (const id of ids) {
       const node = session_.graph.nodes.find((item) => item.id === id);
@@ -3751,11 +3798,14 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       positions,
       startX: start.x,
       startY: start.y,
+      originScreenX: start.x - rect.left,
+      originScreenY: start.y - rect.top,
       axis: null,
       before: cloneHistorySnapshot(),
       moved: false,
     };
     stage.classList.add('cg-grabbing');
+    paintAxisGuide();
     session_.toast(`抓取移动 · ${GRAB_KEYS_HINT}`);
   };
 
@@ -3764,6 +3814,10 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     const grab = session_.grab;
     if (!grab) return;
     grab.axis = grab.axis === axis ? null : axis;
+    paintAxisGuide();
+    // 锁上的那一刻立刻按新约束重算一次：被锁住的那个方向马上回正（Blender 同款手感）
+    const at = stagePointer;
+    if (at) applyGrab(at.x, at.y);
     session_.toast(
       grab.axis === 'x'
         ? `锁定 X 轴 · ${GRAB_KEYS_HINT}`
@@ -3778,6 +3832,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     if (!grab) return;
     session_.grab = null;
     stage.classList.remove('cg-grabbing');
+    paintAxisGuide();
     if (!commit) {
       for (const [id, start] of grab.positions) {
         const node = session_.graph.nodes.find((item) => item.id === id);
@@ -3820,12 +3875,52 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     finishGrab(false);
   };
 
+  /**
+   * 抓取期间只认这几个键：X/Y 锁轴、G/Enter 落下、Esc 取消。
+   *
+   * 单独拆出来是因为它要挂在 **capture 阶段**（见注册处）：抓取时焦点可能在某个
+   * 数字框里、或某个子控件自己 stopPropagation，锁轴不能因为这些原因失效。
+   * 返回 true = 这个键已经被抓取消费掉。
+   */
+  const handleGrabKey = (event: KeyboardEvent): boolean => {
+    if (!session_.grab) return false;
+    const letter = hotkeyLetter(event);
+    if (!event.ctrlKey && !event.metaKey && !event.altKey && (letter === 'x' || letter === 'y')) {
+      event.preventDefault();
+      event.stopPropagation();
+      toggleGrabAxis(letter);
+      return true;
+    }
+    if (event.key === 'Enter' || (!event.ctrlKey && !event.metaKey && !event.altKey && letter === 'g')) {
+      event.preventDefault();
+      event.stopPropagation();
+      finishGrab(true);
+      return true;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      finishGrab(false);
+      return true;
+    }
+    return false;
+  };
+
+  /** 全选（Blender 的 A）：输入 / 输出 / 预览也在内 —— 它们能移动，只是不能删。 */
+  const selectAllNodes = (): void => {
+    setSelection(session_.graph.nodes.map((node) => node.id));
+  };
+
   const onKeyDown = (event: KeyboardEvent): void => {
-    // 遮罩模式（预览里直接画）优先吃键：Shift+A 加形状、B 画笔、G/R/S 变换、Esc 回预览。
+    // 遮罩模式（预览里直接画）独占键盘：Shift+A 加形状、B 画笔、G/R/S 变换、Esc 回预览。
+    // 它没接的键也不往下走 —— 画遮罩时按 A 不该顺手把画布上的节点全选掉。
     if (session_.maskMode && maskEditor?.handleKey(event)) return;
+    if (session_.maskMode) return;
     // 参数面板里的输入框优先：否则 Shift+A / T / 空格会把正在输入的字符吞成快捷键
     const tag = (event.target as HTMLElement | null)?.tagName?.toLowerCase();
     const typing = tag === 'input' || tag === 'select' || tag === 'textarea';
+    // 抓取优先于「输入框里不认快捷键」：光标停在某个数字框上也要能锁轴 / 落下 / 取消
+    if (session_.grab && handleGrabKey(event)) return;
     if (event.key === 'Escape') {
       event.preventDefault();
       if (session_.grab) {
@@ -3850,26 +3945,9 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       return;
     }
     if (typing) return;
-    // 抓取中只认 X/Y（锁轴）、Enter（落下）、G（再按一次 = 落下，和 Blender 的「G 再按 G」同义）
-    if (session_.grab) {
-      const grabKey = event.key.toLowerCase();
-      if (grabKey === 'x' || grabKey === 'y') {
-        event.preventDefault();
-        event.stopPropagation();
-        toggleGrabAxis(grabKey);
-        return;
-      }
-      if (event.key === 'Enter' || grabKey === 'g') {
-        event.preventDefault();
-        event.stopPropagation();
-        finishGrab(true);
-        return;
-      }
-      return;
-    }
     // 撤销 / 重做：Ctrl+Z、Ctrl+Shift+Z、Ctrl+Y（输入框里走浏览器原生撤销，不拦）
     if ((event.ctrlKey || event.metaKey) && !event.altKey) {
-      const key = event.key.toLowerCase();
+      const key = hotkeyLetter(event);
       if (key === 'z') {
         event.preventDefault();
         if (event.shiftKey) redoGraph();
@@ -3880,6 +3958,22 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
         event.preventDefault();
         redoGraph();
         return;
+      }
+    }
+    // 全选 / 取消全选（Blender 的 A / Alt+A；Ctrl+A 在画布里也让它选节点而不是选网页文字）
+    {
+      const letter = hotkeyLetter(event);
+      if (letter === 'a' && !event.shiftKey) {
+        if (event.altKey && !event.ctrlKey && !event.metaKey) {
+          event.preventDefault();
+          setSelection([]);
+          return;
+        }
+        if (!event.altKey) {
+          event.preventDefault();
+          selectAllNodes();
+          return;
+        }
       }
     }
     if (event.key === ' ') {
@@ -3893,7 +3987,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       !event.ctrlKey &&
       !event.metaKey &&
       !event.altKey &&
-      event.key.toLowerCase() === 'g'
+      hotkeyLetter(event) === 'g'
     ) {
       event.preventDefault();
       startGrab();
@@ -3904,7 +3998,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     if (
       (event.key === 'Delete' ||
         event.key === 'Backspace' ||
-        (event.key.toLowerCase() === 'x' && !event.ctrlKey && !event.metaKey && !event.altKey))
+        (hotkeyLetter(event) === 'x' && !event.ctrlKey && !event.metaKey && !event.altKey))
     ) {
       const ids = session_.selection.filter((id) => {
         const node = session_.graph.nodes.find((item) => item.id === id);
@@ -3922,16 +4016,23 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       schedule();
       return;
     }
-    if (event.key.toLowerCase() === 'a' && event.shiftKey) {
+    if (hotkeyLetter(event) === 'a' && event.shiftKey) {
       event.preventDefault();
       openAddMenuAtPointer();
       return;
     }
-    if (event.key.toLowerCase() === 't') {
+    if (hotkeyLetter(event) === 't') {
       session_.tHeld = true;
       stage.style.cursor = 'crosshair';
     }
     if (event.key === 'f' || event.key === 'F') fitView();
+  };
+
+  /** 抓取键的兜底：capture 阶段先吃一次，任何子控件 / 焦点都吞不掉 X、Y、Enter、Esc。 */
+  const onGrabKeyDown = (event: KeyboardEvent): void => {
+    if (!session_.grab) return;
+    if (session_.maskMode && maskEditor?.handleKey(event)) return;
+    handleGrabKey(event);
   };
 
   const onKeyUp = (event: KeyboardEvent): void => {
@@ -4118,6 +4219,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     { signal, passive: true },
   );
   top.addEventListener('click', onTopClick, { signal });
+  document.addEventListener('keydown', onGrabKeyDown, { signal, capture: true });
   document.addEventListener('keydown', onKeyDown, { signal });
   document.addEventListener('keyup', onKeyUp, { signal });
   window.addEventListener('pointermove', onPointerMove, { signal });

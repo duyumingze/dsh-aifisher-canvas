@@ -2181,6 +2181,133 @@ if (button) {
   check('v1.79 这一轮结束后能关掉（放弃修改二次确认）', !doc.querySelector('.cg-root'));
 }
 
+// ---------------------------------------------------------------- 7.95) G 抓取：全选整体移动 / 锁轴看得见
+//
+// 用户 2026-11-12 报两条：
+//   ① 「在调色节点的节点全选之后按 g 移动只会移动一个」——输入 / 输出 / 预览也得能跟着走（Blender 同款），
+//      而且先得有一个真正好用的「全选」口令（A / Ctrl+A，Alt+A 取消）；
+//   ② 「按 g 之后按 xy 没有锁轴」——锁轴要有画面上看得见的辅助线；输入法合成（key=Process）
+//      时靠 event.code 也认得出键；抓取键挂在 capture 阶段，焦点停在数字框里也照样锁。
+{
+  const report = () => canvasApp.compositorReport();
+  const press = (options) =>
+    window.document.dispatchEvent(
+      new window.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...options }),
+    );
+  const pounce = (type, target, options) =>
+    target?.dispatchEvent(new window.MouseEvent(type, { bubbles: true, cancelable: true, ...options }));
+
+  doc
+    .querySelector('[data-fisherai-open-compositor]')
+    ?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await settle(320);
+  const overlay = doc.querySelector('.cg-root');
+  const stageElement = overlay?.querySelector('.cg-stage');
+  check(
+    '重新打开合成器做「全选抓取」（默认三个节点）',
+    !!overlay && report().nodes.length === 3,
+    `nodes=${report().nodes.length}`,
+  );
+
+  // ---- 全选口令
+  press({ key: 'a' });
+  check(
+    '按 A 全选所有节点（输入 / 输出 / 预览都在内）',
+    report().selection?.length === 3,
+    JSON.stringify(report().selection),
+  );
+  press({ key: 'a', altKey: true });
+  check('Alt+A 取消选择', report().selection?.length === 0, JSON.stringify(report().selection));
+  press({ key: 'a', ctrlKey: true });
+  check(
+    'Ctrl+A 也全选节点（不会变成选网页文字）',
+    report().selection?.length === 3,
+    JSON.stringify(report().selection),
+  );
+
+  // ---- 全选之后按 G：三个节点一起动
+  const before = new Map(report().nodes.map((node) => [node.id, { x: node.x, y: node.y }]));
+  pounce('pointermove', window, { clientX: 300, clientY: 300 });
+  press({ key: 'g' });
+  check(
+    '全选之后按 G：三个节点一起被抓起来（用户报的「只动一个」）',
+    report().grab?.ids?.length === 3,
+    JSON.stringify(report().grab),
+  );
+  pounce('pointermove', window, { clientX: 420, clientY: 380 });
+  check(
+    '全选抓取：每个节点都跟着指针走（位移 ÷ 缩放）',
+    report().nodes.every(
+      (node) => node.x - before.get(node.id).x === 120 && node.y - before.get(node.id).y === 80,
+    ),
+    JSON.stringify(report().nodes),
+  );
+
+  // ---- 锁轴：辅助线 + 只走一个方向
+  press({ key: 'x' });
+  check('抓取中按 X 锁到 X 轴', report().grab?.axis === 'x', JSON.stringify(report().grab));
+  const guide = overlay?.querySelector('.cg-axis-guide');
+  check(
+    '锁轴后画布上出现辅助线（锁没锁一眼看得见）',
+    !!guide && guide.hidden === false && guide.classList.contains('cg-axis-guide-x'),
+    guide ? `${guide.className}|hidden=${guide.hidden}|${guide.textContent}` : '(missing)',
+  );
+  pounce('pointermove', window, { clientX: 520, clientY: 460 });
+  check(
+    '锁 X 之后所有节点只走横向（纵向回正到起手高度）',
+    report().nodes.every(
+      (node) => node.x - before.get(node.id).x === 220 && node.y === before.get(node.id).y,
+    ),
+    JSON.stringify(report().nodes),
+  );
+
+  // ---- 输入法合成：key 变成 Process，靠 event.code（KeyY）认键
+  press({ key: 'Process', code: 'KeyY' });
+  check(
+    '输入法合成（key=Process）时按 Y 也能锁 Y 轴',
+    report().grab?.axis === 'y',
+    JSON.stringify(report().grab),
+  );
+  pounce('pointermove', window, { clientX: 620, clientY: 560 });
+  check(
+    '锁 Y 之后只走纵向',
+    report().nodes.every(
+      (node) => node.x === before.get(node.id).x && node.y - before.get(node.id).y === 260,
+    ),
+    JSON.stringify(report().nodes),
+  );
+
+  // ---- 焦点在输入框里也要能锁轴（capture 阶段兜底）
+  const probeInput = doc.createElement('input');
+  probeInput.type = 'number';
+  stageElement?.append(probeInput);
+  probeInput.focus();
+  probeInput.dispatchEvent(
+    new window.KeyboardEvent('keydown', { key: 'x', bubbles: true, cancelable: true }),
+  );
+  check(
+    '光标停在数字框里按 X 也照样锁轴（抓取键在 capture 阶段）',
+    report().grab?.axis === 'x',
+    JSON.stringify(report().grab),
+  );
+  probeInput.remove();
+
+  press({ key: 'Escape' });
+  await settle(30);
+  check(
+    'Esc 取消这次抓取：位置还原、辅助线收起',
+    report().grab === null &&
+      guide?.hidden === true &&
+      report().nodes.every(
+        (node) => node.x === before.get(node.id).x && node.y === before.get(node.id).y,
+      ),
+    JSON.stringify(report().nodes),
+  );
+
+  await discardClose();
+  check('全选抓取这一轮结束后能正常关掉', !doc.querySelector('.cg-root'));
+}
+
 // ---------------------------------------------------------------- 8) 「应用」后落一张成品图
 //
 // 用户：「退出调色节点时应该会在调色节点后添加调整好的图像」。

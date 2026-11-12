@@ -1167,6 +1167,66 @@ export const COMPOSITOR_STYLE = `
 .cg-stage.cg-grabbing .cg-node { cursor: move; }
 .cg-stage.cg-grabbing .cg-node-head { cursor: move; }
 
+/**
+ * 锁轴辅助线（用户 2026-11-12：「按 g 之后按 xy 没有锁轴」）。
+ *
+ * 锁上一个轴时，从起手点拉一条贯穿画布的线并把轴名写在线上 —— 有没有锁住、
+ * 锁的是哪个轴，一眼就看得见，不用去猜「是不是没生效」。
+ * 颜色对齐 Blender 的坐标轴：X 偏红、Y 偏绿。
+ *
+ * 元素本身就是整块 stage（inset:0），只靠 transform 挪到起手点的行 / 列上；
+ * 这样横竖两条线都不用重新算长度。
+ */
+.cg-axis-guide {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  pointer-events: none;
+  color: #f0a0a0;
+  font: 600 10px/1 inherit;
+  letter-spacing: .3px;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, .85);
+}
+.cg-axis-guide[hidden] { display: none; }
+.cg-axis-guide::before {
+  content: "";
+  position: absolute;
+  background: currentColor;
+  opacity: .5;
+}
+.cg-axis-guide-x::before {
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 1px;
+  transform: translateY(-.5px);
+}
+.cg-axis-guide-y::before {
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 1px;
+  transform: translateX(-.5px);
+}
+.cg-axis-guide-x { padding: 0 0 0 10px; color: #f0a0a0; }
+.cg-axis-guide-y {
+  padding: 0;
+  color: #9fe6a8;
+  display: flex;
+  align-items: flex-start;
+}
+.cg-axis-guide-y span,
+.cg-axis-guide-x span {
+  position: absolute;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(9, 12, 16, .78);
+  border: 1px solid rgba(255, 255, 255, .1);
+  white-space: nowrap;
+}
+.cg-axis-guide-x span { left: 10px; top: -9px; }
+.cg-axis-guide-y span { left: 8px; top: -9px; }
+
 /* ---- 手绘蒙版节点：卡片里一块黑白预览 + 三个动作 ------------------------- */
 .cg-mask-preview {
   position: relative;

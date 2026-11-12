@@ -162,7 +162,111 @@ check(
   `nodes=${beforeDelete} -> ${nodes.length}`,
 );
 
-// ---------------------------------------------------------------- 6) 运行时无错误
+// ---------------------------------------------------------------- 6) 全选 / 多选抓取 / 输入法下的锁轴
+//
+// 用户 2026-11-12：「节点全选之后按 g 移动只会移动一个，按 g 之后按 xy 没有锁轴」。
+// 主画布这边补的三件事：A / Alt+A / Ctrl+A 全选与取消；多选抓取整体位移；
+// 输入法合成时 event.key 是 Process，靠 event.code 也认得出 X / Y。
+{
+  // 这一段读 DOM 而不是 canvas_control read：节点是刚建的、还没落盘，tool 读到的快照可能是空的。
+  // 卡片的位置就在 transform: translate(x,y) 上，选中态是 data-node-selected。
+  const domNodes = () =>
+    [...doc.querySelectorAll('#canvas-viewport-content [data-node-id]')].map((element) => {
+      const match = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(element.style.transform || '');
+      return {
+        id: element.dataset.nodeId,
+        x: match ? Math.round(Number(match[1])) : 0,
+        y: match ? Math.round(Number(match[2])) : 0,
+        selected: element.dataset.nodeSelected === 'true',
+      };
+    });
+
+  for (const point of [{ x: 200, y: 200 }, { x: 560, y: 280 }]) {
+    window.dispatchEvent(
+      new window.CustomEvent('fisherai:add-canvas-node', { detail: { type: 'Image', point } }),
+    );
+    await settle(500);
+    // 左键放下（新建节点是跟随指针的）
+    pointer('pointerdown', doc.getElementById('canvas-background') ?? window, {
+      button: 0,
+      clientX: point.x + 12,
+      clientY: point.y + 12,
+    });
+    pointer('pointerup', window, { button: 0, clientX: point.x + 12, clientY: point.y + 12 });
+    await settle(250);
+  }
+
+  const all = domNodes();
+  check('画布上现在有两个节点（多选抓取的前提）', all.length === 2, `nodes=${all.length}`);
+  const beforeAll = new Map(all.map((node) => [node.id, { x: node.x, y: node.y }]));
+
+  pointer('pointermove', window, { clientX: 300, clientY: 300, buttons: 0 });
+  key({ key: 'a' });
+  await settle(80);
+  check('按 A 全选：两张卡都带上选中态', domNodes().every((node) => node.selected), JSON.stringify(domNodes().map((node) => node.selected)));
+
+  key({ key: 'g' });
+  pointer('pointermove', window, { clientX: 400, clientY: 380, buttons: 0 });
+  await settle(200);
+  let now = domNodes();
+  check(
+    'A 全选 + G：两个节点一起跟着指针走（不是只动一个）',
+    now.length === 2 &&
+      now.every(
+        (node) => node.x - beforeAll.get(node.id).x === 100 && node.y - beforeAll.get(node.id).y === 80,
+      ),
+    JSON.stringify(now),
+  );
+
+  key({ key: 'x' });
+  pointer('pointermove', window, { clientX: 500, clientY: 460, buttons: 0 });
+  await settle(200);
+  now = domNodes();
+  check(
+    '主画布锁 X：两个节点都只走横向（纵向回正）',
+    now.every(
+      (node) => node.x - beforeAll.get(node.id).x === 200 && node.y === beforeAll.get(node.id).y,
+    ),
+    JSON.stringify(now),
+  );
+
+  key({ key: 'Process', code: 'KeyY' });
+  pointer('pointermove', window, { clientX: 560, clientY: 520, buttons: 0 });
+  await settle(200);
+  now = domNodes();
+  check(
+    '输入法合成（key=Process）时按 Y 也锁得住（只走纵向）',
+    now.every(
+      (node) => node.x === beforeAll.get(node.id).x && node.y - beforeAll.get(node.id).y === 220,
+    ),
+    JSON.stringify(now),
+  );
+
+  key({ key: 'Escape' });
+  await settle(200);
+  now = domNodes();
+  check(
+    'Esc 取消：两个节点一起还原',
+    now.every((node) => node.x === beforeAll.get(node.id).x && node.y === beforeAll.get(node.id).y),
+    JSON.stringify(now),
+  );
+
+  key({ key: 'a', altKey: true });
+  await settle(80);
+  check('Alt+A 取消选择', domNodes().every((node) => !node.selected), JSON.stringify(domNodes().map((node) => node.selected)));
+  pointer('pointermove', window, { clientX: 300, clientY: 300, buttons: 0 });
+  key({ key: 'g' });
+  pointer('pointermove', window, { clientX: 420, clientY: 400, buttons: 0 });
+  await settle(200);
+  now = domNodes();
+  check(
+    'Alt+A 取消选择之后 G 不动任何节点',
+    now.every((node) => node.x === beforeAll.get(node.id).x && node.y === beforeAll.get(node.id).y),
+    JSON.stringify(now),
+  );
+}
+
+// ---------------------------------------------------------------- 7) 运行时无错误
 {
   const diag = (await host.hostApi('GET', '/diagnostics?limit=100')).json();
   const errors = (diag.entries ?? []).filter((entry) => entry.level === 'error');

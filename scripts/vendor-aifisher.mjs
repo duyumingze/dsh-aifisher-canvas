@@ -4938,6 +4938,31 @@ const MARKDOWN_TEXT_PATCHES = [
 const BLENDER_KEYS_PATCHES = [
   {
     file: 'src/stable/canvas/canvasCommands.ts',
+    from: `function isTextEditor(element: Element | null): boolean {
+  return !!element?.closest('input,textarea,[contenteditable]');
+}`,
+    to: `function isTextEditor(element: Element | null): boolean {
+  return !!element?.closest('input,textarea,[contenteditable]');
+}
+
+/**
+ * 键盘上按的是哪个字母（dsh-aifisher-canvas，补丁 3.8x）。
+ *
+ * 中文输入法开着时 \`event.key\` 会是 \`Process\` / \`Unidentified\`，只剩
+ * \`event.code\`（KeyG / KeyX / KeyY）认得出按键 —— 用户 2026-11-12 报「按 g 之后按 xy
+ * 没有锁轴」，所以两种都认，别让输入法状态把画布快捷键吞掉。
+ */
+function canvasHotkeyLetter(event: KeyboardEvent): string {
+  const key = event.key.toLowerCase();
+  if (/^[a-z]$/.test(key)) return key;
+  const code = event.code || '';
+  if (code.length === 4 && code.startsWith('Key')) return code.slice(3).toLowerCase();
+  return key;
+}`,
+    why: '画布快捷键没有「输入法合成时也能认键」的兜底',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
     from: `  focusOnNodes: (nodes: CanvasClipboardNode[], ids: string[]) => void;
   groupSelectedNodes: (ids: string[]) => void;
 }`,
@@ -4958,6 +4983,44 @@ const BLENDER_KEYS_PATCHES = [
     pushHistory,
   } = options;`,
     why: '画布命令没解构 pushHistory',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.isComposing ||
+        isTextEditor(document.activeElement) ||
+        (event.target instanceof Element && isTextEditor(event.target))
+      )
+        return;
+      const key = event.key.toLowerCase();
+      if (event.ctrlKey && key === 'z' && !event.shiftKey) {`,
+    to: `    const onKeyDown = (event: KeyboardEvent) => {
+      // 焦点在输入框 / 文本节点里时让路。不再按 event.isComposing 整段跳过：
+      // 中文输入法开着时单键（G / X / Y / A）不该被「合成状态」吃掉，
+      // 真正的文本框已经由 isTextEditor 挡住了。
+      if (
+        isTextEditor(document.activeElement) ||
+        (event.target instanceof Element && isTextEditor(event.target))
+      )
+        return;
+      const key = canvasHotkeyLetter(event);
+      // A = 全选节点 / Alt+A = 取消选择（Blender 手感；Ctrl+A 在画布里选节点而不是选网页文字）。
+      // 用户 2026-11-12：「节点全选之后按 g 移动只会移动一个」——先得有个全选的口令。
+      if (key === 'a' && !event.shiftKey) {
+        if (event.altKey && !event.ctrlKey && !event.metaKey) {
+          event.preventDefault();
+          setSelectedNodeIds([]);
+          return;
+        }
+        if (!event.altKey) {
+          event.preventDefault();
+          setSelectedNodeIds(nodes.map((node) => node.id));
+          return;
+        }
+      }
+      if (event.ctrlKey && key === 'z' && !event.shiftKey) {`,
+    why: '画布快捷键没有全选（A/Alt+A）且被输入法合成状态整段跳过',
   },
   {
     file: 'src/stable/canvas/canvasCommands.ts',
@@ -5054,7 +5117,8 @@ const BLENDER_KEYS_PATCHES = [
       else stopGrab(false);
     };
     const onKey = (event: KeyboardEvent) => {
-      const key = event.key.toLowerCase();
+      // 输入法合成时 event.key 可能是 Process，用 canvasHotkeyLetter 退回 event.code
+      const key = canvasHotkeyLetter(event);
       if (key === 'x' || key === 'y') {
         event.preventDefault();
         event.stopPropagation();
