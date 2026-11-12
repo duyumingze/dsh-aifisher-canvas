@@ -25,17 +25,22 @@ export interface WheelRangeSpec {
   neutral: number;
   min: number;
   max: number;
+  /** 圆点推到盘边时单通道的最大偏移（用这个轮自己的数值单位）。 */
+  chroma: number;
 }
 
 /** 四个轮的顺序就是横向排布的顺序（和参照图一致）。 */
 export const WHEEL_RANGES: readonly WheelRangeSpec[] = [
-  { key: 'lift', label: '暗部', neutral: 0, min: -1, max: 1 },
-  { key: 'gamma', label: '中灰', neutral: 0, min: -1, max: 1 },
-  { key: 'gain', label: '亮部', neutral: 1, min: 0, max: 4 },
-  { key: 'offset', label: '偏移', neutral: 25, min: 0, max: 50 },
+  { key: 'lift', label: '暗部', neutral: 0, min: -1, max: 1, chroma: 0.9 },
+  { key: 'gamma', label: '中灰', neutral: 0, min: -1, max: 1, chroma: 0.9 },
+  { key: 'gain', label: '亮部', neutral: 1, min: 0, max: 4, chroma: 0.9 },
+  // 偏移的量程是 0..50（25 为中性），不是 -1..1：色度必须按同一套单位给，
+  // 否则推到盘边也只是 ±0.6/50 ≈ 1% —— 用户会觉得「偏移轮怎么拨都没反应」。
+  // 12.5 落到盘边是单通道 ±8.3 单位 = 显示域 ±0.17。
+  { key: 'offset', label: '偏移', neutral: 25, min: 0, max: 50, chroma: 12.5 },
 ];
 
-/** 圆点推到盘边时，单通道最大偏移（数字上大约 ±0.6）。 */
+/** 默认色度（暗部/中灰/亮部都用它）；偏移按自己的量程另行给。 */
 export const WHEEL_CHROMA = 0.9;
 
 /** 三通道键名：liftR / liftG / liftB …… 偏移也是 offsetR/G/B。 */

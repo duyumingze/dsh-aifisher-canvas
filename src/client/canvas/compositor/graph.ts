@@ -197,8 +197,11 @@ export const NODE_SPECS: Record<CompositorKind, CompositorNodeSpec> = {
   gamma: { label: 'Gamma', category: '颜色', inputs: 1, outputs: 1, defaults: { gamma: 1 } },
 
   // 混合 = Blender 的 Mix 节点：A / B 两路图像 + 一个**系数**输入口。
-  // 系数口（toPort=2）接灰度图或蒙版时按像素驱动 factor（引擎里乘在滑块上），
-  // 不接就是纯滑块的 0..1 —— 所以老图（只有 A/B 两条线）语义不变。
+  // 口径照 Blender（用户 2026-11-12）：
+  //   系数 0（黑）= 输出 A 口；系数 1（白）= 输出 B 口（正常模式下就是 B 原样）；
+  //   系数口（toPort=2）接灰度图/蒙版时按像素驱动系数（乘在数值系数上）。
+  // 所以「局部调色」= A 口接原图、B 口接调过色的链、系数口接遮罩：
+  // 空遮罩全黑 → A（原图），圈出来的地方白 → B（调色后）。
   mix: {
     label: '混合',
     category: '混合',
@@ -254,8 +257,8 @@ export const NODE_SPECS: Record<CompositorKind, CompositorNodeSpec> = {
    * 2026-11-11 二次改版：不再开一块独立的编辑大画布，而是把上方预览切到「遮罩」模式
    * 直接在上面画（圆 / 方 / 自由样条 + 画笔层），Shift+A 搜索添加形状。
    * 栅格化成一张**黑白图**存在 params.mask 里，输出口接到「混合」节点的第三个口
-   * （系数）就按像素控混合量 —— 于是「局部调色」= A 口接调过色的链、B 口接原图、
-   * 系数口接这张遮罩。
+   * （系数）就按像素控混合量 —— 于是「局部调色」= A 口接原图、B 口接调过色的链、
+   * 系数口接这张遮罩（白 = B = 调色后，黑 = A = 原图）。
    *
    * 一个输入口：可选的底图（编辑时垫在下面帮你对位，不参与输出）。
    * 形状与画笔层存在项目级遮罩数据块里（graph.masks），params.mask 是栅格化后的黑白 PNG、
@@ -277,11 +280,12 @@ export const OUTPUT_KIND: CompositorKind = 'output';
 /**
  * 多输入节点的端口名（鼠标悬停提示 + 无障碍）。
  *
- * 用户 2026-10-29：「混合节点应该有三个输入通道，a b 和系数」—— Blender 的 Mix
- * 就是 A / B / Factor 三个口，第三个口接灰度就能按像素控混合量。
+ * 用户 2026-10-29：「混合节点应该有三个输入通道，a b 和系数」；2026-11-12 又定了
+ * 系数的方向：系数 0（黑）输出 A 口、系数 1（白）输出 B 口。悬停提示直接把这条写出来，
+ * 免得接反。
  */
 export const INPUT_PORT_LABELS: Partial<Record<CompositorKind, readonly string[]>> = {
-  mix: ['A 上层', 'B 底层', '系数（灰度 / 蒙版）'],
+  mix: ['A（系数 0 时输出）', 'B（系数 1 时输出）', '系数（灰度 / 蒙版）'],
   alphaOver: ['A 上层', 'B 底层'],
   paintMask: ['参考图（只用于对位，不参与输出）'],
 };
@@ -290,6 +294,22 @@ export const INPUT_PORT_LABELS: Partial<Record<CompositorKind, readonly string[]
 export function inputPortLabel(kind: CompositorKind, index: number): string {
   const labels = INPUT_PORT_LABELS[kind];
   return labels?.[index] ?? `输入 ${index + 1}`;
+}
+
+/**
+ * 多输入口旁边那枚小标（用户 2026-11-12：「ab通道标一下」）。
+ *
+ * 悬停提示只在鼠标压上去时才有，混合节点的三个口长得一样、容易接反；
+ * 所以 A / B / 系数 直接以 tag 形式挂在口外，一眼能对上。
+ */
+export const INPUT_PORT_BADGES: Partial<Record<CompositorKind, readonly string[]>> = {
+  mix: ['A', 'B', '系数'],
+  alphaOver: ['A', 'B'],
+};
+
+/** 某个输入口的小标；没有登记的返回空串（不画 tag）。 */
+export function inputPortBadge(kind: CompositorKind, index: number): string {
+  return INPUT_PORT_BADGES[kind]?.[index] ?? '';
 }
 
 export function specOf(kind: CompositorKind): CompositorNodeSpec {

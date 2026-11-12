@@ -1300,6 +1300,125 @@ if (button) {
   check('「放弃修改」二次确认后关闭（第三轮）', !doc.querySelector('.cg-root'));
 }
 
+// ---------------------------------------------------------------- 7.65) 色彩平衡求值：按亮度分区（v1.97）
+//
+// 用户 2026-11-12：「它色彩平衡节点效果是不是不对，反正效果是乱的，调暗部会动全局，
+// 调高光会动别的」。两处病根：①在线性域里解释界面数字（暗部 +0.20 相当于把黑位抬到
+// 48% 灰，暗部推蓝还会把中间调剪成纯蓝）；②ASC CDL 的 lift/gain 本来就是全局加/全局乘。
+//
+// 现在改成显示域 + 按输入亮度分区：暗部只动黑位、中灰只动中间调、亮部只动高光，偏移全图。
+// jsdom 没有 WebGL，GLSL 跑不了，所以这一节验的是与 shader 同式同常数（同一个模块）
+// 的 JS 参考实现；真像素留给 browser-check 的 wheels 场景。
+{
+  const { applyColorBalance, colorBalanceWeights, colorBalanceShaderBody, CB_SHADOW_END, CB_HIGHLIGHT_START } =
+    canvasApp;
+  const near = (a, b, tolerance = 0.01) => Math.abs(a - b) <= tolerance;
+  const lum = (rgb) => 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2];
+
+  const identity = applyColorBalance([0.2, 0.5, 0.8], {});
+  check(
+    '色彩平衡：中性参数是恒等变换（0/0/1/25 什么都不改）',
+    near(identity[0], 0.2) && near(identity[1], 0.5) && near(identity[2], 0.8, 0.011),
+    identity.map((value) => value.toFixed(3)).join(','),
+  );
+
+  const wDark = colorBalanceWeights(0.05);
+  const wMid = colorBalanceWeights(0.5);
+  const wWhite = colorBalanceWeights(0.98);
+  check(
+    '色彩平衡：亮度分区的权重（黑≈暗部、灰≈中灰、白≈亮部，三者和为 1）',
+    wDark.shadow > 0.9 &&
+      wDark.mid < 0.1 &&
+      wMid.mid > 0.8 &&
+      wWhite.highlight > 0.9 &&
+      near(wDark.shadow + wDark.mid + wDark.highlight, 1, 0.001) &&
+      near(wMid.shadow + wMid.mid + wMid.highlight, 1, 0.001),
+    `dark=${wDark.shadow.toFixed(2)}/${wDark.mid.toFixed(2)} mid=${wMid.mid.toFixed(2)} white=${wWhite.highlight.toFixed(2)}`,
+  );
+
+  // 暗部 +0.20：黑位抬 20%，中灰与高光一动不动（旧实现黑位直接到 48% 灰、中灰也动）
+  const darkBase = [0.05, 0.5, 0.9];
+  const darkOut = darkBase.map((value) => applyColorBalance([value, value, value], { liftR: 0.2, liftG: 0.2, liftB: 0.2 }));
+  check(
+    '色彩平衡：拖暗部 +0.20 → 黑位 +0.20，中灰/高光不动',
+    near(darkOut[0][0], 0.25) && near(darkOut[1][0], 0.5, 0.005) && near(darkOut[2][0], 0.9, 0.005),
+    `${darkOut.map((rgb) => rgb[0].toFixed(3)).join(' / ')}`,
+  );
+
+  // 暗部推蓝（色轮推到盘边：R/G −0.30、B +0.60）：中间灰必须原样
+  const blueShadow = applyColorBalance([0.5, 0.5, 0.5], { liftR: -0.3, liftG: -0.3, liftB: 0.6 });
+  check(
+    '色彩平衡：暗部推蓝不碰中间灰（旧实现会把中间调剪成纯蓝）',
+    near(blueShadow[0], 0.5, 0.0001) && near(blueShadow[1], 0.5, 0.0001) && near(blueShadow[2], 0.5, 0.0001),
+    blueShadow.map((value) => value.toFixed(3)).join(','),
+  );
+  const blueBlack = applyColorBalance([0, 0, 0], { liftR: -0.3, liftG: -0.3, liftB: 0.6 });
+  check(
+    '色彩平衡：暗部推蓝真的把黑位染蓝（B 抬到 0.60）',
+    near(blueBlack[2], 0.6, 0.01) && blueBlack[0] === 0 && blueBlack[1] === 0,
+    blueBlack.map((value) => value.toFixed(3)).join(','),
+  );
+
+  // 亮部 1.30：只有高光变亮，暗部与中间灰不动
+  const gainOut = [0.05, 0.5, 0.9].map((value) => applyColorBalance([value, value, value], { gainR: 1.3, gainG: 1.3, gainB: 1.3 }));
+  check(
+    '色彩平衡：拖亮部 → 只动高光（黑位与中灰不动）',
+    near(gainOut[0][0], 0.05, 0.005) && near(gainOut[1][0], 0.5, 0.006) && gainOut[2][0] > 0.95,
+    `${gainOut.map((rgb) => rgb[0].toFixed(3)).join(' / ')}`,
+  );
+
+  // 中灰 +0.20：只抬中间调，黑与白钉住
+  const gammaOut = [0, 0.5, 1].map((value) => applyColorBalance([value, value, value], { gammaR: 0.2, gammaG: 0.2, gammaB: 0.2 }));
+  check(
+    '色彩平衡：拖中灰 → 只抬中间调（黑 0、白 1 钉住）',
+    near(gammaOut[0][0], 0, 0.001) && gammaOut[1][0] > 0.53 && near(gammaOut[2][0], 1, 0.001),
+    `${gammaOut.map((rgb) => rgb[0].toFixed(3)).join(' / ')}`,
+  );
+
+  // 偏移 +5（25 → 30）：整幅 +0.10，这才是「本来就该动全局」的那个轮
+  const offsetOut = [0.1, 0.5].map((value) => applyColorBalance([value, value, value], { offsetR: 30, offsetG: 30, offsetB: 30 }));
+  check(
+    '色彩平衡：偏移 +5 → 整幅 +0.10（只有偏移动全局）',
+    near(offsetOut[0][0], 0.2) && near(offsetOut[1][0], 0.6),
+    `${offsetOut.map((rgb) => rgb[0].toFixed(3)).join(' / ')}`,
+  );
+
+  // 一片死黑里给一点色：暗部轮的色度不该在高光上留下痕迹（推蓝后的白仍是白）
+  const whiteAfter = applyColorBalance([1, 1, 1], { liftR: -0.3, liftG: -0.3, liftB: 0.6 });
+  check(
+    '色彩平衡：暗部推蓝后纯白仍是纯白',
+    near(whiteAfter[0], 1, 0.01) && near(whiteAfter[1], 1, 0.01) && near(whiteAfter[2], 1, 0.01),
+    whiteAfter.map((value) => value.toFixed(3)).join(','),
+  );
+
+  // shader 真的用了这套分区（防止有人只改参考实现、或把它改回线性域）
+  const body = colorBalanceShaderBody();
+  check(
+    '色彩平衡 shader：按亮度分区求值，不再在线性域跑 lift/gamma/gain',
+    /wShadow/.test(body) &&
+      /wHighlight/.test(body) &&
+      /wMid/.test(body) &&
+      body.includes(CB_SHADOW_END.toFixed(3)) &&
+      body.includes(CB_HIGHLIGHT_START.toFixed(3)) &&
+      !/srgbToLinear\(texel\.rgb\)/.test(body) &&
+      !/slope/.test(body),
+    `shadowEnd=${CB_SHADOW_END} highlightStart=${CB_HIGHLIGHT_START}`,
+  );
+  check(
+    '色彩平衡：暗部权重在 0.50 处归零、亮部在 0.50 处起步（中间灰谁都不碰）',
+    colorBalanceWeights(0.51).shadow === 0 &&
+      colorBalanceWeights(0.49).highlight === 0 &&
+      colorBalanceWeights(0.5).shadow === 0 &&
+      colorBalanceWeights(0.5).highlight === 0,
+    `shadow(0.51)=${colorBalanceWeights(0.51).shadow} highlight(0.49)=${colorBalanceWeights(0.49).highlight}`,
+  );
+  check(
+    '色彩平衡：亮度按 BT.709 加权（纯绿比纯蓝更算「亮」）',
+    lum([0, 1, 0]) > lum([0, 0, 1]) && near(canvasApp.colorBalanceLuma([0, 1, 0]), 0.7152, 0.0001),
+    String(canvasApp.colorBalanceLuma([0, 1, 0]).toFixed(4)),
+  );
+}
+
 // ---------------------------------------------------------------- 7.7) Ctrl+Z 撤销 / 重做（v1.78）
 //
 // 用户 2026-10-29：「添加 ctrl+z 撤销功能」。
@@ -1553,14 +1672,32 @@ if (button) {
     ).length === 0,
   );
 
-  // ---- 纯逻辑：混合节点三输入 + 端口名
+  // ---- 纯逻辑：混合节点三输入 + 端口名（系数 0 → A、系数 1 → B，Blender 口径）
   check(
     '混合节点三个输入口（A / B / 系数）',
     canvasApp.INPUT_PORT_LABELS.mix?.length === 3 &&
-      canvasApp.inputPortLabel('mix', 0) === 'A 上层' &&
-      canvasApp.inputPortLabel('mix', 1) === 'B 底层' &&
+      canvasApp.inputPortLabel('mix', 0) === 'A（系数 0 时输出）' &&
+      canvasApp.inputPortLabel('mix', 1) === 'B（系数 1 时输出）' &&
       /系数/.test(canvasApp.inputPortLabel('mix', 2)),
     `${canvasApp.inputPortLabel('mix', 0)} / ${canvasApp.inputPortLabel('mix', 1)} / ${canvasApp.inputPortLabel('mix', 2)}`,
+  );
+  check(
+    '混合节点系数：0..1 量程、默认 1.000（白 = 输出 B 口，不是 100%）',
+    canvasApp.formatParam('factor', 1) === '1.000' &&
+      canvasApp.formatParam('factor', 0) === '0.000' &&
+      canvasApp.toDisplay('factor', 0.5) === 0.5 &&
+      canvasApp.PARAM_META?.factor?.label === '系数',
+    JSON.stringify(canvasApp.PARAM_META?.factor ?? null),
+  );
+  check(
+    '混合节点口外的小标是 A / B / 系数（alphaOver 也有 A / B）',
+    canvasApp.inputPortBadge('mix', 0) === 'A' &&
+      canvasApp.inputPortBadge('mix', 1) === 'B' &&
+      canvasApp.inputPortBadge('mix', 2) === '系数' &&
+      canvasApp.inputPortBadge('alphaOver', 0) === 'A' &&
+      canvasApp.inputPortBadge('alphaOver', 1) === 'B' &&
+      canvasApp.inputPortBadge('blur', 0) === '',
+    JSON.stringify(canvasApp.INPUT_PORT_BADGES ?? null),
   );
 
   // ---- 纯逻辑：模糊搜索（中文子序列 / 拼音首字母 / 英文）
@@ -1676,11 +1813,20 @@ if (button) {
     `ports=${mixNode?.querySelectorAll('.cg-port.cg-in').length ?? 0}`,
   );
   check(
-    '三个输入口的悬停提示分别是 A 上层 / B 底层 / 系数',
+    '三个输入口的悬停提示分别是 A（系数 0）/ B（系数 1）/ 系数',
     [...(mixNode?.querySelectorAll('.cg-port.cg-in') || [])]
       .map((port) => port.title)
-      .join(',') === 'A 上层,B 底层,系数（灰度 / 蒙版）',
+      .join(',') === 'A（系数 0 时输出）,B（系数 1 时输出）,系数（灰度 / 蒙版）',
     [...(mixNode?.querySelectorAll('.cg-port.cg-in') || [])].map((port) => port.title).join(','),
+  );
+  check(
+    '三个输入口外都挂了口标（A / B / 系数），一眼能对上',
+    [...(mixNode?.querySelectorAll('.cg-port.cg-in .cg-port-badge') || [])]
+      .map((badge) => badge.textContent)
+      .join(',') === 'A,B,系数',
+    [...(mixNode?.querySelectorAll('.cg-port.cg-in .cg-port-badge') || [])]
+      .map((badge) => badge.textContent)
+      .join(','),
   );
   const modeSelect = mixNode?.querySelector('.cg-select');
   check(

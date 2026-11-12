@@ -44,7 +44,9 @@ export const PARAM_META: Record<string, ParamMeta> = {
   softness: { label: '柔和', min: 0, max: 100, step: 1, scale: 100, unit: '%', digits: 0 },
   roundness: { label: '圆度', min: 0, max: 100, step: 1, scale: 100, unit: '%', digits: 0 },
   radius: { label: '半径', min: 0, max: 64, step: 1, digits: 0 },
-  factor: { label: '混合', min: 0, max: 100, step: 1, scale: 100, unit: '%', digits: 0 },
+  // 混合节点的系数按 Blender 的量程 0..1 显示（用户 2026-11-12：系数 1 = 白 = 输出 B 口，
+  // 系数 0 = 黑 = 输出 A 口）。存的就是 0..1，不换算百分比。
+  factor: { label: '系数', min: 0, max: 1, step: 0.001, digits: 3 },
   width: { label: '宽度', min: 5, max: 100, step: 1, scale: 100, unit: '%', digits: 0 },
   height: { label: '高度', min: 5, max: 100, step: 1, scale: 100, unit: '%', digits: 0 },
   angle: { label: '角度', min: 0, max: 360, step: 1, unit: '°', digits: 0 },

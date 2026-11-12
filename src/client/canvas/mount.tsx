@@ -283,7 +283,7 @@ export {
   vectorscopeTargets,
   waveformOf,
 } from './compositor/scopes';
-export { formatParam, toDisplay, toRaw } from './compositor/params';
+export { PARAM_META, formatParam, toDisplay, toRaw } from './compositor/params';
 /**
  * v1.75：四轮调色（暗部/中灰/亮部/偏移）的纯数学与显示口径。
  * 色轮圆点 ↔ 三通道的换算在 jsdom 里直接验，不必真开 WebGL。
@@ -307,13 +307,25 @@ export {
 } from './compositor/editor';
 export type { OpenCompositorOptions, WindowControlsOverlayLike } from './compositor/editor';
 export {
+  INPUT_PORT_BADGES,
   INPUT_PORT_LABELS,
   NODE_LAYOUT_GAP,
+  inputPortBadge,
   inputPortLabel,
   resolveNodeOverlaps,
 } from './compositor/graph';
 export type { NodeLayoutSize } from './compositor/graph';
 export { creatableNodeCount, fuzzyScore, nodeMatchScore, searchNodeKinds } from './compositor/nodeSearch';
+// 色彩平衡的分区权重 / 求值口径（JS 参考实现，和 shader 共用常数）：jsdom 回归直接验它。
+export {
+  CB_HIGHLIGHT_START,
+  CB_OFFSET_SCALE,
+  CB_SHADOW_END,
+  applyColorBalance,
+  colorBalanceLuma,
+  colorBalanceShaderBody,
+  colorBalanceWeights,
+} from './compositor/colorBalance';
 export { openCompositorForNode, uploadCompositorDataUrl } from './compositor/bridge';
 
 /**

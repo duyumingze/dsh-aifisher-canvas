@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 四轮调色的节点内 UI（照 Blender 4 Color Balance 节点，用户 2026-10-29 给的参照图）。
  *
  * 每个轮子的结构（和参照图一一对应）：
@@ -229,7 +229,7 @@ function createWheelBlock(
   const paint = (): void => {
     const channels = currentChannels();
     const level = wheelLevel(channels);
-    const dotPosition = wheelDotFromRgb(channels);
+    const dotPosition = wheelDotFromRgb(channels, spec.chroma);
     dot.setAttribute('cx', (CENTER + dotPosition.x * DOT_LIMIT).toFixed(2));
     dot.setAttribute('cy', (CENTER - dotPosition.y * DOT_LIMIT).toFixed(2));
     arc.setAttribute('d', ringArcPath(wheelLevelFraction(spec, level)));
@@ -274,7 +274,7 @@ function createWheelBlock(
       y /= magnitude;
     }
     const level = wheelLevel(currentChannels());
-    writeChannels(wheelRgbFromDot(x, y, level));
+    writeChannels(wheelRgbFromDot(x, y, level, spec.chroma));
     paint();
   };
 
@@ -460,12 +460,15 @@ export function wheelUiMetrics(): {
   discRadius: number;
   ringRadius: number;
   chroma: number;
+  chromaByRange: Record<string, number>;
 } {
   return {
     dotLimit: DOT_LIMIT,
     discRadius: DISC_RADIUS,
     ringRadius: RING_RADIUS,
     chroma: WHEEL_CHROMA,
+    // 偏移的量程是 0..50，色度按自己的单位给（见 WHEEL_RANGES 的注释）
+    chromaByRange: Object.fromEntries(WHEEL_RANGES.map((spec) => [spec.key, spec.chroma])),
   };
 }
 

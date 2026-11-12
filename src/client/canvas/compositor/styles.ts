@@ -675,8 +675,9 @@ export const COMPOSITOR_STYLE = `
   font-size: 10px;
   padding: 0 4px;
 }
-/* 数字参数：全宽滑块（标签/数值印在轨道上）+ 数字框。 */
-.cg-param-slider { grid-template-columns: minmax(0, 1fr) 44px; gap: 4px; margin-bottom: 5px; }
+/* 数字参数：全宽滑块（标签/数值印在轨道上）+ 数字框。
+   数字框留 50px：混合节点系数是 0..1 三位小数（1.000），44px 会把最后一位裁掉。 */
+.cg-param-slider { grid-template-columns: minmax(0, 1fr) 50px; gap: 4px; margin-bottom: 5px; }
 .cg-slider {
   position: relative;
   height: 19px;
@@ -730,7 +731,7 @@ export const COMPOSITOR_STYLE = `
   pointer-events: none;
 }
 .cg-param-number {
-  width: 44px;
+  width: 50px;
   height: 19px;
   background: rgba(255, 255, 255, .05);
   border: 1px solid rgba(255, 255, 255, .08);
@@ -975,6 +976,24 @@ export const COMPOSITOR_STYLE = `
 }
 .cg-port.cg-in { left: -6px; }
 .cg-port.cg-out { right: -6px; }
+/* 多输入口外挂的小标（混合节点的 A / B / 系数）：悬停提示不够直观，直接挂在口左侧。
+   深色小药丸 + 描边，压在连线上也读得清；不接鼠标事件，口子的 28px 命中区不受影响。 */
+.cg-port-badge {
+  position: absolute;
+  right: 15px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 1px 4px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  background: rgba(13, 17, 24, .88);
+  color: #cfd7e2;
+  font-size: 9px;
+  line-height: 1.35;
+  letter-spacing: .3px;
+  white-space: nowrap;
+  pointer-events: none;
+}
 .cg-port:hover { border-color: #a7fff1; background: #123a36; }
 .cg-port.cg-linked { border-color: #a7fff1; background: #5eead4; box-shadow: 0 0 10px rgba(94, 234, 212, .5); }
 .cg-port.cg-linked:hover { background: #b9fff5; border-color: #ddfffa; }

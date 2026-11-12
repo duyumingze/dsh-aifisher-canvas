@@ -4,7 +4,9 @@
  * 三条硬约束（决定了「像不像专业调色软件」）：
  *   1. **中间纹理用 RGBA16F**（有 EXT_color_buffer_float 时）：8bit 下 lift/gamma/gain
  *      一叠就 banding，高光也会被截断；
- *   2. **计算在 linear**：贴图是 sRGB 编码，进 shader 先转线性，出结果再编码回 sRGB；
+ *   2. **计算在 linear**：贴图是 sRGB 编码，进 shader 先转线性，出结果再编码回 sRGB
+ *      （唯一例外是「色彩平衡」：它按亮度分区、数字是百分数，必须留在显示域，
+ *      见 compositor/colorBalance.ts 里的说明）；
  *   3. **按节点缓存**：key = 参数 + 上游版本。拖滑块只重算该节点及其下游，
  *      否则 4K 图一拖就卡死（Composite 现在就是全量重画）。
  *
@@ -25,6 +27,7 @@ import {
   type CompositorNode,
 } from './graph';
 import { buildCurveLut, curvesAreIdentity, type CurveParams } from './curves';
+import { colorBalanceShaderBody } from './colorBalance';
 import type { ScopeImage } from './scopes';
 
 const MAX_PARAMS = 16;
@@ -145,22 +148,10 @@ const EFFECT_BODIES: Partial<Record<CompositorKind, string>> = {
     c = (c - 0.5) * (1.0 + u_p[1]) + 0.5;
     fragColor = vec4(linearToSrgb(c), texel.a);
   `,
-  colorBalance: `
-    vec4 texel = texture(u_tex, v_uv);
-    vec3 c = srgbToLinear(texel.rgb);
-    vec3 lift = vec3(u_p[0], u_p[1], u_p[2]);
-    vec3 gamma = vec3(u_p[3], u_p[4], u_p[5]);
-    vec3 gain = vec3(u_p[6], u_p[7], u_p[8]);
-    // 偏移：界面上 25.00 是中性，+25 相当于线性加 0.5（整体提亮/压暗）
-    vec3 offset = vec3(u_p[9], u_p[10], u_p[11]) / 25.0 - vec3(1.0);
-    c = max(c + offset * 0.5, 0.0);
-    // ASC CDL 的 lift/gamma/gain：slope = gain - lift，offset = lift。
-    // 中性值（lift 0 / gamma 0 / gain 1）代进去正好是恒等，所以数字就是界面上的数字。
-    vec3 slope = max(gain - lift, vec3(0.0));
-    c = max(c * slope + lift, 0.0);
-    c = pow(c, vec3(1.0) / max(vec3(1.0) + gamma, vec3(0.05)));
-    fragColor = vec4(linearToSrgb(c), texel.a);
-  `,
+  // 四轮调色：暗部 / 中灰 / 亮部 / 偏移 各管一段亮度（用户 2026-11-12：
+  // 「调暗部会动全局，调高光会动别的」→ 改成显示域 + 亮度分区，公式与常数在
+  // compositor/colorBalance.ts，jsdom 回归验的是那里的参考实现）。
+  colorBalance: colorBalanceShaderBody(),
   whiteBalance: `
     vec4 texel = texture(u_tex, v_uv);
     vec3 c = srgbToLinear(texel.rgb);
@@ -284,34 +275,44 @@ const EFFECT_BODIES: Partial<Record<CompositorKind, string>> = {
 };
 
 /**
- * 双输入节点的 body（mix / alphaOver）。输入约定：A 口 = 上层，B 口 = 底层。
+ * 双输入节点的 body（mix / alphaOver）。
+ *
+ * 混合节点的 A / B 与系数口径按 Blender 的 Mix 定（用户 2026-11-12：「系数默认是 1
+ * 也就是白色时输出的是 b 端口，系数为 0 也就是黑色的时候输出的是 a 端口」）：
+ *   A 口 = 基底（系数 0 时原样输出），B 口 = 混合层（系数 1 时输出混合结果，正常模式下就是 B）。
+ * 所以混合公式一律以 A 为 backdrop、B 为 source；最后再按系数在 A 与混合结果之间插值。
+ * alphaOver 是「A 盖在 B 上」的合成语义，不参与这套翻转。
  */
 const DUAL_BODIES: Partial<Record<CompositorKind, string>> = {
   mix: `
-    vec4 top = texture(u_tex, v_uv);      // A 口
-    vec4 bottom = texture(u_tex2, v_uv);  // B 口
-    // 系数口（toPort=2）：接灰度/蒙版时按像素控混合量，乘在滑块上；
-    // 没接线时绑的是一张全白 1×1，等价于只用滑块（老图语义不变）。
+    vec4 inA = texture(u_tex, v_uv);      // A 口（基底）
+    vec4 inB = texture(u_tex2, v_uv);     // B 口（混合层）
+    // 系数口（toPort=2）：接灰度/蒙版时按像素控混合量，乘在数值系数上（数值=1 时整张图接管）；
+    // 没接线时绑的是一张全白 1×1，等价于只用数值系数。
     float f = clamp(u_p[0], 0.0, 1.0) * clamp(texture(u_tex3, v_uv).r, 0.0, 1.0);
     int mode = int(u_p[1] + 0.5);
-    vec3 a = srgbToLinear(top.rgb);
-    vec3 b = srgbToLinear(bottom.rgb);
-    vec3 r = a;
-    if (mode == 1) r = a * b;
-    else if (mode == 2) r = 1.0 - (1.0 - a) * (1.0 - b);
-    else if (mode == 3) r = mix(2.0 * a * b, 1.0 - 2.0 * (1.0 - a) * (1.0 - b), step(0.5, b));
-    else if (mode == 4) r = min(a, b);
-    else if (mode == 5) r = max(a, b);
-    else if (mode == 6) r = a / max(1.0 - b, 0.0001);
-    else if (mode == 7) r = 1.0 - (1.0 - a) / max(b, 0.0001);
-    else if (mode == 8) r = mix(b, a, step(0.5, a));
-    else if (mode == 9) r = (1.0 - 2.0 * b) * a * a + 2.0 * b * a;
-    else if (mode == 10) r = abs(a - b);
-    else if (mode == 11) r = a + b - 2.0 * a * b;
-    else if (mode == 12) r = a + b;
-    else if (mode == 13) r = a - b;
-    vec3 outColor = mix(b, r, f);
-    float alpha = mix(bottom.a, 1.0, f);
+    vec3 a = srgbToLinear(inA.rgb);
+    vec3 b = srgbToLinear(inB.rgb);
+    vec3 r = b;                                     // 正常：直接取 B
+    if (mode == 1) r = a * b;                       // 正片叠底
+    else if (mode == 2) r = 1.0 - (1.0 - a) * (1.0 - b);                    // 滤色
+    else if (mode == 3) r = mix(2.0 * a * b, 1.0 - 2.0 * (1.0 - a) * (1.0 - b), step(0.5, a)); // 叠加（按基底 A 分界）
+    else if (mode == 4) r = min(a, b);              // 变暗
+    else if (mode == 5) r = max(a, b);              // 变亮
+    else if (mode == 6) r = a / max(1.0 - b, 0.0001);                        // 颜色减淡
+    else if (mode == 7) r = 1.0 - (1.0 - a) / max(b, 0.0001);                // 颜色加深
+    else if (mode == 8) r = mix(2.0 * a * b, 1.0 - (1.0 - a) * (2.0 - 2.0 * b), step(0.5, b)); // 强光（按混合层 B 分界）
+    else if (mode == 9) {                           // 柔光
+      vec3 d = mix(((16.0 * a - 12.0) * a + 4.0) * a, sqrt(max(a, 0.0)), step(0.25, a));
+      r = mix(a - (1.0 - 2.0 * b) * a * (1.0 - a), a + (2.0 * b - 1.0) * (d - a), step(0.5, b));
+    }
+    else if (mode == 10) r = abs(a - b);            // 差值
+    else if (mode == 11) r = a + b - 2.0 * a * b;   // 排除
+    else if (mode == 12) r = a + b;                 // 相加
+    else if (mode == 13) r = a - b;                 // 相减
+    // 系数 0 = A 口原样，系数 1 = 完整混合（正常模式下即 B 口）。
+    vec3 outColor = mix(a, r, f);
+    float alpha = mix(inA.a, inB.a, f);
     fragColor = vec4(linearToSrgb(outColor), alpha);
   `,
   alphaOver: `
@@ -680,8 +681,8 @@ export class CompositorEngine {
    * 手绘蒙版节点的纹理：dataURL（黑白 PNG）→ 纹理，按节点缓存。
    *
    * 和 ensureInput 同一套「先给占位、载入完再重画」的做法：蒙版是一张普通图片，
-   * 只是来源是节点参数而不是主画布素材。空蒙版 = 全黑（= 什么都不混合），
-   * 没画过的节点接进混合系数口不会把整张图翻掉。
+   * 只是来源是节点参数而不是主画布素材。空蒙版 = 全黑（系数 0 = 输出混合节点的 A 口），
+   * 没画过的节点接进混合系数口不会把 A 口换成调色后的 B 口。
    */
   private ensureMask(node: CompositorNode): WebGLTexture {
     const params = paramsOf(node);
@@ -694,7 +695,7 @@ export class CompositorEngine {
       this.masks.delete(node.id);
     }
     if (!data) {
-      // 一条都没画：绑占位透明纹理（.r = 0），系数口拿到 0 = B 层原样
+      // 一条都没画：绑占位透明纹理（.r = 0），系数口拿到 0 = A 口原样输出
       const texture = this.emptyTexture();
       this.masks.set(node.id, { data: '', texture, loading: false });
       return texture;

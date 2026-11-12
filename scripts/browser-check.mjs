@@ -1792,6 +1792,8 @@ const HOST_PAGE = `<!doctype html>
         compositorWheels: compositorWheelsSteps,
         /** v1.79：混合节点三输入 + 深色下拉（?xcompositor=mix 场景，见 buildCompositorMixScene） */
         compositorMix: compositorMixSteps,
+        /** v1.96：混合系数 0=A / 1=B 的像素口径（?xcompositor=factor 场景，见 buildCompositorFactorScene） */
+        compositorFactor: compositorFactorSteps,
         /** v1.94：遮罩（Blender 样条；?xcompositor=mask 场景，见 buildCompositorMaskScene） */
         compositorMask: compositorMaskSteps,
       };
@@ -5878,6 +5880,9 @@ const HOST_PAGE = `<!doctype html>
       before: null,
       after: null,
       delta: null,
+      tonalBefore: null,
+      tonalAfter: null,
+      liftLevel: '',
       webgl2: false,
     };
     const buildCompositorWheelsScene = async () => {
@@ -6074,6 +6079,63 @@ const HOST_PAGE = `<!doctype html>
             compositorWheelsSteps.after[2] - compositorWheelsSteps.before[2],
           ];
         }
+
+        // ---- v1.97：暗部轮只许动暗部（用户 2026-11-12「调暗部会动全局，调高光会动别的」）
+        //
+        // 这一场的底图是 scopeChartPng 那张色彩测试卡（320×240）：
+        //   下半 y 从底往上是灰阶带（x=0 黑 → x=1 白），最底一行左右分别是深色块/肤色块。
+        // canvas 的绘制缓冲就是图像尺寸，所以 readPixels 的归一化坐标 = 图像坐标（y 从下往上）。
+        // 探针：左下深色块（暗部）、灰阶中点（中灰）、灰阶右端（高光）。
+        const pixelAt = (u, v) => {
+          const canvas = root.querySelector('.cg-preview-canvas');
+          const gl = canvas?.getContext('webgl2');
+          if (!canvas || !gl) return null;
+          const x = Math.min(canvas.width - 1, Math.max(0, Math.round(canvas.width * u)));
+          const y = Math.min(canvas.height - 1, Math.max(0, Math.round(canvas.height * v)));
+          const pixel = new Uint8Array(4);
+          gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+          return [pixel[0], pixel[1], pixel[2]];
+        };
+        const tonalProbes = () => ({
+          dark: pixelAt(0.2, 0.05),
+          mid: pixelAt(0.5, 0.3),
+          bright: pixelAt(0.95, 0.3),
+        });
+        // 偏移轮先复位（上面那一拖是「整幅偏红」，会污染下面的读数）
+        card
+          .querySelector('.cg-wheel-block[data-range="offset"] .cg-wheel-reset')
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await wait(300);
+        compositorWheelsSteps.tonalBefore = tonalProbes();
+        // 拖暗部轮的外圈（盘外 = 亮度环，往上 32px ≈ 亮度 +0.29）
+        const liftWheel = card.querySelector('.cg-wheel[data-range="lift"]');
+        if (liftWheel) {
+          const box = liftWheel.getBoundingClientRect();
+          const cx = box.left + box.width / 2;
+          const cy = box.top + box.height / 2;
+          const ringX = cx + box.width * 0.45;
+          liftWheel.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              button: 0, buttons: 1, clientX: ringX, clientY: cy,
+              pointerId: 122, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+            }),
+          );
+          liftWheel.dispatchEvent(
+            new PointerEvent('pointermove', { clientX: ringX, clientY: cy - 32, buttons: 1, bubbles: true }),
+          );
+          liftWheel.dispatchEvent(
+            new PointerEvent('pointerup', { button: 0, buttons: 0, clientX: ringX, clientY: cy - 32, bubbles: true }),
+          );
+          await wait(460);
+          compositorWheelsSteps.liftLevel =
+            card.querySelector('.cg-wheel-value[data-range="lift"][data-channel="master"]')?.value ?? '';
+        }
+        compositorWheelsSteps.tonalAfter = tonalProbes();
+        // 收尾回中性：交付图里四个轮子干干净净
+        card
+          .querySelector('.cg-wheel-block[data-range="lift"] .cg-wheel-reset')
+          ?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await wait(300);
         await wait(400);
       } catch (error) {
         compositorWheelsSteps.error = String((error && error.stack) || error);
@@ -6096,6 +6158,9 @@ const HOST_PAGE = `<!doctype html>
       card: false,
       ports: 0,
       portTitles: '',
+      portBadges: '',
+      factorLabel: '',
+      factorValue: '',
       nativeSelect: true,
       options: 0,
       dropdownInViewport: false,
@@ -6165,7 +6230,18 @@ const HOST_PAGE = `<!doctype html>
         compositorMixSteps.portTitles = card
           ? [...card.querySelectorAll('.cg-port.cg-in')].map((port) => port.title).join(' | ')
           : '';
+        compositorMixSteps.portBadges = card
+          ? [...card.querySelectorAll('.cg-port.cg-in .cg-port-badge')]
+              .map((badge) => badge.textContent)
+              .join(' | ')
+          : '';
         compositorMixSteps.nativeSelect = card ? !!card.querySelector('select') : true;
+        compositorMixSteps.factorLabel = String(
+          card?.querySelector('.cg-slider-label')?.textContent ?? '',
+        );
+        compositorMixSteps.factorValue = String(
+          card?.querySelector('.cg-param-number')?.value ?? '',
+        );
 
         // 打开模式下拉，停在打开状态（截图里的下拉列表要是深色的）
         card
@@ -6188,6 +6264,196 @@ const HOST_PAGE = `<!doctype html>
         compositorMixSteps.error = String((error && error.stack) || error);
       }
       compositorMixSteps.done = true;
+    };
+
+    /**
+     * 混合节点的系数口径（?xcompositor=factor，v1.96）。
+     * 用户 2026-11-12：「是要有一个系数，一个a一个b端口。系数默认是1也就是白色时输出的是b端口。
+     * 系数为0也就是黑色的时候输出的是a端口。系数可以接如黑白图像」。
+     *
+     * 这一场不接真实素材，用两张**相反的椭圆遮罩**当 A / B（灰度图正好也是系数能接的东西）：
+     *   A = 椭圆蒙版 + 反相 → 中心黑、角落白
+     *   B = 椭圆蒙版（默认）→ 中心白、角落黑
+     * 系数默认 1 → 应该看到 B；把数值系数拨到 0 → 应该看到 A。
+     * 读的是 WebGL 预览画布的真实像素，能直接证明 shader 里的 0/1 方向没接反。
+     */
+    const compositorFactorScene =
+      new URLSearchParams(location.search).get('xcompositor') === 'factor';
+    const compositorFactorSteps = {
+      opened: false,
+      nodes: 0,
+      mixInputEdges: 0,
+      totalEdges: 0,
+      factorValue: '',
+      factorLabel: '',
+      portTitles: '',
+      defaultCenter: null,
+      defaultCorner: null,
+      zeroCenter: null,
+      zeroCorner: null,
+      error: '',
+      done: false,
+    };
+    const buildCompositorFactorScene = async () => {
+      if (!compositorFactorScene) return;
+      try {
+        applyDshDesktopEmulation();
+        await until(() => document.querySelector('[data-fisherai-open-compositor]'), 20000);
+        await wait(400);
+        document
+          .querySelector('[data-fisherai-open-compositor]')
+          .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await until(() => document.querySelector('.cg-root'), 8000);
+        await wait(600);
+        const root = document.querySelector('.cg-root');
+        const stage = root.querySelector('.cg-stage');
+        compositorFactorSteps.opened = true;
+
+        const knownIds = () => new Set([...root.querySelectorAll('.cg-node')].map((el) => el.dataset.nodeId));
+        /** Shift+A 搜一个节点、回车建出来、按舞台比例放下，返回新节点 id。 */
+        const createAt = async (query, title, fx, fy, pointerId) => {
+          const before = knownIds();
+          document.dispatchEvent(
+            new KeyboardEvent('keydown', { key: 'a', shiftKey: true, bubbles: true, cancelable: true }),
+          );
+          await wait(200);
+          const search = document.querySelector('.cg-menu-search input');
+          if (search) {
+            search.value = query;
+            search.dispatchEvent(new Event('input', { bubbles: true }));
+            await wait(200);
+            search.dispatchEvent(
+              new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+            );
+            await wait(240);
+          }
+          const card = [...root.querySelectorAll('.cg-node')].find((el) => {
+            const id = el.dataset.nodeId;
+            return (
+              !before.has(id) &&
+              el.querySelector('.cg-node-title')?.textContent?.trim() === title
+            );
+          });
+          if (!card) return '';
+          const stageBox = stage.getBoundingClientRect();
+          const targetX = stageBox.left + stageBox.width * fx;
+          const targetY = stageBox.top + stageBox.height * fy;
+          const box = card.getBoundingClientRect();
+          const deltaX = targetX - (box.left + box.width / 2);
+          const deltaY = targetY - (box.top + box.height / 2);
+          window.dispatchEvent(new PointerEvent('pointermove', { clientX: 200, clientY: 200, bubbles: true }));
+          window.dispatchEvent(
+            new PointerEvent('pointermove', {
+              clientX: 200 + deltaX, clientY: 200 + deltaY, bubbles: true,
+            }),
+          );
+          stage.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              button: 0, buttons: 1, clientX: 200 + deltaX, clientY: 200 + deltaY,
+              pointerId, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+            }),
+          );
+          await wait(320);
+          return card.dataset.nodeId || '';
+        };
+
+        const aId = await createAt('tymb', '椭圆蒙版', 0.26, 0.34, 171);
+        const bId = await createAt('tymb', '椭圆蒙版', 0.26, 0.7, 172);
+        const mixId = await createAt('hh', '混合', 0.64, 0.5, 173);
+        compositorFactorSteps.nodes = [aId, bId, mixId].filter(Boolean).length;
+
+        // A 反相：中心黑、角落白。B 保持默认（中心白、角落黑）。
+        if (aId) {
+          root
+            .querySelector('[data-node-id="' + aId + '"] .cg-param input[type="checkbox"]')
+            ?.click();
+          await wait(280);
+        }
+
+        const cardOf = (id) => (id ? root.querySelector('[data-node-id="' + id + '"]') : null);
+        /** 从输出口拖一根线到目标节点的指定输入口（和真手势同一套 pointer 事件）。 */
+        const link = async (fromId, fromPort, toId, toPort, pointerId) => {
+          const out = cardOf(fromId)?.querySelectorAll('.cg-port.cg-out')[fromPort];
+          const input = cardOf(toId)?.querySelector(
+            '.cg-port.cg-in[data-port="' + toPort + '"]',
+          );
+          if (!out || !input) return false;
+          const fromBox = out.getBoundingClientRect();
+          const toBox = input.getBoundingClientRect();
+          const at = { clientX: fromBox.left + fromBox.width / 2, clientY: fromBox.top + fromBox.height / 2 };
+          const to = { clientX: toBox.left + toBox.width / 2, clientY: toBox.top + toBox.height / 2 };
+          out.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              button: 0, buttons: 1, ...at,
+              pointerId, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+            }),
+          );
+          window.dispatchEvent(new PointerEvent('pointermove', { buttons: 1, ...to, bubbles: true }));
+          window.dispatchEvent(
+            new PointerEvent('pointerup', { button: 0, buttons: 0, ...to, bubbles: true }),
+          );
+          await wait(280);
+          return true;
+        };
+
+        if (aId && bId && mixId) {
+          await link(aId, 0, mixId, 0, 174);
+          await link(bId, 0, mixId, 1, 175);
+          // Shift+点击混合节点 = 接到预览（替换掉默认「输入→预览」那条）
+          const mixCard = cardOf(mixId);
+          const mixBox = mixCard?.getBoundingClientRect();
+          if (mixCard && mixBox) {
+            mixCard.dispatchEvent(
+              new PointerEvent('pointerdown', {
+                button: 0, buttons: 1, shiftKey: true,
+                clientX: mixBox.left + 20, clientY: mixBox.top + 12,
+                pointerId: 176, pointerType: 'mouse', isPrimary: true, bubbles: true, cancelable: true,
+              }),
+            );
+          }
+          compositorFactorSteps.portTitles = [...(mixCard?.querySelectorAll('.cg-port.cg-in') ?? [])]
+            .map((port) => port.title)
+            .join(' | ');
+          compositorFactorSteps.factorLabel = String(
+            mixCard?.querySelector('.cg-slider-label')?.textContent ?? '',
+          );
+          compositorFactorSteps.factorValue = String(
+            mixCard?.querySelector('.cg-param-number')?.value ?? '',
+          );
+          const report = window.__FISHERAI_COMPOSITOR__?.report?.() ?? {};
+          compositorFactorSteps.totalEdges = Number(report.edges?.length ?? 0);
+          compositorFactorSteps.mixInputEdges = Array.isArray(report.edges)
+            ? report.edges.filter((edge) => edge.to === mixId).length
+            : -1;
+          await wait(900);
+
+          const sample = (fx, fy) => {
+            const canvas = root.querySelector('.cg-preview-canvas');
+            const gl = canvas?.getContext('webgl2');
+            if (!canvas || !gl) return null;
+            const pixel = new Uint8Array(4);
+            const x = Math.min(canvas.width - 1, Math.max(0, Math.round(canvas.width * fx)));
+            const y = Math.min(canvas.height - 1, Math.max(0, Math.round(canvas.height * fy)));
+            gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+            return [pixel[0], pixel[1], pixel[2]];
+          };
+          compositorFactorSteps.defaultCenter = sample(0.5, 0.5);
+          compositorFactorSteps.defaultCorner = sample(0.15, 0.15);
+
+          // 系数拨到 0：输出 A 口（中心该变黑、角落该变白）
+          const number = cardOf(mixId)?.querySelector('.cg-param-number');
+          if (number) {
+            number.value = '0';
+            number.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+          await wait(700);
+          compositorFactorSteps.zeroCenter = sample(0.5, 0.5);
+          compositorFactorSteps.zeroCorner = sample(0.15, 0.15);
+        }
+      } catch (error) {
+        compositorFactorSteps.error = String((error && error.stack) || error);
+      }
+      compositorFactorSteps.done = true;
     };
 
     /**
@@ -6661,6 +6927,7 @@ const HOST_PAGE = `<!doctype html>
     void buildCompositorPanelScene();
     void buildCompositorWheelsScene();
     void buildCompositorMixScene();
+    void buildCompositorFactorScene();
     void buildCompositorMaskScene();
   </script>
 </body>
@@ -7147,6 +7414,12 @@ const SCENES = [
    */
   ['compositor-mix', `${ORIGIN}/?resume=${compositorPanelProjectId}&xcompositor=mix`, `?resume=${compositorPanelProjectId}&xcompositor=mix`,
     (probe) => probe.compositorMix?.done === true, 28000],
+  /**
+   * 混合节点系数口径（v1.96）：用户 2026-11-12 定的 0=A / 1=B。
+   * 两张相反的椭圆遮罩当 A/B，读预览像素验证默认 1 显示 B、拨到 0 显示 A。
+   */
+  ['compositor-factor', `${ORIGIN}/?resume=${compositorPanelProjectId}&xcompositor=factor`, `?resume=${compositorPanelProjectId}&xcompositor=factor`,
+    (probe) => probe.compositorFactor?.done === true, 32000],
   /**
    * 遮罩（v1.94）：用户 2026-11-11「在调色面板做绘制功能。我需要遮罩功能，
    * 但是要用混合节点来实现，接入黑白遮罩图像来实现。参考 blender 的遮罩操作方式」。
@@ -8851,6 +9124,30 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
           Number(scene.delta[0]) >= 8 &&
           Number(scene.delta[0]) - Number(scene.delta[1]) >= 8,
         `before=${JSON.stringify(scene.before)} after=${JSON.stringify(scene.after)} delta=${JSON.stringify(scene.delta)}`);
+      // ---- v1.97：三个色轮各管一段亮度（用户 2026-11-12「调暗部会动全局，调高光会动别的」）
+      // 探针落在色彩测试卡上：左下深色块 / 灰阶中点 / 灰阶右端。拖暗部亮度环后，
+      // 只有深色块该动，中灰与高光必须一动不动（±2/255 以内，含 8bit 抖动）。
+      const before = scene.tonalBefore;
+      const after = scene.tonalAfter;
+      const luma = (rgb) => (Array.isArray(rgb) ? 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2] : 0);
+      const darkDelta = luma(after?.dark) - luma(before?.dark);      const midDelta = Array.isArray(after?.mid) && Array.isArray(before?.mid)
+        ? Math.max(...after.mid.map((value, index) => Math.abs(value - before.mid[index])))
+        : 999;
+      const brightDelta = Array.isArray(after?.bright) && Array.isArray(before?.bright)
+        ? Math.max(...after.bright.map((value, index) => Math.abs(value - before.bright[index])))
+        : 999;
+      report('拖暗部轮的外圈（亮度）读到了非中性值（手势真落在暗部轮上）',
+        Number(scene.liftLevel) > 0.05,
+        `liftLevel=${scene.liftLevel} before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
+      report('暗部轮真的抬起了黑位（深色块明显变亮）',
+        darkDelta >= 18,
+        `darkΔ=${darkDelta.toFixed(1)} ${JSON.stringify(before?.dark)} → ${JSON.stringify(after?.dark)}`);
+      report('暗部轮不动中间灰（|Δ| ≤ 2，旧实现在这里整段跟着走）',
+        midDelta <= 2,
+        `midΔ=${midDelta} ${JSON.stringify(before?.mid)} → ${JSON.stringify(after?.mid)}`);
+      report('暗部轮不动高光（|Δ| ≤ 2，旧实现会把高光也染色）',
+        brightDelta <= 2,
+        `brightΔ=${brightDelta} ${JSON.stringify(before?.bright)} → ${JSON.stringify(after?.bright)}`);
     } else {
       console.log(`[browser] SKIP  ${label}: 这个 headless 环境没有 WebGL2，跳过像素断言`);
     }
@@ -8873,8 +9170,16 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
       `search=${scene.search} results=${scene.searchResults}`);
     report('混合节点卡片建出来了', scene.card === true);
     report('混合节点有三个输入口（A / B / 系数）',
-      Number(scene.ports) === 3 && /A 上层/.test(String(scene.portTitles)) && /系数/.test(String(scene.portTitles)),
+      Number(scene.ports) === 3 &&
+        /A（系数 0/.test(String(scene.portTitles)) &&
+        /B（系数 1/.test(String(scene.portTitles)) &&
+        /系数/.test(String(scene.portTitles)),
       `ports=${scene.ports} titles=${scene.portTitles}`);
+    report('系数是真数字 1.000（0..1 量程，不是 100% 百分比）',
+      scene.factorLabel === '系数' && scene.factorValue === '1.000',
+      `label=${scene.factorLabel} value=${scene.factorValue}`);
+    report('三个输入口外挂着 A / B / 系数 的小标（不用悬停也能分辨）',
+      scene.portBadges === 'A | B | 系数', `badges=${scene.portBadges}`);
     report('混合模式不再用原生 select（弹层白板）', scene.nativeSelect === false);
     report('点开模式下拉：14 个选项、整块在视口内、底色是深色玻璃（不是纯白）',
       Number(scene.options) === 14 &&
@@ -8882,6 +9187,37 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
         /rgba?\(/.test(String(scene.dropdownBg)) &&
         !/255,\s*255,\s*255/.test(String(scene.dropdownBg)),
       `options=${scene.options} inViewport=${scene.dropdownInViewport} bg=${scene.dropdownBg}`);
+  }
+
+  /**
+   * 混合系数口径（?xcompositor=factor，v1.96）：用户 2026-11-12 原话
+   * 「系数默认是1也就是白色时输出的是b端口。系数为0也就是黑色的时候输出的是a端口」。
+   * 两张相反的椭圆遮罩当 A/B，读预览像素看默认 1 显示 B、拨到 0 显示 A。
+   */
+  if (label === 'compositor-factor') {
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const scene = probe.compositorFactor ?? {};
+    report('系数语义场景跑完了（没有半途报错）', scene.done === true && !scene.error,
+      String(scene.error ?? '').slice(0, 300));
+    report('建出两张椭圆遮罩 + 一个混合节点，A/B 两条线都接上',
+      Number(scene.nodes) === 3 && Number(scene.mixInputEdges) === 2,
+      `nodes=${scene.nodes} mixInputEdges=${scene.mixInputEdges} edges=${scene.totalEdges} ports=${scene.portTitles}`);
+    report('系数数值框默认 1.000，标签是「系数」',
+      scene.factorLabel === '系数' && scene.factorValue === '1.000',
+      `label=${scene.factorLabel} value=${scene.factorValue}`);
+    if (scene.defaultCenter) {
+      report('系数 1（白）= 输出 B 口：中心亮、角落暗',
+        Number(scene.defaultCenter[0]) > 150 && Number(scene.defaultCorner?.[0] ?? 255) < 100,
+        `center=${JSON.stringify(scene.defaultCenter)} corner=${JSON.stringify(scene.defaultCorner)}`);
+      report('系数 0（黑）= 输出 A 口：中心暗、角落亮',
+        Number(scene.zeroCenter?.[0] ?? 255) < 100 && Number(scene.zeroCorner?.[0] ?? 0) > 150,
+        `center=${JSON.stringify(scene.zeroCenter)} corner=${JSON.stringify(scene.zeroCorner)}`);
+    } else {
+      console.log(`[browser] SKIP  ${label}: 这个 headless 环境读不到预览像素`);
+    }
   }
 
   /**

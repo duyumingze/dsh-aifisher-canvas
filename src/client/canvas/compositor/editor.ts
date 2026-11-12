@@ -69,6 +69,7 @@ import {
   createDefaultGraph,
   edgeId,
   evaluationOrder,
+  inputPortBadge,
   inputPortLabel,
   inputPortsFor,
   insertNodeIntoEdge,
@@ -1183,6 +1184,15 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       port.dataset.side = 'in';
       port.style.top = `${portTopFallback(node.kind, 'in', index)}px`;
       port.title = inputPortLabel(node.kind, index);
+      // A / B / 系数 这类多输入口：名字直接挂在口外，悬停提示不够直观
+      const badge = inputPortBadge(node.kind, index);
+      if (badge) {
+        const tag = document.createElement('span');
+        tag.className = 'cg-port-badge';
+        tag.textContent = badge;
+        tag.setAttribute('aria-hidden', 'true');
+        port.append(tag);
+      }
       element.append(port);
     }
     const outputs = outputPortCount(node.kind, options.images.length);
