@@ -301,10 +301,15 @@ export function CanvasColorGradeNode(
           graph,
           title: '调色结果',
         });
+        const update = props.onUpdate as
+          | ((id: string, patch: Record<string, unknown>) => void)
+          | undefined;
         if (!placed?.ok) {
-          const update = props.onUpdate as
-            | ((id: string, patch: Record<string, unknown>) => void)
-            | undefined;
+          // 桥在、但没落成（最典型：这个调色节点已经被删了）。以前这里悄悄退回「只写回」，
+          // 画布上什么都没多，合成器却报「已保存，正在写回画布」—— 用户 2026-11-12 看到的就是
+          // 「调色节点和新的输出图像都消失了」。现在把失败抛给合成器，让它把原因说出来。
+          if (grade?.place) throw new Error(placed?.error || '调色结果没能落到画布上。');
+          // 旧页面没有落位桥：退回 v1.70 的只写回。
           update?.(data.id, { resultUrl: nextUrl, compositorGraph: graph, status: 'success' });
         }
       },

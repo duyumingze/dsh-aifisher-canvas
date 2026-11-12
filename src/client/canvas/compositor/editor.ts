@@ -3912,6 +3912,16 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   };
 
   const onKeyDown = (event: KeyboardEvent): void => {
+    // 合成器是全屏模态层（`.cg-root` 盖满视口）：键盘在这里属于调色面板，一个键都不许再传给
+    // 主画布。用户 2026-11-12 报「再次调色后保存退出，调色节点和新的输出图像会消失」——
+    // 根因就在这一行：以前只 `preventDefault()` 不 `stopPropagation()`，事件继续冒泡到
+    // window，主画布的全局快捷键（vendor `canvasCommands` 的 A / X / Delete / Ctrl+Z）
+    // 于是同时生效：在面板里按 X 删掉一张合成节点，画布上也把**选中的调色节点**删了
+    // （打开的正是它），而删除节点会顺手清掉子节点的连线 —— 下一轮「保存并退出」的
+    // 落图就因为找不到调色节点而静默什么都不放。
+    // 注意只能挂在这一个 document 冒泡处理里：合成器自己的其它键处理都在 document 的
+    // capture 阶段或根节点上，先于这里执行，不受影响。
+    event.stopPropagation();
     // 遮罩模式（预览里直接画）独占键盘：Shift+A 加形状、B 画笔、G/R/S 变换、Esc 回预览。
     // 它没接的键也不往下走 —— 画遮罩时按 A 不该顺手把画布上的节点全选掉。
     if (session_.maskMode && maskEditor?.handleKey(event)) return;
@@ -4095,12 +4105,22 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   const upstreamIsRawInput = (targetId: string): boolean =>
     targetIsRawInput(session_.graph, targetId);
 
+  /**
+   * 上一次「应用」是不是已经导出完成、只差回写画布（`onApply` 抛错）。
+   *
+   * 为什么要记这一笔：回写失败时图其实已经渲染并落进媒体库了，再按 Esc 只是把同一个
+   * 错误再抛一遍，人就被困在面板里（Esc 是「退出即保存」，以前它只会重试 apply）。
+   * 典型场景：调色节点已经被删了 —— 主画布那边没地方落图，重试多少次都一样。
+   */
+  let applyLostCanvas = false;
+
   const apply = async (): Promise<boolean> => {
     const engine = session_.engine;
     if (!engine) {
       session_.toast('合成器引擎还没准备好', true);
       return false;
     }
+    applyLostCanvas = false;
     // 导哪个口是纯图逻辑，见 graph.ts 的 chooseApplyTargets（回归直接验）
     const targets = chooseApplyTargets(session_.graph);
     if (!targets.length) {
@@ -4108,6 +4128,8 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       return false;
     }
     applyButton.disabled = true;
+    /** 图导出成功没有：失败发生在这之后（onApply 抛错）才叫「回写画布失败」。 */
+    let exported = false;
     try {
       engine.setGraph(session_.graph);
       engine.setSize(session_.size.width, session_.size.height);
@@ -4140,6 +4162,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
             '，这次按预览（VIEWER）的结果保存。',
         );
       }
+      exported = true;
       await options.onApply({
         graph: {
           ...session_.graph,
@@ -4158,7 +4181,10 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       closeCompositorEditor();
       return true;
     } catch (error) {
-      // 以前这里只包住 onApply：导出阶段抛错会变成「点保存没反应」，一律报出来
+      // 以前这里只包住 onApply：导出阶段抛错会变成「点保存没反应」，一律报出来。
+      // 只有「图已经导出、回写画布这一步失败」才记 applyLostCanvas：这时按 Esc 再重试
+      // 只是把同一个错再抛一遍，exitWithSave 会直接关面板而不是把人困住。
+      if (exported) applyLostCanvas = true;
       session_.toast(error instanceof Error ? error.message : String(error), true);
       return false;
     } finally {
@@ -4172,6 +4198,12 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   /** Esc / 退出：有改动就保存并落图（用户 2026-10-29：「希望按退出也会输出保存图像」）。 */
   const exitWithSave = async (): Promise<void> => {
     if (!session_.edited) {
+      closeCompositorEditor();
+      return;
+    }
+    // 上一次回写画布就失败了（图已导出、画布那边没落成）：再按 Esc 只是重抛同一个错。
+    // 直接关掉，不让人卡在面板里；错误已经 toast 过了。
+    if (applyLostCanvas) {
       closeCompositorEditor();
       return;
     }

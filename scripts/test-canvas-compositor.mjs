@@ -2308,6 +2308,61 @@ if (button) {
   check('全选抓取这一轮结束后能正常关掉', !doc.querySelector('.cg-root'));
 }
 
+// ---------------------------------------------------------------- 7.10) 合成器开着时，主画布的快捷键必须让路
+//
+// 用户 2026-11-12 报障：「调整完颜色之后点击保存退出后正常，再次调色后点击保存退出到主页面，
+// 调色节点和新的输出图像会消失」。
+// 现场取证（canvas.json 里剩下的两条「调色结果」）：parentIds=[] / sourcePortIndices=[]
+// —— 正是 deleteCanvasNodes 删父节点时顺手清子节点连线的形状。也就是说调色节点是在
+// 合成器开着的时候被主画布的全局快捷键删掉的：面板里按 X 删合成节点，同一个按键顺着冒泡
+// 也删了画布上选中的那个调色节点（打开面板点的就是它）。随后「保存并退出」找不到源节点，
+// 落图静默什么也不做 —— 用户看到的就是「节点和新输出一起消失」。
+//
+// 两道闸一起验：合成器这层 stopPropagation（拦住冒泡到 window 的画布监听），
+// 主画布这层看 `[data-fisherai-compositor]`（拦住 window 捕获阶段的那份监听）。
+
+{
+  const openButton = doc.querySelector('[data-fisherai-open-compositor]');
+  openButton?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await settle(300);
+  const overlay = doc.querySelector('.cg-root');
+  check('再做一轮：合成器能打开', !!overlay);
+  const canvasNodes = () => doc.querySelectorAll('#canvas-viewport-content [data-node-id]').length;
+  const beforeCount = canvasNodes();
+  const key = (target, value) =>
+    target.dispatchEvent(
+      new window.KeyboardEvent('keydown', { key: value, bubbles: true, cancelable: true }),
+    );
+  if (overlay) {
+    // ① 在合成器里按 A / X：面板自己的全选 + 删除照样工作，但画布的选中不能被带着走
+    key(overlay, 'a');
+    await settle(30);
+    key(overlay, 'x');
+    await settle(60);
+  }
+  check(
+    '合成器里按 A / X：主画布的节点一个都不少（以前会把选中的调色节点删掉）',
+    canvasNodes() === beforeCount,
+    `${beforeCount} -> ${canvasNodes()}`,
+  );
+  check(
+    '调色节点还在画布上（不是只剩两条断了线的「调色结果」）',
+    !!doc.querySelector('[data-node-id="grade-1"]'),
+  );
+  // ② 就算事件直接打在 window 上（绕过合成器那层 stopPropagation），主画布也要自己让路
+  key(window, 'a');
+  await settle(30);
+  key(window, 'x');
+  await settle(60);
+  check(
+    '合成器开着时，主画布的全局快捷键整体让路（A / X 都不生效）',
+    canvasNodes() === beforeCount && !!doc.querySelector('[data-node-id="grade-1"]'),
+    `${beforeCount} -> ${canvasNodes()}`,
+  );
+  await discardClose();
+  check('这一轮结束后合成器还能关掉', !doc.querySelector('.cg-root'));
+}
+
 // ---------------------------------------------------------------- 8) 「应用」后落一张成品图
 //
 // 用户：「退出调色节点时应该会在调色节点后添加调整好的图像」。

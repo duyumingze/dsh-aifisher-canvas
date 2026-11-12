@@ -6,6 +6,42 @@
 > 对不上的（v1.70–v1.76 调色面板迭代、v1.82–v1.83 整页扩图）按批次合并并保留日期，
 > 不再写「未发布」这种既不是版本也不是日期的标题。
 
+## v1.97.2 — 2026-11-12
+
+### 修：调色面板开着时按 X / Delete（还有 A、Ctrl+Z）会把主画布的调色节点一起删掉
+
+用户原话（2026-11-12）：**「发现一个bug，调整完颜色之后点击保存退出后正常，再次调色后点击保存退出到主页面后调色节点和新的输出图像会消失」**。
+
+现场取证（`$DSH_HOME/storages/dsh-aifisher-canvas/canvas.json`）把结论钉死了：消失的调色节点在库里
+**根本没有留下残留**，而它下游那两张「调色结果」变成了 `parentIds: []` / `sourcePortIndices: []` ——
+这正是 `deleteCanvasNodes`（vendor `canvasClipboard.ts`）删掉父节点时**顺手清子节点连线**的形状。
+也就是说：调色节点是在合成器开着的时候被**主画布的全局快捷键**删掉的。
+
+- **病根**：合成器是全屏模态层（`.cg-root`），它的 keydown 只 `preventDefault()`、**没有
+  `stopPropagation()`**；主画布的快捷键挂在 `window` 上（vendor `canvasCommands.ts`）。于是面板里
+  按 **X / Delete / Backspace 删一张合成节点**，同一个按键继续冒泡，把画布上**选中的那个节点**也删了
+  —— 而打开面板点的正是调色节点。`A`（全选）、`Alt+A`、`Ctrl+Z` 同样会漏下去。
+  删完之后再点「保存并退出」，`__FISHERAI_CANVAS_GRADE_RESULT__.place()` 找不到源节点，
+  只回一句 `找不到调色节点` 就静默收工 —— 用户看到的就是「调色节点和新的输出图像一起消失」。
+- **两道闸**：
+  1. 合成器这层：`editor.ts` 的 document 冒泡处理第一行就 `stopPropagation()`（全屏模态层独占键盘，
+     一个键都不往 window 传；面板自己的其它键处理都在 capture 阶段或根节点上，先执行，不受影响）。
+  2. 主画布这层：vendor 补丁 3.8x 的快捷键处理开头加一道
+     `if (document.querySelector('[data-fisherai-compositor]')) return;` —— 判定与切刀
+     `knife.ts` 的 `compositorOwnsPointer()` 同一个属性，挡住 window 捕获阶段那份监听。
+- **顺手不再骗人**：`place()` 失败时（典型就是调色节点已经被删）以前会悄悄退回「只写回」，
+  合成器照样报「已保存，正在写回画布」，画布上什么都没有。现在把错误抛回合成器显示出来；
+  同时记住「图已导出、只是回写画布失败」，这时再按 `Esc` 直接关面板，不再拿同一个错把人困在里面。
+
+### 回归
+
+- `test-canvas-compositor` 新增 5 项：合成器里按 `A` / `X` 之后主画布节点一个都不少、调色节点还在、
+  事件直接打在 `window` 上（绕过合成器那层）主画布也整体让路 —— 全量 **293 项** 全绿。
+- 反证也做了：把新回归拿去跑**旧产物**（未打补丁的 `lib/canvas/canvas-app.js`）→ 5 项全红，
+  现场正是 `2 -> 0`（两个画布节点全被删）与 `place()` 回 `找不到调色节点`，与用户报障一致。
+- `test-canvas-blender-keys`（19 项）、`test-canvas-save`（19 项）、`test-panel-exit`（26 项）全绿；
+  `typecheck` src 0 error。
+
 ## v1.97.1 — 2026-11-12
 
 ### 修：调色面板「全选之后按 G 只动一个」「按 G 之后按 X/Y 没锁轴」

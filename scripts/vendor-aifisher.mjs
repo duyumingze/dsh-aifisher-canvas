@@ -4056,10 +4056,15 @@ export function CanvasColorGradeNode(
           graph,
           title: '调色结果',
         });
+        const update = props.onUpdate as
+          | ((id: string, patch: Record<string, unknown>) => void)
+          | undefined;
         if (!placed?.ok) {
-          const update = props.onUpdate as
-            | ((id: string, patch: Record<string, unknown>) => void)
-            | undefined;
+          // 桥在、但没落成（最典型：这个调色节点已经被删了）。以前这里悄悄退回「只写回」，
+          // 画布上什么都没多，合成器却报「已保存，正在写回画布」—— 用户 2026-11-12 看到的就是
+          // 「调色节点和新的输出图像都消失了」。现在把失败抛给合成器，让它把原因说出来。
+          if (grade?.place) throw new Error(placed?.error || '调色结果没能落到画布上。');
+          // 旧页面没有落位桥：退回 v1.70 的只写回。
           update?.(data.id, { resultUrl: nextUrl, compositorGraph: graph, status: 'success' });
         }
       },
@@ -5004,6 +5009,12 @@ function canvasHotkeyLetter(event: KeyboardEvent): string {
         (event.target instanceof Element && isTextEditor(event.target))
       )
         return;
+      // 调色合成器（全屏模态层 .cg-root）开着时，画布快捷键一律让路。
+      // 用户 2026-11-12 报「再次调色后点击保存退出到主页面，调色节点和新的输出图像会消失」：
+      // 合成器里按 X 删的是合成节点，同一个按键以前会顺着冒泡把画布上**选中的调色节点**
+      // 也删掉（打开合成器点的就是它），子节点的连线被一起清掉，下一轮落图就找不到源节点了。
+      // 判定和打标在 src/client/canvas/knife.ts 的 compositorOwnsPointer() 是同一个属性。
+      if (document.querySelector('[data-fisherai-compositor]')) return;
       const key = canvasHotkeyLetter(event);
       // A = 全选节点 / Alt+A = 取消选择（Blender 手感；Ctrl+A 在画布里选节点而不是选网页文字）。
       // 用户 2026-11-12：「节点全选之后按 g 移动只会移动一个」——先得有个全选的口令。
