@@ -13,6 +13,7 @@
 
 import type { CompositorGraph, CompositorInputImage } from './graph';
 import { closeCompositorEditor, compositorReport, isCompositorOpen, openCompositorEditor } from './editor';
+import { PLUGIN_VERSION } from '../../../pluginVersion';
 
 export interface CompositorNodeSavePayload {
   resultUrl: string;
@@ -115,9 +116,10 @@ export function installCompositorBridge(): { dispose: () => void } {
   holder.__FISHERAI_COMPOSITOR__ = bridge;
   // 版本戳：排查「刷了没生效」时先看控制台这一行（画布产物是浏览器内存里的旧模块，
   // Ctrl+F5 才会重新 import）。有它就不必再猜是缓存还是没构建。
+  // v1.97.3：版本号改读 src/pluginVersion.ts（构建时从 package.json 内联），不再手抄。
   try {
     console.info(
-      '[dsh-aifisher-canvas] v1.97.2 · 调色合成器已就绪（顶栏已让出系统标题栏；Shift+A 可打字搜节点；混合节点 A/B/系数，系数 0=出 A、1=出 B；遮罩在预览左上角切「遮罩」直接画；合成器里的按键不再漏给主画布）',
+      `[dsh-aifisher-canvas] v${PLUGIN_VERSION} · 调色合成器已就绪（顶栏已让出系统标题栏；Shift+A 可打字搜节点；混合节点 A/B/系数，系数 0=出 A、1=出 B；遮罩在预览左上角切「遮罩」直接画；合成器里的按键不再漏给主画布）`,
     );
   } catch {
     // 控制台不可用不影响功能

@@ -45,7 +45,8 @@ installCanvasPagesBridge()                          // window.__FISHERAI_CANVAS_
 
 旧版设置对话框里的面板一个没丢，全部改成**页内宿主**（`data-fisherai-settings-host=<id>`）：
 开源服务、闭源服务、自定义通道在「服务与通道」；下载目录与项目数据目录在「项目与数据」；
-检查更新（桌面版才有）在「高级与关于」。个人资料（昵称 / 头像）也搬进「高级与关于」。
+检查更新（v1.98 换成我们自己的，桌面版那个在 DSH 里是空壳）在「高级与关于」。
+个人资料（昵称 / 头像）也搬进「高级与关于」。
 
 ---
 
@@ -100,7 +101,7 @@ installCanvasPagesBridge()                          // window.__FISHERAI_CANVAS_
 | 开源服务 | **整页搬进「服务与通道」**（ComfyUI 目录 / 启动 / 扩展 / 日志） | vendor `mountLocalRuntimeSettings` + 宿主 `local-service` |
 | 闭源服务 | **搬进「服务与通道」**（来源卡片 + 自定义通道） | vendor `mountSourceSettings` + 宿主 `source` / `channels` |
 | 个人资料 | 昵称 + 头像（「高级与关于」） | `__FISHERAI_LOCAL_USER__` / `__FISHERAI_LOCAL_PROFILE__` |
-| 检查更新 | 仅桌面版有（「高级与关于」），DSH 里宿主为空、自动隐藏 | vendor `mountLocalUpdateSettings` + 宿主 `update` |
+| 检查更新 | **可用**（「高级与关于」，v1.98）：查 GitHub → 已是最新 / 有新版本；点「更新」= 用户确认 → 新开一条画布对话、把更新指令填进输入框，发送仍由用户按；桥不在时退成复制指令 | host `GET /update/status`（`?force=1` 强制重查）+ `CanvasUpdatePanel`（宿主 `update`）+ `window.__FISHERAI_CANVAS_COMPOSE__`（CanvasChatDock） |
 | 高级 / 关于 | ~~打开旧版设置对话框~~（v1.85 移除）/ 跳到项目库 / 版本 | — |
 
 页面上每个未接入的按钮都带一个 `<span class="afs-draft">设计稿</span>`，点不动；
@@ -129,13 +130,18 @@ installCanvasPagesBridge()                          // window.__FISHERAI_CANVAS_
 | `data-fisherai-settings-background` | 背景图行（`set` / `empty`） |
 | `data-fisherai-settings-host="<id>"` | 旧对话框面板的页内宿主（`local-service / source / channels / data-dir / downloads / update`） |
 | `data-fisherai-settings-profile` | 个人资料块（`-profile-name` / `-profile-avatar`） |
+| `data-fisherai-update="panel"` + `-state="idle\|checking\|latest\|behind\|error"` | 检查更新面板（`-check` / `-message` / `-upgrade` / `-open` / `-note` / `-actions`） |
 | `data-fisherai-settings-goto-host` | 目录两行的「更换」（滚到宿主） |
 | `data-fisherai-settings-reset` | 恢复默认 |
 | `data-fisherai-settings-advanced` | **已移除**（回归断言它不存在） |
 
 诊断：`canvasAppBuildInfo().pages`（开了哪一屏、分区 key、桥在不在）、`.home`（底下是不是
 vendor 看板、自动开过项目库没有、拦下过几次开设置请求）与 `.page`；host `/status` 里多一段
-`projects.endpoints`。
+`projects.endpoints`、`version`（跑着的插件版本）与 `update`（仓库 / API 根 / 上次检查时间）。
+
+「检查更新」的三个环境变量（都不下发到前端）：`DSH_AIFISHER_UPDATE_API` 换 GitHub API 根
+（国内网络指向镜像）、`DSH_AIFISHER_UPDATE_REPO` 换仓库 slug、`DSH_AIFISHER_UPDATE_TOKEN`
+查私有库。DSH 没有插件自动更新通道，所以这块只到「告诉你有新版 + 怎么装」为止。
 
 ---
 

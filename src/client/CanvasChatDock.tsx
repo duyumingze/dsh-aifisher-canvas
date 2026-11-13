@@ -105,6 +105,18 @@ export interface CanvasSessionActions {
   open(sessionId: string): CanvasSessionResult;
 }
 
+/**
+ * 画布应用 → 本栏的「新开一条对话并把话填进输入框」桥（v1.98）。
+ *
+ * 挂在 `window.__FISHERAI_CANVAS_COMPOSE__`：画布应用是独立 bundle，没有 React 上下文，
+ * 只能这样拿到 `inputActions.setDraft`。设置页「检查更新 → 更新」调它，
+ * 填完等用户自己按发送（这里**不**提交任何东西）。
+ */
+export interface ComposeBridge {
+  composeNew(text: string): Promise<{ ok: boolean; sessionId?: string; message?: string }>;
+  report(): { mounted: boolean; sessionId: string; hasSetDraft: boolean };
+}
+
 /** 宿主（renderer）按 session-maybe 作用域注入的标准 props，取我们用到的那几个。 */
 export interface CanvasChatDockProps {
   /**
@@ -130,6 +142,15 @@ export interface CanvasChatDockProps {
   onClose?: () => void;
   /** 由 apply.ts 经画布外壳注入：在画布内换会话 / 新建会话。 */
   sessionActions?: CanvasSessionActions;
+  /**
+   * 输入框的标准动作面（session 作用域 props 里就带 `inputActions`）。
+   *
+   * v1.98 用它给「设置 → 检查更新 → 更新」做「新开对话并预填更新指令」：
+   * 面板那边没有 React 上下文（画布应用是独立 bundle），只能经下面的 `window` 桥
+   * `__FISHERAI_CANVAS_COMPOSE__` 调到这里，再用 `setDraft` 把话写进输入框。
+   * 老宿主不给这个 prop 时桥仍然存在，但会回一句「拿不到输入框」而不是静默失败。
+   */
+  inputActions?: { setDraft?: (text: string) => void } | null;
 }
 
 const DOCK_STYLE: React.CSSProperties = {
@@ -570,7 +591,6 @@ function collectSessionRows(list: any, currentId: string | undefined, archivedId
  */
 function ChatDockBody(props: CanvasChatDockProps) {
   const { sessionId, useSession, useConversation, useSessions, useWorkspaces, renderFactorySlot, onClose, sessionActions } = props;
-
   /**
    * 三个标准钩子**必须无条件、按固定顺序**调用。
    *
@@ -597,6 +617,71 @@ function ChatDockBody(props: CanvasChatDockProps) {
   const [error, setError] = React.useState<string | undefined>(undefined);
   const menuRef = React.useRef<HTMLDivElement | null>(null);
   const triggerRef = React.useRef<HTMLButtonElement | null>(null);
+
+  /**
+   * 「新开一条对话并把话填进输入框」的桥（v1.98，设置页「检查更新 → 更新」用）。
+   *
+   * 为什么走 window 桥：画布应用（`lib/canvas/canvas-app.js`）是**独立 bundle**，
+   * 拿不到内核发给本槽位的 React props；而 `inputActions.setDraft` 只在这里有。
+   * 于是本组件把能力挂到 window 上，面板那边调 `__FISHERAI_CANVAS_COMPOSE__.composeNew(text)`。
+   *
+   * 时序：`sessionActions.create()` 建/复用空白会话并把它设为当前 → 本槽位以新会话重渲染
+   * （新的 `inputActions` + `sessionId` 到达）→ 才轮到 `setDraft`。所以下面用 ref 读最新值、
+   * 轮询到「目标会话已挂上且 setDraft 可用」再写，最多等 3 秒；失败就如实回一句原因。
+   */
+  const inputActionsRef = React.useRef<CanvasChatDockProps['inputActions']>(null);
+  const sessionIdRef = React.useRef<string | undefined>(undefined);
+  inputActionsRef.current = props.inputActions ?? null;
+  sessionIdRef.current = sessionId;
+
+  React.useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const holder = window as unknown as {
+      __FISHERAI_CANVAS_COMPOSE__?: ComposeBridge;
+    };
+    const api: ComposeBridge = {
+      async composeNew(text: string) {
+        const message = typeof text === 'string' ? text : '';
+        if (!message.trim()) return { ok: false, message: '更新指令是空的，没有可填的内容。' };
+        if (!sessionActions || typeof sessionActions.create !== 'function') {
+          return { ok: false, message: '画布没有暴露新建会话的动作（sessionActions）' };
+        }
+        const created = await sessionActions.create();
+        if (!created || created.ok !== true) {
+          return { ok: false, message: created?.message ?? '新建会话失败' };
+        }
+        const target = created.sessionId;
+        const deadline = Date.now() + 3000;
+        while (Date.now() < deadline) {
+          const actions = inputActionsRef.current;
+          if (
+            sessionIdRef.current === target &&
+            actions &&
+            typeof actions.setDraft === 'function'
+          ) {
+            actions.setDraft(message);
+            return { ok: true, sessionId: target };
+          }
+          await new Promise((resolve) => setTimeout(resolve, 60));
+        }
+        return {
+          ok: false,
+          message: '新会话已建好，但宿主没有给输入框动作（inputActions.setDraft），没能填进去',
+        };
+      },
+      report() {
+        return {
+          mounted: true,
+          sessionId: sessionIdRef.current ?? '',
+          hasSetDraft: typeof inputActionsRef.current?.setDraft === 'function',
+        };
+      },
+    };
+    holder.__FISHERAI_CANVAS_COMPOSE__ = api;
+    return () => {
+      if (holder.__FISHERAI_CANVAS_COMPOSE__ === api) delete holder.__FISHERAI_CANVAS_COMPOSE__;
+    };
+  }, [sessionActions]);
 
   const summary = sessionId === undefined ? undefined : list?.byId?.[sessionId];
   const hasSession = sessionId !== undefined && session !== undefined && conversation !== undefined;

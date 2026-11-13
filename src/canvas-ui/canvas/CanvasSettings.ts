@@ -17,10 +17,18 @@
  * 并挂「设计稿」标签 —— 用户 2026-10-31 拍板：「置灰 + 设计稿小标签，只有真实现的能点」。
  */
 
+import { PLUGIN_VERSION } from '../../pluginVersion';
+
 export const SETTINGS_API = '/api/aifisher/canvas';
 
-/** 插件版本（页面左下角与「关于」行显示；与 package.json 同步）。 */
-export const CANVAS_UI_VERSION = '1.85.0';
+/**
+ * 插件版本（页面左下角与「关于」行显示）。
+ *
+ * v1.97.3：以前是这里手写的字符串（`'1.85.0'`），发版时没人改就永远停在旧版本 ——
+ * 用户 2026-11-13 报「画布设置左下角的版本号没有随着版本更新」就是这个。
+ * 现在直接取 `src/pluginVersion.ts`（构建时从 package.json 内联），不再有第二份要手抄的版本号。
+ */
+export const CANVAS_UI_VERSION = PLUGIN_VERSION;
 
 export interface ComfyStatus {
   /** 是否真的连上了（`/local-runtime/status` 的 comfyui.status === 'ready' 视为可用）。 */

@@ -27,6 +27,35 @@ import { defineConfig } from 'tsdown';
 
 const REPO = path.dirname(fileURLToPath(import.meta.url));
 
+const PKG = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8')) as { version: string };
+
+/**
+ * 版本号对齐（v1.97.3）—— 画布里有**两处**版本号，必须同源：
+ *
+ *   | 显示位置 | 读的是 |
+ *   |---|---|
+ *   | 项目库看板左上角 | `vendor/aifisher/package.json`（上游 `canvasComponents.ts` 的 `import { version }`） |
+ *   | 设置页左下角 / 「关于」行 | **仓库根** package.json（`src/pluginVersion.ts`） |
+ *
+ * 两个 JSON 都是被 rolldown **构建时内联**的，所以打包前就得对齐。`pnpm build` 里
+ * `vendor-aifisher.mjs` 已经会写一次 vendor 的 version；这里兜的是 `pnpm build:offline`
+ * （不重新 vendor）那条路径 —— 否则升级版本后会出现看板 v1.97.2、设置页 v1.97.3 的错位。
+ * 幂等：值相同不落盘。
+ */
+function alignVendorVersion(): void {
+  const vendorPkgPath = path.join(REPO, 'vendor', 'aifisher', 'package.json');
+  try {
+    const vendorPkg = JSON.parse(fs.readFileSync(vendorPkgPath, 'utf8')) as { version?: string };
+    if (vendorPkg.version === PKG.version) return;
+    vendorPkg.version = PKG.version;
+    fs.writeFileSync(vendorPkgPath, `${JSON.stringify(vendorPkg, null, 2)}\n`);
+  } catch {
+    // vendor 还没就绪（没跑过 pnpm vendor）时不阻断构建：缺的是显示用的版本号，不是产物本身。
+  }
+}
+
+alignVendorVersion();
+
 /**
  * AIFISHER 源码里有用 Vite 的 `?url` 语义 import 的 SVG（模型商标），
  * rolldown 默认不认识。这里把 .svg 变成 data URL 字符串导出，行为与 Vite 的

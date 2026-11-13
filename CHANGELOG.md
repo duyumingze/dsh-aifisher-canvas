@@ -6,6 +6,74 @@
 > 对不上的（v1.70–v1.76 调色面板迭代、v1.82–v1.83 整页扩图）按批次合并并保留日期，
 > 不再写「未发布」这种既不是版本也不是日期的标题。
 
+## v1.98.0 — 2026-11-13
+
+### 新：设置页「高级与关于」能检查更新，确认后把更新指令填进一条新对话
+
+用户原话（2026-11-13，接在版本号那条后面）：
+**「获取更新功能做一些」** → 补一句口径：
+**「做简单一点，检查更新，如果有新版本然后用户确认更新的话就新开对话把更新对话输入进去
+等用户点发送」**。所以这一版只做「查 + 填稿」，**不**下载、**不**替换文件、**不**重启。
+
+- **之前那块是空的**：设置页「关于」下面挂的是 vendor 的更新面板
+  （`vendor/aifisher/src/stable/update/localUpdateSettings.ts`），它要 AIFISHER **桌面端**的桥
+  `desktopBridge().update`；DSH 里那个桥永远是 undefined，`mountLocalUpdateSettings` 直接
+  返回空 —— 用户看到的是一块留白。
+- **host 端**：新增 `GET /api/aifisher/canvas/update/status`（`?force=1` 强制重查，其余
+  10 分钟吃内存缓存，省 GitHub 的 60 次/时）。版本号读**安装目录的 package.json**，仓库从
+  `repository.url` 解析；先查 Releases、没有就退回 tags 比版本号；只做 GitHub 的公开 GET。
+  有新版时把**更新指令**一并写进 `prompt` 字段（带安装目录、git / 重装两条路、构建与
+  `verify-live-canvas-bundle.mjs` 校验步骤），前端只管把它递给人。
+- **界面**（`CanvasUpdatePanel`，原生 DOM）：`当前 vX` + 「检查更新」+ 状态行；有新版本才出现
+  「更新到 vX.Y.Z」与「发布页」。点「更新」= 用户确认：
+  - 新开一条画布对话并把 `prompt` 填进去（`window.__FISHERAI_CANVAS_COMPOSE__.composeNew`，
+    由 `CanvasChatDock` 用内核的 `inputActions.setDraft` 实现；建会话复用画布自带的
+    `sessionActions.create()`，全程留在画布面板）；
+  - 填完自动关掉设置页，让用户直接看到那条新对话 —— **发送由用户按**，这一版自己从不提交；
+  - 桥不在 / 拿不到输入框 → 降级成「复制更新指令」，并如实说复制成功还是失败。
+- **网络兜底**：`DSH_AIFISHER_UPDATE_API` 指向 GitHub API 镜像、`DSH_AIFISHER_UPDATE_REPO`
+  指定仓库、私有库用 `DSH_AIFISHER_UPDATE_TOKEN`；查不到时照实显示 6 秒超时 / 403 限流的原话。
+- 顺带：`/status` 加报 `version` 与 `update`（当前版本 / 仓库 / API 根 / 上次检查时间）；
+  包根目录解析从 `staticAssets.ts` 抽到 `host/packageInfo.ts`，静态资源与检查更新共用一份。
+
+### 回归
+
+- `test-canvas-pages` 新增 9 项：起一个**假 GitHub API**（`DSH_AIFISHER_UPDATE_API` 指过去，
+  真 HTTP、不联网），验证面板挂上、自动查出 behind、新版本号、`更新到 v9.9.9` 按钮、发布页链接、
+  点「检查更新」带 `?force=1` 真重查、远端追平后变「已是最新」且动作区收起、
+  点「更新」把 host 写的指令（含目录 / `pnpm build` / 当前版本）交给画布桥、填完关掉设置页。
+- 顺手修了测试装置：`createCanvasDom` 会把 `globalThis.fetch` 换成 jsdom 假路由，而 host 半与
+  画布**同进程** —— host 主动发出的外网/本机请求（这次的 GitHub 查询，以及素材下载、通道
+  探活）也会撞进假路由拿到 404。现在非本插件源的绝对 URL 交回原生 fetch。
+- 已知：`test-canvas-outpaint` 的「整轮没有运行时错误」在这台机器上一直红
+  （`O.beginPath is not a function`：那套用例把 `getContext` 换成了只实现 drawImage 的假上下文，
+  画布的描边绘制撞上去）。**用 v1.97.3 的旧产物跑同样红**，与本次改动无关，未处理。
+
+## v1.97.3 — 2026-11-13
+
+### 修：设置页左下角的版本号一直停在 v1.85.0
+
+用户原话（2026-11-13）：**「画布设置左下角的版本号没有随着版本更新」**。
+
+- **病根**：`src/canvas-ui/canvas/CanvasSettings.ts` 里是手写常量
+  `export const CANVAS_UI_VERSION = '1.85.0'`。v1.84 做设置页时写下 1.85.0，之后十二个版本
+  没人回头改它 —— 于是 package.json 已经走到 1.97.2，页面上还挂着 v1.85.0。
+  同类手抄点还有调色合成器启动时那行控制台版本戳（写死 `v1.97.2`）。
+- **修法**：新增 `src/pluginVersion.ts`，`import { version } from '../package.json'` ——
+  由 rolldown 在**构建时**把该字段内联成字符串常量（vendor 上游画布本来就用这套读版本，
+  `canvasComponents.ts` 读的也是 package.json，打包链一定支持）。设置页左下角、「关于」行、
+  合成器控制台戳全部改成读它。**以后发版只改 package.json 的 version，重新 build 一次，
+  页面就跟着变**，不再有第二份要手抄的版本号。
+- **顺带把两处版本号对上**：项目库看板读的是 `vendor/aifisher/package.json`，设置页读的是
+  仓库根 package.json。`pnpm build` 里 `vendor-aifisher.mjs` 会对照一次，但 `build:offline`
+  不跑 vendor —— 现在 `tsdown.config.ts` 在打包前也做一次对齐（值相同不落盘，幂等），
+  不会再出现看板 v1.97.2、设置页 v1.97.3 的错位。
+
+### 回归
+
+- `test-canvas-pages` 新增 2 项：设置页左下角、以及「关于」行的版本号必须等于 package.json
+  的 `version`（拿 DOM 文本对账）。以后再有人把版本号写死、或者改了版本忘了重新构建，回归直接红。
+
 ## v1.97.2 — 2026-11-12
 
 ### 修：调色面板开着时按 X / Delete（还有 A、Ctrl+Z）会把主画布的调色节点一起删掉

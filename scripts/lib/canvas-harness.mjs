@@ -18,6 +18,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 export const ORIGIN = 'http://127.0.0.1:19387';
 
+/**
+ * 原生 fetch 备份：`createCanvasDom` 会把 `globalThis.fetch` 换成 jsdom 假路由，
+ * 而 host 半与画布**跑在同一个进程**里 —— host 主动发出的外网/本机 HTTP 请求
+ * （v1.98 的「检查更新」查 GitHub API、素材下载、通道探活…）也会撞进假路由，
+ * 拿到一个 404「no route」。所以非本插件源的绝对 URL 一律交回真 fetch。
+ */
+const NODE_FETCH = globalThis.fetch;
+
 class FakeResponse extends Writable {
   constructor() {
     super();
@@ -406,6 +414,16 @@ export async function createCanvasDom(options = {}) {
     const url = typeof input === 'string' ? input : (input?.url ?? String(input));
     const method = String(init.method ?? 'GET').toUpperCase();
     fetchCalls.push(`${method} ${url}`);
+    /**
+     * 非本插件源的**绝对** URL → 真 fetch（相对路径与 `${ORIGIN}/...` 仍走假路由）。
+     */
+    let absolute = null;
+    try {
+      absolute = new URL(url, ORIGIN);
+    } catch {
+      absolute = null;
+    }
+    if (!absolute || absolute.origin !== ORIGIN) return NODE_FETCH(input, init);
     // body 原样交给 dispatch：字符串就是字节（JSON 字符串与以前等价），
     // Blob/File/ArrayBuffer 走原始字节（v1.42：项目归档导入要能上传二进制）
     const body = init.body === undefined ? undefined : init.body;

@@ -8,36 +8,10 @@
  * 我们用 prefix 路由把这两个前缀指向插件 public/ 下对应子目录。
  */
 import { existsSync } from 'node:fs';
-import { createRequire } from 'node:module';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import type { WebServerLike } from './http/httpUtil';
 import { serveStaticFile } from './http/httpUtil';
-
-/**
- * 解析包根目录。
- *
- * 不能写死相对深度：源码在 src/host/staticAssets.ts（上溯两级到包根），
- * 但产物是 lib/index.js（只上溯一级），同一份代码两种布局。
- * 所以先用包自引用解析 package.json（package.json 已导出 ./package.json），
- * 失败再逐级上溯找 public/creative-presets。
- */
-function resolvePackageRoot(): string {
-  try {
-    const require = createRequire(import.meta.url);
-    return dirname(require.resolve('dsh-aifisher-canvas/package.json'));
-  } catch {
-    // 落到下面的目录探测
-  }
-  let dir = fileURLToPath(new URL('.', import.meta.url));
-  for (let depth = 0; depth < 6; depth += 1) {
-    if (existsSync(resolve(dir, 'public', 'creative-presets'))) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
-  }
-  return fileURLToPath(new URL('..', import.meta.url));
-}
+import { resolvePackageRoot } from './packageInfo';
 
 export function attachStaticAssets(webServer: WebServerLike): void {
   const pkgRoot = resolvePackageRoot();

@@ -116,7 +116,6 @@ import { mountLocalRuntimeSettings } from '../../../vendor/aifisher/src/stable/l
 import { mountSourceSettings } from '../../../vendor/aifisher/src/stable/generation/sourceSettings';
 import { createSourceSettingsClient } from '../../../vendor/aifisher/src/stable/generation/sourceSettingsClient';
 import { createLocalRuntimeClient } from '../../../vendor/aifisher/src/stable/local/localRuntimeClient';
-import { mountLocalUpdateSettings } from '../../../vendor/aifisher/src/stable/update/localUpdateSettings';
 import { readLocalUser } from '../../../vendor/aifisher/src/stable/profile/localUser';
 import { preferenceStorage } from '../../../vendor/aifisher/src/stable/persistence/preferenceStore';
 import { installLocalRuntimeClient } from '../../../vendor/aifisher/src/stable/local/localRuntimeClient';
@@ -127,6 +126,7 @@ import { refreshChannelModelRegistry } from '../../canvas-ui/canvas/CloudChannel
 import { registerCloudChannelPanel } from '../../canvas-ui/canvas/CloudChannelPanel';
 import { registerCanvasEffectsPanel } from '../../canvas-ui/canvas/CanvasEffectsPanel';
 import { registerCanvasDataDirPanel } from '../../canvas-ui/canvas/CanvasDataDirPanel';
+import { registerCanvasUpdatePanel } from '../../canvas-ui/canvas/CanvasUpdatePanel';
 import {
   canvasEffects,
   canvasEffectsReport,
@@ -392,15 +392,20 @@ function installCanvasSettingsHosts(): { dispose: () => void } {
   holder.__FISHERAI_MOUNT_DOWNLOAD_SETTINGS__ = guardedMount('下载目录', (host) =>
     mountMediaDownloadSettings(host, installMediaDownloadFileName()),
   );
-  holder.__FISHERAI_MOUNT_UPDATE_SETTINGS__ = guardedMount('关于/更新', (host) =>
-    mountLocalUpdateSettings(host),
-  );
+  /**
+   * 检查更新（v1.98）：**不再**挂 vendor 的 `mountLocalUpdateSettings` ——
+   * 那个面板要 AIFISHER 桌面端的桥（`desktopBridge().update`），在 DSH 里永远
+   * undefined，挂上去是一块空白。换成我们自己的面板：查 GitHub、说清楚怎么更新。
+   * 挂载点（`__FISHERAI_MOUNT_UPDATE_SETTINGS__`）由它自己注册并自带 disposer。
+   */
+  const disposeUpdate = registerCanvasUpdatePanel();
   return {
     dispose() {
       delete holder.__FISHERAI_MOUNT_SOURCE_SETTINGS__;
       delete holder.__FISHERAI_MOUNT_LOCAL_RUNTIME_SETTINGS__;
       delete holder.__FISHERAI_MOUNT_DOWNLOAD_SETTINGS__;
       delete holder.__FISHERAI_MOUNT_UPDATE_SETTINGS__;
+      disposeUpdate();
     },
   };
 }

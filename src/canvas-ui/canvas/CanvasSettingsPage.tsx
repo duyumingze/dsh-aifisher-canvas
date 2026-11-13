@@ -489,7 +489,16 @@ export function CanvasSettingsPage(react: Runtime, props: CanvasSettingsPageProp
       h(
         'div',
         { className: 'afs-ver' },
-        h('span', { className: 'afg-mono' }, `v${CANVAS_UI_VERSION}`),
+        h(
+          'span',
+          {
+            className: 'afg-mono',
+            // 版本号来自构建时内联的 package.json（src/pluginVersion.ts）；
+            // 给个标记，test-canvas-pages 拿它跟 package.json 对账，防止再有人写死。
+            'data-fisherai-settings-version': 'foot',
+          },
+          `v${CANVAS_UI_VERSION}`,
+        ),
         h('span', { className: 'afg-mint afg-f11' }, '本地构建'),
       ),
       h(
@@ -1410,11 +1419,16 @@ export function CanvasSettingsPage(react: Runtime, props: CanvasSettingsPageProp
           h(
             'div',
             { className: 'afs-row-ctl' },
-            h('span', { className: 'afg-tag afg-mono' }, `v${CANVAS_UI_VERSION}`),
+            h(
+              'span',
+              { className: 'afg-tag afg-mono', 'data-fisherai-settings-version': 'about' },
+              `v${CANVAS_UI_VERSION}`,
+            ),
             h('span', { className: 'afg-tag' }, '玻璃面板'),
           ),
         ),
-      // 旧版设置「关于 渡雨鸣泽 画布」里的检查更新面板（vendor 原生 mount）
+      // 检查更新（v1.98）：宿主 div 由装配层注册的 `__FISHERAI_MOUNT_UPDATE_SETTINGS__` 挂，
+      // 现在挂的是我们自己的面板（CanvasUpdatePanel）—— vendor 那个只认桌面端桥，DSH 里是空的。
       h('div', {
         key: 'update-host',
         className: 'afs-host',

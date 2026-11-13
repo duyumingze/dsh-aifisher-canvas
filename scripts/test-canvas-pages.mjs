@@ -6,13 +6,24 @@
  *      收藏/归档/备注/复制/新建/删除 —— 这一层是页面「不撒谎」的地基，必须真读盘；
  *   B. **DOM 结构**：点顶栏「项目库」/ 侧栏「设置」能真的把两屏挂出来，卡片/列表/详情/
  *      四个分组都在，交互（搜索、光标辉光开关、缩放档位、Esc 关闭）落到了对应的存储上。
+ *      v1.97.3 起还拿设置页上的版本号跟 package.json 的 version 对账 —— 那个号以前是手写的，
+ *      停在 1.85.0 十二个版本没人发现。
  *
  * 用法：node scripts/test-canvas-pages.mjs（需要先 build）
  */
-import { existsSync, mkdirSync, writeFileSync, readdirSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { join } from 'node:path';
 
 import { createCanvasDom, mountCanvasApp, seedResume, settle, startHost } from './lib/canvas-harness.mjs';
+
+/**
+ * 版本号对账的基准：仓库根 package.json（v1.97.3 起设置页就是构建时从它内联的）。
+ * 页面上的版本号必须等于它，否则就是又有人写死了、或者改了版本没重新构建。
+ */
+const PKG_VERSION = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+).version;
 
 const lines = [];
 let failures = 0;
@@ -24,7 +35,51 @@ const check = (name, condition, extra = '') => {
 const PROJECT_ID = 'projects-page-check';
 const COPY_SOURCE_ID = 'projects-page-copy';
 
-const host = await startHost();
+/**
+ * 假 GitHub API（v1.98「检查更新」的离线装置）。
+ *
+ * host 侧真的会对 `DSH_AIFISHER_UPDATE_API` 发 HTTP 请求 —— 所以这里起一个真 HTTP 服务：
+ * 不用联网，也不用在插件里埋「测试专用参数」（这个环境变量本来就是「GitHub 打不开时
+ * 指向镜像」的正经开关）。`requests` 还能证明「点按钮是不是真的重查了」。
+ */
+const updateFeed = {
+  requests: [],
+  latest: 'v9.9.9',
+  notes: '回归用发布说明：\n- 假的一条改动',
+  publishedAt: '2026-11-14T00:00:00Z',
+};
+
+const feedServer = createServer((req, res) => {
+  updateFeed.requests.push(req.url ?? '');
+  const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+  const send = (status, body) => {
+    res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
+    res.end(JSON.stringify(body));
+  };
+  if (url.pathname.endsWith('/releases')) {
+    send(200, [
+      {
+        tag_name: updateFeed.latest,
+        html_url: `https://github.com/duyumingze/dsh-aifisher-canvas/releases/tag/${updateFeed.latest}`,
+        published_at: updateFeed.publishedAt,
+        body: updateFeed.notes,
+        draft: false,
+        prerelease: false,
+      },
+    ]);
+    return;
+  }
+  // tags 一律 404：顺带验证「没 Release 时的兜底」不会把正常路径带崩
+  send(404, { message: 'Not Found' });
+});
+
+const feedPort = await new Promise((done) => {
+  feedServer.listen(0, '127.0.0.1', () => done(feedServer.address().port));
+});
+
+const host = await startHost({
+  env: { DSH_AIFISHER_UPDATE_API: `http://127.0.0.1:${feedPort}` },
+});
 
 /** 素材根（与 host 的 defaultMediaRoot 同一套推导：$DSH_HOME/storages/dsh-aifisher-canvas/media）。 */
 const MEDIA_ROOT = join(host.fakeHome, 'storages', 'dsh-aifisher-canvas', 'media');
@@ -173,7 +228,7 @@ const DOC = {
 // 把主项目恢复成「未归档」，DOM 段才能验卡片墙里真的有它。
 await host.hostApi('POST', `/projects/${PROJECT_ID}/status`, { status: 'active' });
 
-const { window } = await createCanvasDom({ dispatch: host.dispatch });
+const { window, fetchCalls } = await createCanvasDom({ dispatch: host.dispatch });
 seedResume(window, PROJECT_ID);
 const { container, canvasApp, handle } = await mountCanvasApp(window);
 await settle(1600);
@@ -282,6 +337,98 @@ const setInputValue = (element, value) => {
   check('外观分组有 B 的实时预览画布', Boolean(doc.querySelector('[data-fisherai-settings-theme-canvas]')));
   check('未接入项挂了「设计稿」标签', [...doc.querySelectorAll('.afs-draft')].length >= 5, String(doc.querySelectorAll('.afs-draft').length));
 
+  // 版本号（v1.97.3）：以前是 CanvasSettings.ts 里手写的 '1.85.0'，发版没人改就永远停在旧值。
+  // 现在构建时从 package.json 内联，所以页面上的读数必须与 package.json 完全一致。
+  const footVersion = doc
+    .querySelector('[data-fisherai-settings-version="foot"]')
+    ?.textContent?.trim();
+  check(
+    '设置页左下角版本号 = package.json 的 version',
+    footVersion === `v${PKG_VERSION}`,
+    `${String(footVersion)} vs v${PKG_VERSION}`,
+  );
+  const aboutVersion = doc
+    .querySelector('[data-fisherai-settings-version="about"]')
+    ?.textContent?.trim();
+  check(
+    '「关于」行版本号 = package.json 的 version',
+    aboutVersion === `v${PKG_VERSION}`,
+    `${String(aboutVersion)} vs v${PKG_VERSION}`,
+  );
+
+  // 检查更新（v1.98）：面板自动查一次假 GitHub，远端 v9.9.9 比本地新
+  const updatePanel = await waitFor(() => doc.querySelector('[data-fisherai-update="panel"]'));
+  check('设置页「高级与关于」挂上了「检查更新」面板', Boolean(updatePanel));
+  const behindPanel = await waitFor(
+    () => doc.querySelector('[data-fisherai-update-state="behind"]'),
+    6000,
+  );
+  check(
+    '远端更新时状态是 behind',
+    Boolean(behindPanel),
+    String(doc.querySelector('[data-fisherai-update="panel"]')?.getAttribute('data-fisherai-update-state')),
+  );
+  const updateMessage = String(
+    doc.querySelector('[data-fisherai-update-message]')?.textContent ?? '',
+  );
+  check('状态行报出新版本号（v9.9.9）', updateMessage.includes('v9.9.9'), updateMessage.slice(0, 80));
+  check(
+    '有新版才出现「更新到 v9.9.9」按钮',
+    String(doc.querySelector('[data-fisherai-update-upgrade]')?.textContent ?? '').includes('v9.9.9'),
+    String(doc.querySelector('[data-fisherai-update-upgrade]')?.textContent),
+  );
+  check(
+    '「发布页」指向 host 给的那条 Release',
+    String(doc.querySelector('[data-fisherai-update-open]')?.getAttribute('href') ?? '').includes(
+      '/releases/tag/v9.9.9',
+    ),
+    String(doc.querySelector('[data-fisherai-update-open]')?.getAttribute('href')),
+  );
+
+  // 点「检查更新」：必须真的再问一次（?force=1），不是吃缓存。
+  // 注意两个不同层次：`fetchCalls` 是画布→插件的请求，`updateFeed.requests` 是插件→GitHub 的请求。
+  const requestsBefore = updateFeed.requests.length;
+  const callsBefore = fetchCalls.length;
+  click(doc.querySelector('[data-fisherai-update-check]'));
+  await waitFor(
+    () => fetchCalls.slice(callsBefore).some((call) => call.includes('update/status?force=1')),
+    4000,
+  );
+  check(
+    '点「检查更新」走 ?force=1',
+    fetchCalls.slice(callsBefore).some((call) => call.includes('update/status?force=1')),
+    fetchCalls.slice(callsBefore).join(' | '),
+  );
+  await waitFor(() => updateFeed.requests.length > requestsBefore, 4000);
+  check(
+    '强制重查真的又问了远端（不是吃缓存）',
+    updateFeed.requests.length > requestsBefore,
+    `${requestsBefore} → ${updateFeed.requests.length}`,
+  );
+
+  // 远端版本追平 → 面板要如实说「已是最新」，按钮也不能再挂着「更新」
+  updateFeed.latest = `v${PKG_VERSION}`;
+  click(doc.querySelector('[data-fisherai-update-check]'));
+  const latestPanel = await waitFor(
+    () => doc.querySelector('[data-fisherai-update-state="latest"]'),
+    4000,
+  );
+  check(
+    '远端追平后显示「已是最新」',
+    Boolean(latestPanel) &&
+      String(doc.querySelector('[data-fisherai-update-message]')?.textContent ?? '').includes(
+        '已是最新',
+      ),
+    String(doc.querySelector('[data-fisherai-update-state]')?.getAttribute('data-fisherai-update-state')),
+  );
+  check(
+    '已是最新时「更新」按钮不可点（动作区隐藏）',
+    String(doc.querySelector('[data-fisherai-update-actions]')?.getAttribute('class') ?? '').includes(
+      'hidden',
+    ),
+    String(doc.querySelector('[data-fisherai-update-actions]')?.getAttribute('class')),
+  );
+
   // 缩放：点 125 档
   const tick = [...doc.querySelectorAll('.afs-ticks span')].find((item) => item.textContent === '125');
   check('缩放刻度里有 125 档', Boolean(tick));
@@ -338,6 +485,43 @@ const setInputValue = (element, value) => {
   );
   check('设置页顶栏有「项目库」入口', Boolean(toProjects));
 
+  /**
+   * 确认更新（v1.98 用户口径）：「有新版本 → 用户确认 → 新开对话把更新指令填进去，
+   * 等用户点发送」。真机的新开会话/填稿是 CanvasChatDock 挂的
+   * `window.__FISHERAI_CANVAS_COMPOSE__`；画布-app 单测里没装 client 半，所以这里放一个
+   * 假桥验「面板确实把 host 写好的那段话交给了它」+「填完关掉设置页让用户看到新对话」。
+   */
+  updateFeed.latest = 'v9.9.9';
+  click(doc.querySelector('[data-fisherai-update-check]'));
+  await waitFor(() => doc.querySelector('[data-fisherai-update-state="behind"]'), 4000);
+  const composed = [];
+  window.__FISHERAI_CANVAS_COMPOSE__ = {
+    composeNew: async (text) => {
+      composed.push(String(text));
+      return { ok: true, sessionId: 'fake-session' };
+    },
+  };
+  click(doc.querySelector('[data-fisherai-update-upgrade]'));
+  await waitFor(() => composed.length > 0, 4000);
+  check(
+    '点「更新到 v9.9.9」把 host 写的更新指令交给画布桥（新开对话 + 预填）',
+    composed.length === 1 &&
+      composed[0].includes('dsh-aifisher-canvas') &&
+      composed[0].includes('v9.9.9') &&
+      composed[0].includes('更新'),
+    String(composed[0] ?? '').slice(0, 80),
+  );
+  check(
+    '更新指令里带着安装目录与构建步骤（助手拿到就能干）',
+    composed[0]?.includes('pnpm build') === true && composed[0]?.includes(PKG_VERSION) === true,
+    String(composed[0] ?? '').slice(0, 120),
+  );
+  const closed = await waitFor(() => !doc.querySelector('[data-fisherai-page="settings"]'), 3000);
+  check(
+    '填完自动关掉设置页（让用户直接看到那条新对话、按发送）',
+    Boolean(closed),
+  );
+
   doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   await settle(200);
   check('Esc 关掉设置页', !doc.querySelector('[data-fisherai-page="settings"]'));
@@ -347,9 +531,17 @@ const setInputValue = (element, value) => {
   const status = await host.hostApi('GET', '/status');
   const body = status.json();
   check('/status 里报了项目库接口清单', Array.isArray(body.projects?.endpoints) && body.projects.endpoints.length >= 6, String(body.projects?.endpoints?.length));
+  check(
+    '/status 里报了版本与「检查更新」诊断',
+    body.version === PKG_VERSION &&
+      typeof body.update?.lastCheckedAt === 'number' &&
+      body.update?.repo === 'duyumingze/dsh-aifisher-canvas',
+    `${String(body.version)} / ${JSON.stringify(body.update ?? null)}`,
+  );
 }
 
 handle?.dispose?.();
+await new Promise((done) => feedServer.close(done));
 await settle(120);
 
 console.log(lines.join('\n'));

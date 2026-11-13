@@ -36,6 +36,8 @@ import type { GenerationEvents } from './generationEvents';
 import type { GenerationPlans } from './generationPlans';
 import { handleWorkflowCoversApi } from './workflowCoversRouter';
 import { workflowCoversStatus } from '../comfyui/workflowCovers';
+import { handleUpdateApi, updateDiagnostics } from '../update/updateRouter';
+import { readPackageInfo } from '../packageInfo';
 import type { GenerationJournal } from '../comfyui/generationJournal';
 import { channelDiagnostics, readCloudChannels } from '../generation/cloudChannels';
 import { handleAgentChatApi, type AgentChatDeps } from './agentChatRouter';
@@ -145,6 +147,8 @@ export async function handleCanvasApi(
   if (parts[0] === 'status' && parts.length === 1 && method === 'GET') {
     sendJson(res, 200, {
       ok: true,
+      // 跑着的到底是哪个版本（v1.98）：排查「页面/面板没更新」时第一眼看这里
+      version: readPackageInfo().version,
       store: { path: store.filePath, ...store.stats() },
       bridge: bridge?.status() ?? null,
       // 媒体加工是否可用（本机有没有 ffmpeg 是排查抽帧/裁剪 503 的第一现场）
@@ -182,8 +186,28 @@ export async function handleCanvasApi(
       jobs: extras.copilot ? extras.copilot.jobs.stats() : null,
       // 工作流配图（v1.28）：左侧「工作流节点」面板里每张卡片的封面图
       workflowCovers: workflowCoversStatus(),
+      // 检查更新（v1.98）：当前版本 / 仓库 / API 根 / 上次检查时间
+      update: updateDiagnostics(),
     });
     return;
+  }
+
+  // ---- 检查更新（v1.98）：设置页「高级与关于」里的那块面板 ----
+  // 只读查询公开的 GitHub API（10 分钟缓存，?force=1 强制重查），不写盘、不动安装目录。
+  if (parts[0] === 'update') {
+    try {
+      if (await handleUpdateApi({ req, res, url, parts })) return;
+    } catch (error) {
+      // 路由本身出了意外也要给前端一个能读懂的结果（面板会照实显示这段文字）
+      if (!res.headersSent) {
+        sendJson(res, 500, {
+          ok: false,
+          error: error instanceof Error ? error.message : '检查更新失败',
+          code: 'UPDATE_CHECK_FAILED',
+        });
+      }
+      return;
+    }
   }
 
   // ---- 诊断：画布运行时错误回传（client 半上报，agent 读取） ----
