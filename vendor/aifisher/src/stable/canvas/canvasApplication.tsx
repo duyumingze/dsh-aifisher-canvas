@@ -1524,6 +1524,83 @@ export function CanvasApplication(React: Runtime, dependencies: Dependencies) {
     workflowId,
     view,
   ]);
+  // ---------------------------------------------------------------- dsh-aifisher-canvas v1.101
+  // 「转成 PSD」落位：把图层文档按位置扁平合成一张图，写回**同一个节点**。
+  // 用户原话（2026-11-21）：「这样拆分出来的图堆叠的形式不好看，就做成一个psd节点，接入调色节点」。
+  // 卡片的按钮只认 window.__FISHERAI_CANVAS_LAYERS__.toPsd；真正的合成（按 bbox 缩放贴）
+  // 在 src/client/canvas/layerStack.ts，通过 __FISHERAI_LAYER_STACK__ 桥调进来。
+  React.useEffect(() => {
+    const holder = window as unknown as {
+      __FISHERAI_CANVAS_LAYERS__?: {
+        toPsd(input: { sourceId: string }): Promise<{
+          ok: boolean;
+          url?: string;
+          error?: string;
+          layers?: number;
+        }>;
+      };
+    };
+    const bridge = {
+      async toPsd(input: { sourceId: string }) {
+        if (!workflowId || view !== 'canvas') return { ok: false, error: '请先打开项目。' };
+        const current: any[] = getNodes() as any[];
+        const source = current.find((node) => node.id === input.sourceId);
+        if (!source) return { ok: false, error: '找不到这个节点，请刷新后重试。' };
+        const stack = source.layerStack;
+        const layerCount = Array.isArray(stack?.layers) ? stack.layers.length : 0;
+        if (!layerCount) return { ok: false, error: '这个节点上没有图层几何（不是图层拆分的结果）。' };
+        const flatten = (
+          window as unknown as {
+            __FISHERAI_LAYER_STACK__?: {
+              flatten(
+                stack: unknown,
+                projectId: string,
+                fallbackUrl?: string,
+              ): Promise<{ ok: boolean; url?: string; reason?: string }>;
+            };
+          }
+        ).__FISHERAI_LAYER_STACK__;
+        if (!flatten?.flatten)
+          return { ok: false, error: '图层合成桥不在（页面还是旧版），刷新一下再试。' };
+        const flattened = await flatten.flatten(stack, workflowId, source.resultUrl);
+        if (!flattened.url)
+          return { ok: false, error: flattened.reason || '图层合成失败。' };
+        // 写回同一个节点：一张扁平图 + 保留 layerStack（合成器还要按层递进去）。
+        // 标题还是默认的「图片生成」时顺手改成「图层文档 · N 层」—— 用户要的就是「一个 psd 节点」。
+        const currentTitle = typeof source.title === 'string' ? source.title.trim() : '';
+        const title =
+          !currentTitle || currentTitle === '图片生成'
+            ? `图层文档 · ${layerCount} 层`
+            : currentTitle;
+        const next = configureAgentNode(getNodes() as any[], source.id, {
+          resultUrl: flattened.url,
+          resultUrls: [flattened.url],
+          title,
+          status: 'success',
+          resultAspectRatio:
+            stack?.width && stack?.height ? `${stack.width}/${stack.height}` : source.resultAspectRatio,
+          layerStack: stack,
+        } as never);
+        flushSync(() => {
+          setNodes(next);
+          setSelectedNodeIds([source.id]);
+        });
+        return { ok: true, url: flattened.url, layers: layerCount };
+      },
+    };
+    holder.__FISHERAI_CANVAS_LAYERS__ = bridge;
+    return () => {
+      if (holder.__FISHERAI_CANVAS_LAYERS__ === bridge)
+        holder.__FISHERAI_CANVAS_LAYERS__ = undefined;
+    };
+  }, [
+    configureAgentNode,
+    getNodes,
+    setNodes,
+    setSelectedNodeIds,
+    workflowId,
+    view,
+  ]);
   React.useEffect(() => {
     window.__FISHERAI_FOCUS_NODES__ = focusNodes;
     return () => {

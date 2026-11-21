@@ -41,6 +41,8 @@ export function CanvasVideoComposer(
     [editing, setEditing] = React.useState(false);
   const model = models.find((candidate) => candidate.name === node.videoModel) ||
     models[0] || { name: '' };
+  // dsh-aifisher-canvas v1.100：超分模型不收提示词，生成按钮不该被空提示词锁住
+  const promptOptional = (model as { promptOptional?: boolean }).promptOptional === true;
   const inputs = {
     images: assets.filter((asset) => ['Image', 'Upload Image'].includes(asset.type)).length,
     videos: assets.filter((asset) => ['Video', 'Upload Video'].includes(asset.type)).length,
@@ -53,9 +55,11 @@ export function CanvasVideoComposer(
     modeAllowed = videoModes.allowed(effectiveMode, inputs, selectableModes),
     modeSupported = modeKnown && modeAllowed;
   const modeWarning = !modeKnown
-    ? inputs.images === 0
-      ? '当前模型不支持文生视频'
-      : '当前模型不支持选定的生成模式'
+    ? promptOptional
+      ? '先连接一段源视频（这个模型只做视频超分）'
+      : inputs.images === 0
+        ? '当前模型不支持文生视频'
+        : '当前模型不支持选定的生成模式'
     : !modeAllowed
       ? '当前模式需要先连接相应素材'
       : '';
@@ -130,7 +134,7 @@ export function CanvasVideoComposer(
   React.useEffect(() => {
     if (boundTextId && node.prompt) onUpdate(node.id, { prompt: '' });
   }, [node.id, node.prompt, boundTextId, onUpdate]);
-  const hasInput = !!(boundText ? boundText.value : node.prompt || '').trim();
+  const hasInput = promptOptional || !!(boundText ? boundText.value : node.prompt || '').trim();
   const { checking, blocked, warning } = useGenerationAvailability(
     React,
     model.name,
@@ -240,6 +244,7 @@ export function CanvasVideoComposer(
       />
       <div
         className={`mb-1 relative group/prompt overflow-hidden prompt-editor-container custom-scrollbar ${editing ? 'is-prompt-editing cursor-text' : 'cursor-pointer'}`}
+        style={promptOptional ? { display: 'none' } : undefined}
         data-fisherai-bound-text-node-id={boundText?.nodeId}
         onClick={(J) => {
           J.stopPropagation();
@@ -305,11 +310,12 @@ export function CanvasVideoComposer(
         <div className={'relative flex items-center gap-1 h-full'}>
           <Dimensions
             videoSettings={{
-              duration,
+              // 超分：上游按源视频计时，这里的 4 秒是 composer 的兜底默认值，别显示成真实参数
+              duration: promptOptional ? 0 : duration,
               parameter: durationParam,
               fixed: fixedDuration !== null || !durationParam,
               // Preserve the existing composer audio toggle and its default.
-              audio: node.generate_audio !== false,
+              audio: promptOptional ? undefined : node.generate_audio !== false,
             }}
             data={node}
             onUpdate={(patch) => {

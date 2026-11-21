@@ -77,6 +77,24 @@ const host = await startHost();
     String(saved.text).slice(0, 160),
   );
 
+  // v1.100：视频超分（Topaz-Upscale-LowPirce）那条条目 —— 只收一段源视频、不需要提示词。
+  const upscaleChannel = await host.hostApi('POST', '/cloud-channels', {
+    action: 'save',
+    channel: {
+      label: 'ZZAI 真真AI',
+      baseUrl: 'https://api.seedance.nz/v1',
+      apiKey: 'sk-video-upscale-references',
+      dialect: 'zhenzhen',
+      models: [{ id: 'Topaz-Upscale-LowPirce', kind: 'video', label: '视频超分（Topaz）' }],
+    },
+  });
+  check(
+    '预置通道：ZZAI 的视频超分（Topaz-Upscale-LowPirce）',
+    upscaleChannel.status === 200 &&
+      (upscaleChannel.json().channels ?? []).some((channel) => channel.label === 'ZZAI 真真AI'),
+    String(upscaleChannel.text).slice(0, 160),
+  );
+
   const videoNode = {
     id: VIDEO_NODE_ID,
     type: 'Video',
@@ -155,6 +173,17 @@ async function savedNode(id) {
     return (JSON.parse(result.text).nodes ?? []).find((node) => node.id === id);
   } catch {
     return undefined;
+  }
+}
+
+/** 存盘的全部节点（v1.100 的视频超分预设要靠它找到新节点 id）。 */
+async function savedNodes() {
+  const result = await host.hostApi('GET', `/workflows/${PROJECT_ID}`);
+  if (result.status !== 200) return [];
+  try {
+    return JSON.parse(result.text).nodes ?? [];
+  } catch {
+    return [];
   }
 }
 
@@ -273,6 +302,42 @@ const videoEntry = await waitFor(() => {
   );
 }
 
+// ---------------------------------------------------------------- B2) 注册表：视频超分（Topaz，v1.100）
+const upscaleEntry = await waitFor(
+  () =>
+    (globalThis.__FISHERAI_CHANNEL_MODELS__?.video ?? []).find(
+      (entry) => entry?.cloudModelId === 'Topaz-Upscale-LowPirce',
+    ) ?? null,
+  8000,
+);
+{
+  check(
+    'ZZAI 超分模型进了画布注册表',
+    Boolean(upscaleEntry),
+    JSON.stringify((globalThis.__FISHERAI_CHANNEL_MODELS__?.video ?? []).map((entry) => entry?.name)).slice(0, 200),
+  );
+  check(
+    '超分条目不要求提示词（promptOptional，composer 放行空提示词）',
+    upscaleEntry?.promptOptional === true,
+    String(upscaleEntry?.promptOptional),
+  );
+  check(
+    '超分条目只有一个「视频超分」模式（video-edit，恰好 1 段视频）',
+    (upscaleEntry?.videoModes ?? []).length === 1 &&
+      upscaleEntry?.videoModes?.[0]?.value === 'video-edit' &&
+      upscaleEntry?.videoModes?.[0]?.allowedInputs?.video === 1,
+    JSON.stringify(upscaleEntry?.videoModes),
+  );
+  check(
+    '超分条目：档位 720p/1080p/2K/4K + 5 档质量下拉（默认 Max）',
+    JSON.stringify(upscaleEntry?.resolutions) === JSON.stringify(['720p', '1080p', '2K', '4K']) &&
+      upscaleEntry?.advancedParams?.some(
+        (parameter) => parameter?.key === 'quality' && parameter?.options?.length === 5 && parameter?.default === 'Max',
+      ),
+    JSON.stringify({ resolutions: upscaleEntry?.resolutions, params: upscaleEntry?.advancedParams }),
+  );
+}
+
 // ---------------------------------------------------------------- C) 真 DOM：往视频节点拖参考图
 const videoElement = () => doc.querySelector(`[data-node-id="${VIDEO_NODE_ID}"]`);
 check('画布渲染出视频节点', Boolean(videoElement()),
@@ -334,6 +399,74 @@ check('10 次拖线都派发成功（起点连接点都在）', dragResults.ever
   check('接了 9 张图之后，文本节点仍然连得上（总上限吃的是 19，不是 9）',
     textDrag && ids.includes(TEXT_NODE_ID) && ids.length === 10,
     `parentIds=${ids.length} ${JSON.stringify(ids)}`);
+}
+
+// ---------------------------------------------------------------- C2) 真 DOM：视频超分节点的 composer（v1.100）
+//
+// 超分 = 建节点时下发 `Video Upscale` 的预设（落成普通 Video 节点）。这里验真渲染：
+// 只有「视频超分」一档模式、不出现提示词框 —— 否则用户会被要求填一个端点会忽略的提示词。
+{
+  const consoleErrors = [];
+  const originalError = window.console.error;
+  window.console.error = (...args) => {
+    consoleErrors.push(args.map((value) => String(value)).join(' '));
+    originalError.apply(window.console, args);
+  };
+  window.dispatchEvent(
+    new window.CustomEvent('fisherai:add-canvas-node', {
+      detail: { type: 'Video Upscale', point: { x: 420, y: 300 } },
+    }),
+  );
+  await settle(800);
+  const createCalls = window.__DSH_NODE_CREATE_CALLS__;
+  const center = window.__DSH_NODE_CREATE_CENTER__;
+  let liveNodes = [];
+  try {
+    const read = await host.tool('canvas_control').execute(
+      { action: 'read' },
+      { agent: { session: { id: 'sess-video-references' } } },
+    );
+    liveNodes = read.result?.nodes ?? [];
+  } catch {
+    liveNodes = [];
+  }
+  const liveNode = liveNodes[liveNodes.length - 1];
+  check(
+    '视频超分预设建出来了（落成普通 Video、标题「视频超分」）',
+    Boolean(center) &&
+      center?.type === 'Video' &&
+      liveNode?.type === 'Video' &&
+      liveNode?.title === '视频超分',
+    `createCalls=${createCalls} center=${JSON.stringify(center)} node=${JSON.stringify({ type: liveNode?.type, title: liveNode?.title })} console=${JSON.stringify(consoleErrors).slice(0, 160)}`,
+  );
+  const upscaleEl = liveNode?.id ? doc.querySelector(`[data-node-id="${liveNode.id}"]`) : null;
+  check(
+    '视频超分节点渲染出来了',
+    Boolean(upscaleEl),
+    `id=${String(liveNode?.id ?? 'none')} viewport=${JSON.stringify(viewportTransform())} dom=${JSON.stringify([...doc.querySelectorAll('[data-node-id]')].map((el) => el.getAttribute('data-node-id'))).slice(0, 260)}`,
+  );
+  const composer = upscaleEl?.querySelector('[data-fisherai-generation-composer="video"]');
+  check('超分节点渲染出视频 composer', Boolean(composer), 'none');
+  const tabs = [...(composer?.querySelectorAll('[role="tab"]') ?? [])].map((button) => button.textContent?.trim());
+  check(
+    'composer 只有「视频超分」一档模式（没有文生视频/首帧/多图参考）',
+    tabs.length === 1 && tabs[0] === '视频超分',
+    JSON.stringify(tabs),
+  );
+  const promptBox = composer?.querySelector('.prompt-editor-container');
+  const promptHidden =
+    Boolean(promptBox) &&
+    (promptBox.style.display === 'none' || window.getComputedStyle(promptBox).display === 'none');
+  check('提示词框被收起（超分不需要提示词）', promptHidden,
+    JSON.stringify({ style: promptBox?.getAttribute('style'), display: promptBox ? window.getComputedStyle(promptBox).display : null }));
+  const modelButtonText = composer?.textContent ?? '';
+  check('composer 上选中的模型是「视频超分（Topaz）」', modelButtonText.includes('视频超分（Topaz）'),
+    modelButtonText.slice(0, 120));
+  check(
+    'composer 上预置的目标档位是 1080p（不是上一次用过的 480p）',
+    modelButtonText.includes('1080p'),
+    modelButtonText.slice(0, 140),
+  );
 }
 
 // ---------------------------------------------------------------- D) 源码：别把 3 写回去

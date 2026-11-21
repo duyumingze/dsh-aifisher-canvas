@@ -370,6 +370,14 @@ export function CanvasContextMenu(
               },
               true,
             )}
+            {item(
+              {
+                label: '视频超分',
+                icon: 'video',
+                action: () => props.onSelectType('Video Upscale'),
+              },
+              true,
+            )}
           </>
         )}
       </div>

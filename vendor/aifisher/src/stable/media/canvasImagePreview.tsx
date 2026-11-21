@@ -174,17 +174,142 @@ export function CanvasImagePreview(
         </svg>
       </button>
     ) : null;
+  /**
+   * dsh-aifisher-canvas v1.101「转成 PSD」：一次生成回了多张（图层拆分的底图 + N 个图层
+   * 就是这种）时，把各层**按位置**扁平合成一张图并写回同一个节点 —— 画布上只留这一个节点
+   * （用户原话：「这样拆分出来的图堆叠的形式不好看，就做成一个psd节点，接入调色节点」）。
+   *
+   * 节点上同时留着 `layerStack`（每一层的 URL + bbox）：调色合成器靠它把图层**一层一个口**
+   * 递进去、并按原位叠起来；扁平图只是「卡片上看得见的预览 + 下游当普通参考图用」。
+   * 合成在 src/client/canvas/layerStack.ts（按 bbox 缩放贴），由
+   * `__FISHERAI_CANVAS_LAYERS__.toPsd` 调起来写回节点。
+   */
+  const layerStack = (node as unknown as {
+    layerStack?: { width: number; height: number; layers: unknown[] };
+  }).layerStack;
+  const layerCount = Array.isArray(layerStack?.layers) ? layerStack!.layers.length : 0;
+  const hasLayers = layerCount > 0;
+  const [flattening, setFlattening] = React.useState(false);
+  const psdControl =
+    hasLayers && hasResult && !busy ? (
+      <button
+        type="button"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          event.currentTarget.blur();
+          const bridge = (
+            window as unknown as {
+              __FISHERAI_CANVAS_LAYERS__?: {
+                toPsd(input: { sourceId: string }): Promise<{
+                  ok: boolean;
+                  url?: string;
+                  error?: string;
+                }>;
+              };
+            }
+          ).__FISHERAI_CANVAS_LAYERS__;
+          if (!bridge?.toPsd || flattening) return;
+          setFlattening(true);
+          void bridge
+            .toPsd({ sourceId: node.id })
+            .catch((error: unknown) => ({
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            }))
+            .then((placed) => {
+              setFlattening(false);
+              if (!placed.ok)
+                console.warn(
+                  `[dsh-aifisher-canvas] 转成 PSD 失败：${placed.error ?? '未知原因'}`,
+                );
+            });
+        }}
+        disabled={flattening}
+        data-fisherai-image-psd="true"
+        aria-label={`把 ${layerCount} 层合成一张扁平图`}
+        title="按每层的原始位置合成一张扁平图写回这个节点（图层几何保留，接调色节点时一层一个输入口）"
+        className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-[var(--af-surface)] text-[var(--af-text-secondary)] hover:bg-[var(--af-hover)] hover:text-[var(--af-text)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--af-focus)] transition-colors disabled:opacity-60"
+      >
+        {flattening ? '合成中…' : multiple ? `转成 PSD · ${layerCount} 层` : '重合成'}
+      </button>
+    ) : null;
+  const layerBadge = hasLayers ? (
+    <span
+      data-fisherai-image-layers={String(layerCount)}
+      title={`这个节点是一个 ${layerCount} 层的图层文档（底图 + ${Math.max(0, layerCount - 1)} 个图层）`}
+      className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-[var(--af-surface)] text-[var(--af-info)]"
+    >
+      {layerCount} 层
+    </span>
+  ) : null;
+  /**
+   * 「下载 PSD」：把图层文档写成真的 .psd（一层一个图层、位置/顺序/透明度都按原样），
+   * 用户直接丢进 Photoshop 就能继续改（用户 2026-11-21：「psd节点可以下载导入ps里」）。
+   * 编码器在 src/client/canvas/psdWriter.ts，由 __FISHERAI_LAYER_STACK__.downloadPsd 调起来。
+   */
+  const psdDownload =
+    hasLayers && hasResult && !busy ? (
+      <button
+        type="button"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          event.currentTarget.blur();
+          const bridge = (
+            window as unknown as {
+              __FISHERAI_LAYER_STACK__?: {
+                downloadPsd(
+                  stack: unknown,
+                  name: string,
+                ): Promise<{ ok: boolean; bytes?: number; error?: string }>;
+              };
+            }
+          ).__FISHERAI_LAYER_STACK__;
+          if (!bridge?.downloadPsd) {
+            console.warn('[dsh-aifisher-canvas] PSD 下载桥不在（页面还是旧版），刷新一下再试。');
+            return;
+          }
+          void bridge
+            .downloadPsd(layerStack, node.title || '图层文档')
+            .catch((error: unknown) => ({
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            }))
+            .then((saved) => {
+              if (!saved.ok)
+                console.warn(`[dsh-aifisher-canvas] 下载 PSD 失败：${saved.error ?? '未知原因'}`);
+            });
+        }}
+        data-fisherai-image-psd-download="true"
+        aria-label="下载 PSD"
+        title="下载成 PSD 文件（一层一个图层、保留位置与顺序，可直接在 Photoshop 里打开）"
+        className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-[var(--af-surface)] text-[var(--af-text-secondary)] hover:bg-[var(--af-hover)] hover:text-[var(--af-text)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--af-focus)] transition-colors"
+      >
+        下载 PSD
+      </button>
+    ) : null;
+  const headerControls = (
+    <>
+      {layerBadge}
+      {psdControl}
+      {psdDownload}
+      {historyControl}
+    </>
+  );
   return (
     <div className={'w-full h-full relative'} data-fisherai-image-preview="true">
       {renderHeader ? (
-        renderHeader(historyControl)
+        renderHeader(headerControls)
       ) : (
         <div className="absolute right-0" style={{ bottom: 'calc(100% + 4px)' }}>
-          {historyControl}
+          {headerControls}
         </div>
       )}
+      {/* 图层文档不叠卡片：用户 2026-11-21「这样拆分出来的图堆叠的形式不好看」 */}
       {multiple &&
         !expanded &&
+        !hasLayers &&
         urls.slice(1, 4).map((_, S) => {
           const C = S + 1,
             N = C * 2.5,

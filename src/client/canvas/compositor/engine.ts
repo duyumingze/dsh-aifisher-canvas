@@ -19,10 +19,12 @@
 
 import {
   evaluationOrder,
+  inputSlots,
   paramsOf,
   specOf,
   type CompositorGraph,
   type CompositorInputImage,
+  type CompositorInputSlot,
   type CompositorKind,
   type CompositorNode,
 } from './graph';
@@ -96,6 +98,8 @@ const PARAM_ORDER: Partial<Record<CompositorKind, string[]>> = {
   sharpen: ['amount'],
   blur: ['radius'],
   transform: ['translateX', 'translateY', 'scale', 'rotation'],
+  // 放置（v1.101）：x / y / 宽 / 高 都是**归一化**的（0..1，相对文档画布，y 为左下原点）
+  place: ['placeX', 'placeY', 'placeWidth', 'placeHeight'],
   mix: ['factor'],
   alphaOver: ['factor'],
   ellipseMask: ['width', 'height', 'softness', 'invert'],
@@ -241,6 +245,18 @@ const EFFECT_BODIES: Partial<Record<CompositorKind, string>> = {
     uv = uv / max(0.01, u_p[2]) + 0.5 - vec2(u_p[0], -u_p[1]);
     vec4 texel = (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) ? vec4(0.0) : texture(u_tex, uv);
     fragColor = texel;
+  `,
+  // 放置（v1.101）：把一张裁片贴回文档里的矩形，矩形之外一律**透明**（不是黑）。
+  // 参数：x / y / width / height 归一化到文档（0..1），且 y 是**左下角原点**（v_uv 同向，
+  // 底边 = 0、顶边 = 1）。host 下发的 bbox 是左上角原点的像素坐标，换算在 graph.ts 里做。
+  place: `
+    vec2 size = max(vec2(u_p[2], u_p[3]), vec2(0.0001));
+    vec2 uv = (v_uv - vec2(u_p[0], u_p[1])) / size;
+    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+      fragColor = vec4(0.0);
+    } else {
+      fragColor = texture(u_tex, uv);
+    }
   `,
   ellipseMask: `
     vec2 d = (v_uv - 0.5) / vec2(max(0.01, u_p[0]) * 0.5, max(0.01, u_p[1]) * 0.5);
@@ -400,7 +416,11 @@ export class CompositorEngine {
   private width = 1;
   private height = 1;
   private graph: CompositorGraph;
-  private images: CompositorInputImage[] = [];
+  /**
+   * 上游端口（不是「上游图片」）：图层文档会把一张输入展开成「一层一个口」，
+   * 所以端口序号 → 图 / 图层矩形的映射统一走 `inputSlots`（与编辑器同一份算法）。
+   */
+  private slots: CompositorInputSlot[] = [];
   private disposed = false;
   /** 输入图加载完 / 加载失败时通知编辑器重绘。 */
   onInvalidate: (() => void) | null = null;
@@ -445,7 +465,8 @@ export class CompositorEngine {
   }
 
   setImages(images: CompositorInputImage[]): void {
-    this.images = images;
+    // 端口 = 展开后的槽位（图层文档一层一个口），不是「一张图一个口」
+    this.slots = inputSlots(images);
   }
 
   setSize(width: number, height: number): void {
@@ -637,7 +658,7 @@ export class CompositorEngine {
 
   /** 输入节点第 port 个输出口的纹理（同一 URL 只上传一次，异步加载）。 */
   private ensureInput(port: number): WebGLTexture | null {
-    const image = this.images[port];
+    const image = this.slots[port];
     if (!image) return null;
     const cached = this.inputs.get(port);
     if (cached && cached.url === image.url) return cached.texture;
@@ -761,8 +782,11 @@ export class CompositorEngine {
       if (!ref) return 'null';
       const node = this.graph.nodes.find((item) => item.id === ref.node);
       if (node?.kind === 'input') {
+        // 端口对应的是「槽位」（图层文档一层一个口），版本号仍然按端口算：
+        // 纹理异步加载完成时 version 会变，key 一变下游才会重算（否则一直停在占位图上）。
         const input = this.inputs.get(ref.port);
-        return `in${ref.port}:${input?.version ?? 0}`;
+        const slot = this.slots[ref.port];
+        return `in${ref.port}:${slot?.url ?? ''}:${input?.version ?? 0}`;
       }
       return `${ref.node}:${this.targets.get(ref.node)?.version ?? 0}`;
     });

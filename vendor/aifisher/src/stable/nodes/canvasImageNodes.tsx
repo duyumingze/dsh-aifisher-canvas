@@ -284,7 +284,16 @@ export function CanvasColorGradeNode(
       nodeId: data.id,
       projectId: data.projectId,
       title: data.title,
-      images: images.map((node) => ({ nodeId: node.id, url: node.url, title: node.title })),
+      // dsh-aifisher-canvas v1.101：图层文档把几何一起递进合成器
+      // （输入节点会一层一个口展开，并按 bbox 贴回原位）
+      images: images.map((node) => ({
+        nodeId: node.id,
+        url: node.url,
+        title: node.title,
+        ...((node as unknown as { layerStack?: unknown }).layerStack
+          ? { layerStack: (node as unknown as { layerStack?: unknown }).layerStack }
+          : {}),
+      })),
       graph: data.compositorGraph,
       onSave: ({ resultUrl: nextUrl, graph }: { resultUrl: string; graph: unknown }) => {
         // dsh-aifisher-canvas v1.73：用户「退出调色节点时应该会在调色节点后添加调整好的图像」。

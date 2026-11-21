@@ -124,6 +124,29 @@ const drawCalls = [];
     imageSmoothingEnabled: true,
     imageSmoothingQuality: 'high',
     clearRect() {},
+    // 启动水幕的点阵（src/client/canvas/bootSplash.ts）会在 rAF 里画小球：
+    // 它跑在和扩图同一块 HTMLCanvasElement 上，替身少一个路径方法就会抛
+    // 「O.beginPath is not a function」，把「整轮没有运行时错误」那条断言带红
+    // （报的是替身的缺口，不是画布的 bug）。这里把 2D 路径 API 补齐成 no-op。
+    beginPath() {},
+    closePath() {},
+    moveTo() {},
+    lineTo() {},
+    arc() {},
+    ellipse() {},
+    rect() {},
+    fill() {},
+    stroke() {},
+    save() {},
+    restore() {},
+    translate() {},
+    rotate() {},
+    scale() {},
+    setTransform() {},
+    fillRect() {},
+    strokeRect() {},
+    setLineDash() {},
+    fillText() {},
     drawImage(image, x, y, width, height) {
       drawCalls.push({
         src: String(image && (image.src || image._src || '')),

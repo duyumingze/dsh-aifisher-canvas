@@ -239,15 +239,27 @@ export {
   chooseApplyTargets,
   connect,
   createDefaultGraph,
+  createLayerCompositeGraph,
   disconnectEdge,
   evaluationOrder,
+  inputSlots,
   insertNodeIntoEdge,
   normalizeGraph,
   outputPortCount,
   paramsOf,
   removeNode,
+  slotsHaveLayers,
   targetIsRawInput,
 } from './compositor/graph';
+// v1.101：图层文档（图层拆分的结果）在画布侧的形态与工具 —— 几何归一、扁平合成图。
+export {
+  downloadLayerStackPsd,
+  flattenLayerStack,
+  normalizeLayerStack,
+  sortedLayers,
+} from './layerStack';
+// v1.101：PSD 编码器（纯字节，回归可以直接解回来验图层数与矩形）。
+export { buildPsd, psdFileName } from './psdWriter';
 export { buildCurveLut, curveValue, normalizeCurvePoints } from './compositor/curves';
 /**
  * 遮罩（用户 2026-11-11 要的「调色面板里做遮罩、接混合节点系数口」）的纯逻辑：

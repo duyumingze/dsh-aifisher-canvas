@@ -29,7 +29,13 @@ import {
 export type CloudChannelKind = ChannelKind;
 
 /** 请求方言（与 host 的 ChannelDialect 同一套值）。 */
-export type ChannelDialect = 'openai' | 'modelscope' | 'workfisher' | 'dashscope' | 'midjourney';
+export type ChannelDialect =
+  | 'openai'
+  | 'modelscope'
+  | 'workfisher'
+  | 'dashscope'
+  | 'midjourney'
+  | 'zhenzhen';
 
 const API = '/api/aifisher/canvas/cloud-channels';
 const PANEL_ATTRIBUTE = 'data-fisherai-cloud-channels';
@@ -49,6 +55,7 @@ const DIALECT_LABELS: Readonly<Record<ChannelDialect, string>> = Object.freeze({
   workfisher: 'FisherAI（work-fisher）',
   dashscope: '阿里云百炼（DashScope）',
   midjourney: 'Midjourney（/v1/midjourney）',
+  zhenzhen: 'ZZAI 真真AI（api.seedance.nz）',
 });
 
 /**
@@ -60,6 +67,7 @@ export function guessDialect(baseUrl: string): ChannelDialect {
     const host = new URL(baseUrl.trim()).hostname.toLowerCase();
     if (host === 'modelscope.cn' || host.endsWith('.modelscope.cn')) return 'modelscope';
     if (host === 'work-fisher.com' || host.endsWith('.work-fisher.com')) return 'workfisher';
+    if (/(?:^|\.)(?:seedance\.nz|zzai\.app|openzhenzhen\.com)$/.test(host)) return 'zhenzhen';
     if (
       /(?:^|\.)(?:dashscope(?:-intl)?\.aliyuncs\.com|maas\.aliyuncs\.com|(?:dashscope|bailian|maas)\.(?:qianwenai|qianwenaiapi)\.com)$/.test(
         host,
@@ -92,6 +100,11 @@ function dialectHintText(draft: ChannelDraft): string {
       + '任务号在 data[0].task_id，轮询 /midjourney/tasks/{id}；一个任务固定出 4 张候选，'
       + '画布的「生成数量」只决定留几张。';
   }
+  if (draft.dialect === 'zhenzhen') {
+    return '路径 /v1/video/generations（单数 video）、seconds 是字符串、档位与宽高比在 metadata；'
+      + '参考图/参考视频先传成公网直链（/v1/files/upload）再进 images / metadata.video_url；'
+      + '轮询 /v1/video/generations/{id}，结果在 data.result_url。ComfyUI 系列各工作流的档位/时长区间不同。';
+  }
   if (draft.dialect === 'openai') {
     return '参考图放 image（单张=字符串，多张=数组）。';
   }
@@ -101,9 +114,11 @@ function dialectHintText(draft: ChannelDraft): string {
       ? '参考图放 image_url（数组）'
       : detected === 'workfisher'
         ? '路径 /image/generations、size 收宽高比、resolution 收 1k/2k/4k、参考图走公网直链'
-        : detected === 'dashscope'
-          ? 'input.messages + parameters、异步头 X-DashScope-Async、轮询 /api/v1/tasks/{id}'
-          : '参考图放 image（单张=字符串）';
+        : detected === 'zhenzhen'
+          ? '路径 /v1/video/generations、档位与宽高比在 metadata、参考素材走公网直链、轮询 /v1/video/generations/{id}'
+          : detected === 'dashscope'
+            ? 'input.messages + parameters、异步头 X-DashScope-Async、轮询 /api/v1/tasks/{id}'
+            : '参考图放 image（单张=字符串）';
   return `自动：当前判为「${DIALECT_LABELS[detected]}」——${detail}。`;
 }
 
@@ -179,6 +194,60 @@ const MIDJOURNEY_PRESET = Object.freeze({
   models: Object.freeze([{ id: 'midjourney-imagine', kind: 'image' as ChannelKind }]),
 });
 
+/**
+ * 「ZZAI 真真AI（api.seedance.nz）」一键预设（2026-11-21，用户原话「我想要接右侧网站的 minimax h3 模型」，
+ * 截图是 https://www.zzai.app/pricing?tag=comfyui 的 ComfyUI 低价精选卡片）。
+ *
+ * 它和 FisherAI 那套**同形但不同处**：路径 `/v1/video/generations` 同为单数 video、回执同样是
+ * `{code:'success', data:{…}}`，但（①）`seconds` 的合法区间按工作流不同（通用 3–15、武戏/文戏 5–15）；
+ * （②）档位词是 480p/608p/672p/768p/896p/1088p/1280p/1440p/2160p 这类**按短边**的档，
+ * 与画布默认的 480p/720p/1080p 对不上；（③）通用档的宽高比只有 16:9 / 9:16。
+ *
+ * 所以预设把价格页上那一排 ComfyUI 工作流整批带进来（左侧「显示名」用短名，画布下拉里才看得清是哪个），
+ * host 侧再按模型夹参数（见 cloudChannels.ts 的 ZZAI_H3_PROFILES）。
+ * 数字人（-digital-human）没预置：它要求「一张图 + 一段驱动音频」，而画布视频节点还没有音频入口。
+ */
+const ZHENZHEN_PRESET = Object.freeze({
+  label: 'ZZAI 真真AI',
+  baseUrl: 'https://api.seedance.nz/v1',
+  models: Object.freeze([
+    { id: 'minimax-h3-comfyui-max', kind: 'video' as ChannelKind, label: 'H3 通用（3–15s）' },
+    { id: 'minimax-h3-comfyui-max-10020', kind: 'video' as ChannelKind, label: 'H3 WF漫剧（15 步）' },
+    { id: 'minimax-h3-comfyui-max-10021', kind: 'video' as ChannelKind, label: 'H3 JY特调（12 步）' },
+    { id: 'minimax-h3-comfyui-wuxi', kind: 'video' as ChannelKind, label: 'H3 武戏' },
+    { id: 'minimax-h3-comfyui-wenxi', kind: 'video' as ChannelKind, label: 'H3 文戏' },
+    { id: 'minimax-h3-comfyui-charswap', kind: 'video' as ChannelKind, label: 'H3 角色替换' },
+    // v1.100：视频超分（价格页 ?kind=video&capability=video-upscale）——
+    // 注意官方模型 ID 把 Price 拼成了 `LowPirce`，照抄才能命中。
+    { id: 'Topaz-Upscale-LowPirce', kind: 'video' as ChannelKind, label: '视频超分（Topaz）' },
+    // v1.101：图层拆分（价格页 ?kind=image&capability=layer-decomposition）——
+    // 一条图 → 底图 + 最多 16 个透明 PNG 图层，按实际输出张数计费；同族的 pro / 5.5 可自行勾选。
+    {
+      id: 'dola-seedream-5.0-flash-layer-decomposition',
+      kind: 'image' as ChannelKind,
+      label: '图层拆分 · Seedream 5.0 Flash',
+    },
+    // v1.104：同族的 **Pro**（2026-11-21 用户原话「dola-seedream-5.0-pro-layer-decomposition
+    // 再接一个这个图像拆分模型」）—— 请求形状与 Flash 逐字段相同（一条图 + auto/1k/1.5k/2k），
+    // 只有拆得更好/更细与单价不同（参考价 ¥0.27/张 ≤236 万像素、¥0.54/张以上），
+    // 所以 host 侧不需要再按模型分叉，这里给个能直接勾的入口即可。
+    {
+      id: 'dola-seedream-5.0-pro-layer-decomposition',
+      kind: 'image' as ChannelKind,
+      label: '图层拆分 · Seedream 5.0 Pro',
+    },
+    // v1.105：GPT Image 2.6 低价版（2026-11-21 用户原话「在画布接入这个模型
+    // zhenzhen-image-g-v2.6-lowprice」，定价页 /pricing/zhenzhen-image-g-v2.6-lowprice?kind=image）——
+    // 文生图 / 参考图编辑，1K ¥0.044/张、2K/4K 按用量结算；端点 n 固定 1，
+    // 画质（auto/low/medium/high/xhigh/max）与输出格式（png/jpeg/webp）都在请求体顶层。
+    {
+      id: 'zhenzhen-image-g-v2.6-lowprice',
+      kind: 'image' as ChannelKind,
+      label: 'GPT Image 2.6 低价版',
+    },
+  ]),
+});
+
 interface ChannelModelDto {
   id: string;
   kind: ChannelKind;
@@ -245,6 +314,13 @@ function defaultPathFor(dialect: ChannelDialect, kind: ChannelKind): string {
   if (dialect === 'dashscope') {
     if (kind === 'image') return '/api/v1/services/aigc/image-generation/generation';
     if (kind === 'text') return '/compatible-mode/v1/chat/completions';
+  }
+  // ZZAI：baseUrl 带不带 /v1 由 host 自己补（见 zhenzhenApiPath），这里只显示它补完的样子。
+  if (dialect === 'zhenzhen') {
+    if (kind === 'image') return '/v1/image/generations';
+    if (kind === 'video') return '/v1/video/generations';
+    if (kind === 'audio') return '/v1/audio/generations';
+    return '/v1/chat/completions';
   }
   if (kind === 'image') return '/images/generations';
   if (kind === 'video') return '/videos/generations';
@@ -464,6 +540,40 @@ function midjourneyDraft(index: number): ChannelDraft {
   return draft;
 }
 
+/** 「+ ZZAI 真真AI」预设草稿：MiniMax H3 ComfyUI 系列整批带进来。 */
+function zhenzhenDraft(index: number): ChannelDraft {
+  const draft = emptyDraft(index);
+  draft.key = `zz${index}`;
+  draft.label = ZHENZHEN_PRESET.label;
+  draft.baseUrl = ZHENZHEN_PRESET.baseUrl;
+  // 留「自动」：api.seedance.nz / *.zzai.app 这两个域名 host 都会判成 zhenzhen
+  draft.dialect = '';
+  draft.models = new Map(
+    ZHENZHEN_PRESET.models.map((model) => [
+      model.id,
+      { kind: model.kind, label: model.label ?? '' },
+    ]),
+  );
+  draft.probed = ZHENZHEN_PRESET.models.map((model) => model.id);
+  /**
+   * v1.101：同一条通道里还带一条**图片**模型（图层拆分，价格页
+   * `?kind=image&capability=layer-decomposition`）。它不在上面那段「视频工作流」叙述里，
+   * 所以单独补一句，免得用户以为预置里只有视频。
+   */
+  draft.probedNote =
+    '预设的是价格页 /pricing?tag=comfyui 上那一排 MiniMax H3 ComfyUI 工作流：'
+    + '通用（最高 1440p）、WF漫剧 15 步、JY特调 12 步、武戏、文戏、角色替换；'
+    + '外加「视频超分（Topaz）」（Topaz-Upscale-LowPirce：把已有视频提升到 720p/1080p/2K/4K，'
+    + '按源视频秒数计费）。'
+    + '档位 / 宽高比 / 时长区间按每个工作流真收的范围出下拉（通用档只有 16:9、9:16）。'
+    + '填好 API Key 后点「保存通道」，画布视频节点里就能选到它们；参考图与参考视频会先上传成公网直链。'
+    + '数字人（-digital-human）没预置：它要「一张图 + 一段驱动音频」，画布视频节点还没有音频入口。'
+    + ' 另带一条图片模型「图层拆分 · Seedream 5.0 Flash」：一张图拆成底图 + 最多 16 个透明 PNG 图层，'
+    + '提示词可留空（自动识别主要元素），按实际输出张数计费；'
+    + '生完在图片节点头部点「摊开 N」，即可把每层摊成独立节点并自动接一个调色节点。';
+  return draft;
+}
+
 // ------------------------------------------------------------------ 面板
 
 export function mountCloudChannelPanel(host: HTMLElement): () => void {
@@ -557,7 +667,9 @@ export function mountCloudChannelPanel(host: HTMLElement): () => void {
           + '魔搭只认 image_url（数组）；FisherAI 走 /image/generations，宽高比给 size、档位给 resolution，'
           + '参考图要先换成公网直链；阿里云百炼走 /api/v1/services/aigc/image-generation/generation，'
           + '参数在 input.messages + parameters，任务号在 output.task_id；'
-          + 'Midjourney 走 /midjourney/generations，参考图放在 image_urls，任务号在 data[0].task_id。'
+          + 'Midjourney 走 /midjourney/generations，参考图放在 image_urls，任务号在 data[0].task_id；'
+          + 'ZZAI 真真AI 走 /v1/video/generations（seconds 是字符串、档位与宽高比在 metadata，'
+          + 'ComfyUI 各工作流的档位/时长区间不同）。'
           + '填错**不会报错** —— 魔搭会把参考图整张丢掉、FisherAI 会把路径错报成 404，'
           + '看到的都像「编辑没生效」。选「自动」就按 Base URL 的域名判定'
           + '（Midjourney 和 FisherAI 同域名、猜不出来，必须显式选）。',
@@ -615,6 +727,17 @@ export function mountCloudChannelPanel(host: HTMLElement): () => void {
       );
     });
     actions.append(midjourneyPreset);
+    const zhenzhenPreset = button('+ ZZAI 真真AI（MiniMax H3）');
+    zhenzhenPreset.setAttribute('data-fisherai-channel-preset', 'zhenzhen');
+    zhenzhenPreset.addEventListener('click', () => {
+      drafts = [...drafts, zhenzhenDraft(newCount++)];
+      render();
+      setStatus(
+        '已按 ZZAI 真真AI 预设填好地址（api.seedance.nz/v1）与 6 条 MiniMax H3 ComfyUI 工作流'
+          + '（通用 / WF漫剧 / JY特调 / 武戏 / 文戏 / 角色替换）—— 填上 API 令牌、点「保存通道」即可在画布视频节点里用。',
+      );
+    });
+    actions.append(zhenzhenPreset);
     const reload = button('重新读取');
     reload.addEventListener('click', () => {
       void (async () => {
@@ -908,7 +1031,14 @@ export function mountCloudChannelPanel(host: HTMLElement): () => void {
     const dialectSelect = el('select', INPUT) as HTMLSelectElement;
     dialectSelect.setAttribute('data-fisherai-channel-dialect', draft.id || draft.key);
     dialectSelect.append(optionElement('自动（按地址判定）', ''));
-    for (const dialect of ['openai', 'modelscope', 'workfisher', 'dashscope', 'midjourney'] as const) {
+    for (const dialect of [
+      'openai',
+      'modelscope',
+      'workfisher',
+      'dashscope',
+      'midjourney',
+      'zhenzhen',
+    ] as const) {
       dialectSelect.append(optionElement(DIALECT_LABELS[dialect], dialect));
     }
     dialectSelect.value = draft.dialect;

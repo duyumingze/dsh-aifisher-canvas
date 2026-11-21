@@ -59,7 +59,13 @@ export interface CloudChannelModel {
  *     `data[0].task_id`、轮询 `/midjourney/tasks/{id}`、收尾给 `image_urls`（4 张）+ `grid_image_url`。
  *     一个任务固定出 4 张候选，`n` 传了也无效。
  */
-export type ChannelDialect = 'openai' | 'modelscope' | 'workfisher' | 'dashscope' | 'midjourney';
+export type ChannelDialect =
+  | 'openai'
+  | 'modelscope'
+  | 'workfisher'
+  | 'dashscope'
+  | 'midjourney'
+  | 'zhenzhen';
 
 export const CHANNEL_DIALECTS: readonly ChannelDialect[] = Object.freeze([
   'openai',
@@ -67,6 +73,7 @@ export const CHANNEL_DIALECTS: readonly ChannelDialect[] = Object.freeze([
   'workfisher',
   'dashscope',
   'midjourney',
+  'zhenzhen',
 ]);
 
 export const CHANNEL_DIALECT_LABELS: Readonly<Record<ChannelDialect, string>> = Object.freeze({
@@ -75,6 +82,7 @@ export const CHANNEL_DIALECT_LABELS: Readonly<Record<ChannelDialect, string>> = 
   workfisher: 'FisherAI（work-fisher）',
   dashscope: '阿里云百炼（DashScope）',
   midjourney: 'Midjourney（/v1/midjourney）',
+  zhenzhen: 'ZZAI 真真AI（api.seedance.nz）',
 });
 
 /**
@@ -96,7 +104,26 @@ const DASHSCOPE_HOST_PATTERN =
   /(?:^|\.)(?:dashscope(?:-intl)?\.aliyuncs\.com|maas\.aliyuncs\.com|(?:dashscope|bailian|maas)\.(?:qianwenai|qianwenaiapi)\.com)$/;
 
 /**
- * 按地址猜方言：魔搭 / FisherAI / 百炼。
+ * ZZAI 真真AI（`www.zzai.app` 的开发者 API，域名 `api.seedance.nz`）。
+ *
+ * 2026-11-21 用户给的是价格页 `/pricing?tag=comfyui` 上的 MiniMax H3 ComfyUI 系列
+ * （`minimax-h3-comfyui-max` / `-max-10020`「WF漫剧版」/ `-max-10021`「JY特调」/
+ * `-wuxi` 武戏 / `-wenxi` 文戏 / `-charswap` 角色替换）。它们走的是**旧版异步任务端点**
+ * `POST /v1/video/generations`（单数 video）→ 轮询 `GET /v1/video/generations/{id}`，
+ * 回执是 `{code:'success', data:{task_id, status, result_url, data:{content:{video_url}}}}`，
+ * 与 FisherAI 那套**同形**；官方另外还有一个 `POST /v2/video_generation`（MiniMax V2 原生格式，
+ * 任务号 `task_id`、结果 `task.content.url`），画布先接前者。
+ *
+ * 三处与 FisherAI 不同、照抄 FisherAI 会静默出错的地方：
+ *   ① `seconds` 的合法区间按模型不同（通用 3–15、武戏/文戏 5–15），超区间是**提交即拒**；
+ *   ② `metadata.resolution` 只收 480p/608p/768p/896p/1088p/1280p/1440p 这类**按短边**的档位，
+ *      画布上的 `720p`/`1080p` 不在表里，原样发上去就是 400；
+ *   ③ ComfyUI 通用档（`-max`）的 `metadata.ratio` 只有 16:9 / 9:16，画布给的 1:1、4:3 一律要被夹。
+ */
+const ZHENZHEN_HOST_PATTERN = /(?:^|\.)(?:seedance\.nz|zzai\.app|openzhenzhen\.com)$/;
+
+/**
+ * 按地址猜方言：魔搭 / FisherAI / 百炼 / ZZAI。
  *
  * **`midjourney` 故意不在自动判定里**（2026-11-11 用户原话「帮我再画布接一下 Midjourney 模型」）：
  * 它和 FisherAI 图像/视频**同一个域名、同一个密钥**，唯一的分界是路径 `/v1/midjourney/*`。
@@ -108,6 +135,7 @@ export function detectChannelDialect(baseUrl: string): ChannelDialect {
     const host = new URL(baseUrl).hostname.toLowerCase();
     if (host === 'modelscope.cn' || host.endsWith('.modelscope.cn')) return 'modelscope';
     if (host === 'work-fisher.com' || host.endsWith('.work-fisher.com')) return 'workfisher';
+    if (ZHENZHEN_HOST_PATTERN.test(host)) return 'zhenzhen';
     if (DASHSCOPE_HOST_PATTERN.test(host)) return 'dashscope';
   } catch {
     // 地址不合法是 normalizeBaseUrl 的活，这里只负责猜不出来时回 openai
@@ -171,6 +199,593 @@ const DIALECT_PATHS: Readonly<Partial<Record<ChannelDialect, Partial<Record<Clou
 
 /** FisherAI 换参考图直链的上传路径（挂 baseUrl 之后）。 */
 export const WORKFISHER_UPLOAD_PATH = '/files/upload';
+
+/**
+ * ZZAI（api.seedance.nz）的 `/v1` 前缀该怎么补。
+ *
+ * 官方文档写的 Base URL 是**不带 `/v1`** 的 `https://api.seedance.nz`（路径里自带 `/v1`），
+ * 而「OpenAI SDK 兼容」那节又让人填 `…/v1`；两边都有人照抄。所以这里自己补：
+ * baseUrl 已经带 `/v1` 就原样，不带就补一个（照抄写死 `/v1/...` 会在 `…/v1` 上拼成 `/v1/v1/...`）。
+ */
+function zhenzhenV1Prefix(baseUrl: string): string {
+  return /\/v1$/i.test(baseUrl.replace(/\/+$/u, '')) ? '' : '/v1';
+}
+
+/** ZZAI 各媒体类型的提交路径（相对 baseUrl）。 */
+export function zhenzhenApiPath(baseUrl: string, kind: CloudKind): string {
+  const prefix = zhenzhenV1Prefix(baseUrl);
+  if (kind === 'video') return `${prefix}/video/generations`;
+  if (kind === 'image') return `${prefix}/image/generations`;
+  if (kind === 'audio') return `${prefix}/audio/generations`;
+  return `${prefix}/chat/completions`;
+}
+
+/** ZZAI 的参考素材上传路径（multipart 的 `file`，回 `{url}`，24 小时有效）。 */
+export function zhenzhenUploadPath(baseUrl: string): string {
+  return `${zhenzhenV1Prefix(baseUrl)}/files/upload`;
+}
+
+/**
+ * 一条视频模型在画布上**能选什么**（档位 / 宽高比 / 时长区间 / 素材上限）。
+ *
+ * 它同时喂两头：host 侧提交前按这些区间夹参数（端点不认识的档位是**提交即拒**，
+ * 而且报错里只写 "invalid request"），client 侧按它出模型下拉的可选项
+ * （见 `CloudChannelModels.videoEntry`），免得用户选到必然失败的组合。
+ */
+export interface ChannelVideoProfile {
+  /** 该模型真收的档位词（小写 p 档）。 */
+  resolutions: string[];
+  /** 该模型真收的宽高比。 */
+  aspectRatios: string[];
+  minSeconds: number;
+  maxSeconds: number;
+  maxImages: number;
+  maxAudios: number;
+  maxVideos: number;
+  seed: boolean;
+  /**
+   * 超分模型（v1.100，Topaz-Upscale）：
+   *   - `qualities` 是它自己的「超分模型」词表（Ultra/Max/High/Medium/Low），画布上出一个下拉；
+   *   - `upscaler: true` 表示**只收一段源视频**，不要提示词、不要秒数、不要宽高比 ——
+   *     时长由上游从源视频读，画布上就不该逼用户填一个它会忽略的数字。
+   */
+  qualities?: string[];
+  defaultQuality?: string;
+  upscaler?: boolean;
+}
+
+/**
+ * ZZAI 上 MiniMax H3 ComfyUI 系列的参数范围（2026-11-21 照 `https://api.seedance.nz/docs/llms.txt`
+ * 逐个模型抄的，价格页 `/pricing?tag=comfyui` 上那一排就是它们）。
+ *
+ * 为什么必须逐条写而不是给一个通用区间：这一家**不同工作流的分辨率词表不一样**
+ * （通用档到 1440p、漫剧/JY 只到 768p、武戏/文戏到 2160p 且多出 704p/928p），
+ * 时长下限也不一样（武戏/文戏 5 秒起，其余 3 秒起）。少写一条，用户就会撞上
+ * 「这个档这个模型不支持」的 400，而面板上看不出是哪一层的问题。
+ */
+const ZZAI_H3_PROFILES: Readonly<Record<string, ChannelVideoProfile>> = Object.freeze({
+  'minimax-h3-comfyui-max': Object.freeze({
+    resolutions: ['480p', '608p', '768p', '896p', '1088p', '1280p', '1440p'],
+    aspectRatios: ['16:9', '9:16'],
+    minSeconds: 3,
+    maxSeconds: 15,
+    maxImages: 9,
+    maxAudios: 3,
+    maxVideos: 0,
+    seed: false,
+  }),
+  'minimax-h3-comfyui-max-10020': Object.freeze({
+    resolutions: ['480p', '608p', '672p', '768p'],
+    aspectRatios: ['16:9', '9:16'],
+    minSeconds: 3,
+    maxSeconds: 15,
+    maxImages: 6,
+    maxAudios: 3,
+    maxVideos: 0,
+    seed: false,
+  }),
+  'minimax-h3-comfyui-max-10021': Object.freeze({
+    resolutions: ['480p', '608p', '672p', '768p'],
+    aspectRatios: ['16:9', '9:16'],
+    minSeconds: 3,
+    maxSeconds: 15,
+    maxImages: 9,
+    maxAudios: 3,
+    maxVideos: 0,
+    seed: false,
+  }),
+  'minimax-h3-comfyui-wuxi': Object.freeze({
+    resolutions: ['480p', '704p', '768p', '928p', '1088p', '1440p', '2160p'],
+    aspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'],
+    minSeconds: 5,
+    maxSeconds: 15,
+    maxImages: 9,
+    maxAudios: 3,
+    maxVideos: 3,
+    seed: true,
+  }),
+  'minimax-h3-comfyui-wenxi': Object.freeze({
+    resolutions: ['480p', '704p', '768p', '928p', '1088p', '1440p', '2160p'],
+    aspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4'],
+    minSeconds: 5,
+    maxSeconds: 15,
+    maxImages: 9,
+    maxAudios: 3,
+    maxVideos: 3,
+    seed: true,
+  }),
+  'minimax-h3-comfyui-charswap': Object.freeze({
+    resolutions: ['480p', '768p', '1088p'],
+    aspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'],
+    minSeconds: 5,
+    maxSeconds: 15,
+    maxImages: 9,
+    maxAudios: 0,
+    maxVideos: 1,
+    seed: true,
+  }),
+  'minimax-h3-comfyui-digital-human': Object.freeze({
+    resolutions: ['608p', '672p'],
+    aspectRatios: ['9:16', '16:9'],
+    minSeconds: 3,
+    maxSeconds: 15,
+    maxImages: 1,
+    maxAudios: 1,
+    maxVideos: 0,
+    seed: true,
+  }),
+  // 按**运行时长**计费的那几个变体：固定 768p 档，参数表另有差异（见文档）。
+  'minimax-h3-comfyui-max-10020-token': Object.freeze({
+    resolutions: ['768p'],
+    aspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4', '3:2', '2:3', '21:9'],
+    minSeconds: 5,
+    maxSeconds: 15,
+    maxImages: 6,
+    maxAudios: 3,
+    maxVideos: 0,
+    seed: false,
+  }),
+  'minimax-h3-comfyui-max-10021-token': Object.freeze({
+    resolutions: ['768p'],
+    aspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4', '3:2', '2:3', '21:9'],
+    minSeconds: 5,
+    maxSeconds: 15,
+    maxImages: 6,
+    maxAudios: 3,
+    maxVideos: 1,
+    seed: false,
+  }),
+  'minimax-h3-comfyui-charswap-token': Object.freeze({
+    resolutions: ['768p'],
+    aspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'],
+    minSeconds: 5,
+    maxSeconds: 15,
+    maxImages: 5,
+    maxAudios: 0,
+    maxVideos: 1,
+    seed: false,
+  }),
+  'minimax-h3-comfyui-digital-human-token': Object.freeze({
+    resolutions: ['768p'],
+    aspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4', '3:2', '2:3', '21:9'],
+    minSeconds: 3,
+    maxSeconds: 15,
+    maxImages: 1,
+    maxAudios: 1,
+    maxVideos: 0,
+    seed: false,
+  }),
+});
+
+/**
+ * ZZAI 的「视频超分」模型（2026-11-21 用户给的
+ * `https://www.zzai.app/pricing?kind=video&capability=video-upscale`）。
+ *
+ * 模型 ID 就是 `Topaz-Upscale-LowPirce`（上游把 Price 拼成了 Pirce，**这是官方 ID**，
+ * 照抄才能命中；站点内部还有一个旧别名 `RH-Upscale`，也一并认）。
+ *
+ * 与 H3 那一排的差别不在路径（同样 `POST /v1/video/generations` → `GET /v1/video/generations/{id}`），
+ * 而在**请求体**：它不收 prompt / seconds / ratio，只收一段源视频和两个自己的参数 ——
+ *   `metadata.video_url`（数组，恰好 1 条，MP4）、`metadata.resolution`（720p/1080p/2K/4K，
+ *   注意 2K/4K 是**大写 K**，与 H3 全小写的档位词不兼容）、`metadata.quality`
+ *   （Ultra/Max/High/Medium/Low，默认 Max）。
+ * 时长由上游按源视频读，计费 = 源视频秒数 × 质量单价 × 档位倍率（720p ×1 / 1080p ×2 / 2K ×3 / 4K ×4）。
+ */
+const ZZAI_TOPAZ_UPSCALER_PROFILE: ChannelVideoProfile = Object.freeze({
+  resolutions: ['720p', '1080p', '2K', '4K'],
+  // 超分保持源视频画幅，宽高比只用于界面预览（提交时不会带）
+  aspectRatios: ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9'],
+  minSeconds: 0,
+  maxSeconds: 0,
+  maxImages: 0,
+  maxAudios: 0,
+  maxVideos: 1,
+  seed: false,
+  qualities: ['Ultra', 'Max', 'High', 'Medium', 'Low'],
+  defaultQuality: 'Max',
+  upscaler: true,
+});
+
+/** 该模型在这家端点上的参数表；认不出来（别家的视频模型）回 null = 原样透传，不做夹取。 */
+export function zzaiVideoProfile(modelId: string): ChannelVideoProfile | null {
+  const id = modelId.trim();
+  if (id === 'Topaz-Upscale-LowPirce' || id === 'RH-Upscale') return ZZAI_TOPAZ_UPSCALER_PROFILE;
+  return ZZAI_H3_PROFILES[id] ?? null;
+}
+
+/**
+ * ZZAI 的**图层拆分**系列（2026-11-21 用户原话「帮我接这个模型 dola-seedream-5.0-flash-layer-decomposition，
+ * 我要测试图层拆分功能」）。
+ *
+ * 这一族有 6 条（`seedream-v5-pro/flash/v5.5` 与海外站别名 `dola-seedream-5.0-pro/5.0-flash/5.5`，
+ * 各自都带 `-layer-decomposition` 后缀），请求形状完全相同，所以按后缀认、不逐条枚举 ——
+ * 官方定价页换一条 pro/flash 时不必回来改代码。
+ *
+ * 它们与同通道的 t2i/i2i **只有三处不同**，也正是必须单独认出来的原因：
+ *   ① 必须恰好 1 张待拆图（`images` 只有一项；多图是 400）；
+ *   ② 档位是 `auto` / `1k` / `1.5k` / `2k`（`4k` 不在表里，普通生成那套 `1k/2k/4k` 直接发会 400）；
+ *   ③ 一次请求产出「1 张底图 + 最多 16 个透明图层」，**按实际输出张数计费**（实测 11 张 ¥1.232），
+ *      所以「生成数量」对它没有意义 —— 叫 N 次就是 N 次翻倍的钱。
+ */
+const ZZAI_LAYER_DECOMPOSITION_PATTERN = /-layer-decomposition$/i;
+
+/** 是不是 ZZAI 的图层拆分模型（只有 zhenzhen 方言走这套请求体）。 */
+export function isLayerDecompositionModel(modelId: unknown): boolean {
+  return typeof modelId === 'string' && ZZAI_LAYER_DECOMPOSITION_PATTERN.test(modelId.trim());
+}
+
+/**
+ * 图像模型随 `/cloud-channels` 下发给界面的参数表（与视频的 `videoProfile` 同思路）：
+ * 档位词按**模型真收的**出下拉，别让人选到必然 400 的组合。
+ */
+export interface ChannelImageProfile {
+  /** true = 这个模型只做图层拆分（画布上带「图层拆分」特殊功能 + 只吃 1 张输入图）。 */
+  layerDecomposition?: boolean;
+  /** 该模型真收的档位词（图层拆分是 `auto`/`1k`/`1.5k`/`2k`）。 */
+  resolutions?: string[];
+  /** 一次生成的固定产出说明（界面提示用）。 */
+  outputNote?: string;
+  /**
+   * 画质词表（GPT Image 2.6 系：`auto`/`low`/`medium`/`high`/`xhigh`/`max`）。
+   * 有它 → 界面上出一个「画质」下拉，值直接进请求体的 `quality`。
+   */
+  qualities?: string[];
+  defaultQuality?: string;
+  /** 输出格式词表（`png`/`jpeg`/`webp`；SVG/GIF 只给文生图，画布不收）。 */
+  outputFormats?: string[];
+  /**
+   * 一次请求固定出 1 张（端点 `n` 只收 1，传 2 是 400）：
+   * 界面上就别给「生成数量」—— 那个控件在这条路上只会让人以为能一次出多张。
+   */
+  fixedCount?: boolean;
+}
+
+export const ZZAI_LAYER_DECOMPOSITION_PROFILE: ChannelImageProfile = Object.freeze({
+  layerDecomposition: true,
+  // 画布上的显示值用大写档位（与其它模型的 1K/2K 同形），映射在 zzaiLayerResolution。
+  resolutions: ['自动', '1K', '1.5K', '2K'],
+  outputNote: '一次产出 1 张底图 + 最多 16 个透明图层，按实际输出张数计费',
+});
+
+/**
+ * ZZAI 的 **GPT Image 2.6 低价版**（2026-11-21 用户原话「在画布接入这个模型
+ * zhenzhen-image-g-v2.6-lowprice」，定价页 `/pricing/zhenzhen-image-g-v2.6-lowprice?kind=image`）。
+ *
+ * 官方 llms.txt「GPT Image 2.6 低价版」一节 + 真机实测（2026-11-21）：
+ *   POST {base}/v1/image/generations
+ *   { model, prompt, size:'1:1', resolution:'1k|2k|4k',
+ *     quality:'auto|low|medium|high|xhigh|max', output_format:'png|jpeg|webp',
+ *     n:1, images:[≤16 张公网直链] }
+ *   → **顶层 TaskDto**：{ id, task_id, model, status:'queued', created_at }
+ *   GET {base}/v1/image/generations/{id}
+ *   → { code:'success', data:{ task_id, status:'IN_PROGRESS' → 'SUCCESS',
+ *       result_url, data:{ content:{ image_url, image_urls[] } } } }
+ *
+ * 注意提交与轮询是**两种包装**：提交是 OpenAI Video 风格的顶层对象（任务号在 `task_id`），
+ * 轮询才是 `{code,data}` 两层。`channelTaskId` / `channelTaskState` 两边都认，所以这里不必分叉，
+ * 但按 `{code:'success',data:{task_id}}` 去读提交回执会读空 —— 这是本轮真机踩到的第一处。
+ *
+ * 与同通道其它图像模型（Seedream 那套）**三处不同**，错一处要么 400、要么白花钱：
+ *   ① 档位 / 画质 / 格式 / 张数都在**顶层**（Seedream 在 `metadata` 里）；
+ *   ② `n` 固定 1 —— 实测 n=2 直接 400「supports 1K, 2K, 4K and n=1」，
+ *      所以「生成数量」在这条路上不是「一次出几张」，要 N 张只能叫 N 次；
+ *   ③ 1K 是**固定价** ¥0.044/张，2K/4K 按实际用量结算（estimate 实测 ¥0.236 / ¥0.315）。
+ *
+ * SVG / GIF 只给文生图且要额外字段（`svg.model` / `frame_count` / `size=auto`），
+ * 画布的结果链路只收静态图，一并关掉 —— 给了入口就有人点，点了就是「提交成功、画布上没有图」。
+ */
+const ZZAI_GPT_IMAGE_PATTERN = /^zhenzhen-image-g-v2\.6-lowprice$/i;
+
+/** 是不是 ZZAI 的 GPT Image 2.6 低价版（只有它走顶层 quality/output_format 那一套）。 */
+export function isZzaiGptImageModel(modelId: unknown): boolean {
+  return typeof modelId === 'string' && ZZAI_GPT_IMAGE_PATTERN.test(modelId.trim());
+}
+
+export const ZZAI_GPT_IMAGE_PROFILE: ChannelImageProfile = Object.freeze({
+  resolutions: ['1K', '2K', '4K'],
+  qualities: ['auto', 'low', 'medium', 'high', 'xhigh', 'max'],
+  defaultQuality: 'auto',
+  outputFormats: ['png', 'jpeg', 'webp'],
+  fixedCount: true,
+  outputNote: '每次出 1 张；1K ¥0.044/张，2K/4K 按实际用量结算',
+});
+
+/** 该图像模型在这家端点上的参数表；认不出来回 null = 走普通图像分支。 */
+export function zzaiImageProfile(modelId: string): ChannelImageProfile | null {
+  if (isZzaiGptImageModel(modelId)) return ZZAI_GPT_IMAGE_PROFILE;
+  return isLayerDecompositionModel(modelId) ? ZZAI_LAYER_DECOMPOSITION_PROFILE : null;
+}
+
+/**
+ * 图层拆分的**结果顺序与去重**。
+ *
+ * 2026-11-21 真机实测的坑：一次拆分回的 JSON 里同一个底图会出现**两次**，而且 URL 不同 ——
+ *   `data.result_url`             = `https://rh-hk-images.xiaoyaoyou.com/…/c891f93e.png`
+ *   `data.data.content.image_url` = `https://rh-hk-images-1252422369.cos.ap-hongkong.myqcloud.com/…/c891f93e.png`
+ * 两个域名指向同一份对象，通用收集（collectResultRefs）按完整 URL 去重就会算成两张，
+ * 于是画布上「13 张结果」里前两格都是底图 —— 用户点的「图层 1」其实是底图，后面全错位一格。
+ *
+ * 所以图层拆分这条链只认顺序表：`data.data.content.image_urls` 是上游按 zindex 排好的完整列表
+ * （底图在最前、图层依次跟上），按**文件名**去重（同名的不同签名域名 = 同一张图）。
+ * 列表缺失（少见）回空数组，由调用方退回通用收集。
+ */
+export function layerResultUrls(parsed: unknown): string[] {
+  const content = (
+    parsed as { data?: { data?: { content?: { image_urls?: unknown } } } } | null
+  )?.data?.data?.content;
+  const list = Array.isArray(content?.image_urls)
+    ? content.image_urls.filter(
+        (item): item is string => typeof item === 'string' && Boolean(item.trim()),
+      )
+    : [];
+  const seen = new Set<string>();
+  const urls: string[] = [];
+  for (const raw of list) {
+    const url = raw.trim();
+    const file = url.split('?')[0].split('/').pop() ?? url;
+    if (seen.has(file)) continue;
+    seen.add(file);
+    urls.push(url);
+  }
+  return urls;
+}
+
+/**
+ * 图层的**几何**：文档画布尺寸 + 每一层该贴在哪儿、多大。
+ *
+ * 为什么必须有它（2026-11-21 用 PIL 对真机回执做过四种假设的像素对比）：
+ * 图层 PNG 不是「整幅文档 + 透明」，而是**元素区域按统一倍数放大后的裁片**
+ * （例：bbox 588×220 的图层 PNG 是 1062×397，两个方向都是 1.806 倍），
+ * 所以贴回文档的正确做法是「按 bbox 的矩形**缩放**贴」——
+ * 实测全量重建与原图最接近（平均通道差 17.6，其余假设 26.7 / 27.2）。
+ * 拿不到 bbox 时退化成整幅文档（底图 zindex 0 就是这种，没有 boundingBox 字段）。
+ *
+ * `boundingBox.absolute` 是文档像素坐标 [x0, y0, x1, y1]（`normalized` 是同一组值 ÷ 文档尺寸 ×1000）。
+ */
+export interface LayerStackLayer {
+  url: string;
+  name?: string;
+  /** 0 = 底图（最下层），越大越靠上。 */
+  zindex: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface LayerStack {
+  /** 文档画布尺寸（= 底图尺寸）。 */
+  width: number;
+  height: number;
+  layers: LayerStackLayer[];
+}
+
+/** `"1424x800"` → `{width, height}`；认不出来回 null。 */
+function parseSize(value: unknown): { width: number; height: number } | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d+)\s*[x×*]\s*(\d+)$/i.exec(value.trim());
+  if (!match) return null;
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+/**
+ * 从回执的 `data.data.content.layers[]` 取图层几何（按 zindex 升序 = 从下往上）。
+ * 拿不到（老端点 / 没有 layers 字段）回 null，调用方退回「当普通多图处理」。
+ */
+export function layerStackOf(parsed: unknown): LayerStack | null {
+  const content = (
+    parsed as { data?: { data?: { content?: { layers?: unknown } } } } | null
+  )?.data?.data?.content;
+  const rawLayers = Array.isArray(content?.layers) ? content.layers : [];
+  const items = rawLayers
+    .map((raw, index) => (raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : null))
+    .filter((item): item is Record<string, unknown> => item !== null)
+    .map((item, index) => ({
+      item,
+      index,
+      zindex: Number.isFinite(Number(item.zindex)) ? Number(item.zindex) : index,
+      size: parseSize(item.size),
+    }));
+  if (!items.length) return null;
+  // 文档尺寸 = 底图（zindex 0）的 size；底图缺失时取所有 size 里最大的那个
+  const base = items.find((entry) => entry.zindex === 0) ?? items[0];
+  let width = base?.size?.width ?? 0;
+  let height = base?.size?.height ?? 0;
+  if (!width || !height) {
+    for (const entry of items) {
+      if (!entry.size) continue;
+      width = Math.max(width, entry.size.width);
+      height = Math.max(height, entry.size.height);
+    }
+  }
+  const layers: LayerStackLayer[] = [];
+  for (const entry of items.slice().sort((a, b) => a.zindex - b.zindex)) {
+    const url = typeof entry.item.url === 'string' ? entry.item.url.trim() : '';
+    if (!url) continue;
+    const box = (entry.item.boundingBox as { absolute?: unknown } | undefined)?.absolute;
+    const values = Array.isArray(box) ? box.map((value) => Number(value)) : [];
+    let x = 0;
+    let y = 0;
+    let w = width;
+    let h = height;
+    if (values.length === 4 && values.every((value) => Number.isFinite(value))) {
+      x = Math.max(0, Math.min(width, Math.round(values[0])));
+      y = Math.max(0, Math.min(height, Math.round(values[1])));
+      w = Math.max(1, Math.min(width - x, Math.round(values[2] - values[0])));
+      h = Math.max(1, Math.min(height - y, Math.round(values[3] - values[1])));
+    }
+    layers.push({
+      url,
+      ...(typeof entry.item.name === 'string' && entry.item.name.trim()
+        ? { name: entry.item.name.trim().slice(0, 60) }
+        : {}),
+      zindex: entry.zindex,
+      x,
+      y,
+      width: w,
+      height: h,
+    });
+  }
+  if (!layers.length || !width || !height) return null;
+  return { width, height, layers };
+}
+
+/**
+ * 画布档位 → 图层拆分端点真收的档位词。
+ *
+ * 端点只认 `auto` / `1k` / `1.5k` / `2k` 四个词（官网 llms.txt 的 metadata.resolution 表），
+ * 画布下拉里的 `4K`、视频档 `720p/1080p` 一律夹到能跑的档：4K/2K→2k、1.5K→1.5k、1K→1k，
+ * 认不出来按官方默认 `auto`（= 沿用输入图的分辨率档，最省也最不容易糊）。
+ */
+export function zzaiLayerResolution(body: Record<string, unknown> | null): string {
+  const raw = typeof body?.resolution === 'string' ? body.resolution.trim().toLowerCase() : '';
+  if (raw === '1.5k' || raw === '1.5') return '1.5k';
+  if (raw === '1k' || raw === '720p') return '1k';
+  if (raw === '2k' || raw === '4k' || raw === '1080p' || raw === '1440p') return '2k';
+  return 'auto';
+}
+
+/**
+ * GPT Image 2.6 低价版的档位：只有 `1k` / `2k` / `4k`，**认不出来按 1k**。
+ *
+ * 为什么不复用 zzaiImageResolution（它的默认是 2k）：这条模型 1K 是固定 ¥0.044，
+ * 2K/4K 按实际用量结算（¥0.236 / ¥0.315 量级）—— 一个没填档位的请求不该悄悄按 2K 计费。
+ */
+export function zzaiGptImageResolution(body: Record<string, unknown> | null): string {
+  const raw = typeof body?.resolution === 'string' ? body.resolution.trim().toLowerCase() : '';
+  if (raw === '4k') return '4k';
+  if (raw === '2k' || raw === '1440p' || raw === '1080p') return '2k';
+  return '1k';
+}
+
+/**
+ * 画质：`auto` / `low` / `medium` / `high` / `xhigh` / `max`。
+ *
+ * 画布的图片节点上 `quality` 字段默认是 `auto`（vendor 的 buildImageRequest 兜底写的），
+ * 这个模型也正好吃 `auto`，所以认不出来就回 `auto` —— 别把一个端点不认识的词发上去。
+ */
+export function zzaiImageQuality(body: Record<string, unknown> | null): string {
+  const raw = typeof body?.quality === 'string' ? body.quality.trim().toLowerCase() : '';
+  const allowed = ZZAI_GPT_IMAGE_PROFILE.qualities ?? ['auto'];
+  return allowed.find((item) => item === raw) ?? 'auto';
+}
+
+/** 输出格式：只收 `png` / `jpeg` / `webp`（`jpg` 是别名的兼容写法，这里统一成 `jpeg`）。 */
+export function zzaiImageOutputFormat(body: Record<string, unknown> | null): string {
+  const raw = typeof body?.output_format === 'string' ? body.output_format.trim().toLowerCase() : '';
+  if (raw === 'jpg' || raw === 'jpeg') return 'jpeg';
+  if (raw === 'webp') return 'webp';
+  // 默认 png：结果要进画布 / 调色合成器，有损格式在这一步就开始掉细节。
+  return 'png';
+}
+
+/** 这个视频模型是不是「只收源视频」的超分模型（画布上不必填提示词/时长）。 */
+export function isVideoUpscaler(modelId: string): boolean {
+  return zzaiVideoProfile(modelId)?.upscaler === true;
+}
+
+/**
+ * 画布档位 → 超分端点真收的档位词。
+ *
+ * 与 H3 的 `closestVideoResolution` 不同：这家的大档位是 `2K`/`4K`（大写 K），
+ * 小档位才是 `720p`/`1080p`（小写 p）。统一转成官方写法，猜不出来按文档默认 1080p。
+ */
+export function upscaleTargetResolution(value: unknown): string {
+  const raw = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (raw === '720p' || raw === '1080p') return raw;
+  if (raw === '2k') return '2K';
+  if (raw === '4k') return '4K';
+  return '1080p';
+}
+
+/** 画布下拉 → 超分端点真收的质量词（大小写敏感：`Ultra`/`Max`/…；不认识按默认 Max）。 */
+export function upscaleQuality(value: unknown): string {
+  const allowed = ZZAI_TOPAZ_UPSCALER_PROFILE.qualities ?? ['Max'];
+  const raw = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  const hit = allowed.find((item) => item.toLowerCase() === raw);
+  return hit ?? ZZAI_TOPAZ_UPSCALER_PROFILE.defaultQuality ?? 'Max';
+}
+
+/** 画布档位（720p/1080p/1K…）→ 端点真收的档位。 */
+export function closestVideoResolution(desired: string, allowed: readonly string[]): string | null {
+  const raw = desired.trim().toLowerCase();
+  if (!raw) return null;
+  if (allowed.includes(raw)) return raw;
+  const pick = /^(\d+(?:\.\d+)?)\s*[pP]$/.exec(raw);
+  const wanted = pick ? Number(pick[1]) : null;
+  if (wanted === null || !Number.isFinite(wanted)) return allowed[0] ?? null;
+  let best = allowed[0] ?? null;
+  let bestDistance = Infinity;
+  for (const candidate of allowed) {
+    const digits = /^(\d+)\s*[pP]$/.exec(candidate);
+    if (!digits) continue;
+    const distance = Math.abs(Number(digits[1]) - wanted);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+/** 画布宽高比 → 端点真收的宽高比（按对数值最接近，1:1 这种两边都不像时取第一个）。 */
+export function closestAspectRatio(desired: string, allowed: readonly string[]): string | null {
+  const raw = desired.trim().toLowerCase();
+  const parse = (value: string) => {
+    const match = /^(\d+(?:\.\d+)?)\s*[:x/]\s*(\d+(?:\.\d+)?)$/.exec(value);
+    if (!match) return null;
+    const a = Number(match[1]);
+    const b = Number(match[2]);
+    if (!(a > 0) || !(b > 0)) return null;
+    return a / b;
+  };
+  if (!raw) return null;
+  if (allowed.includes(raw)) return raw;
+  const wanted = parse(raw);
+  if (wanted === null) return allowed[0] ?? null;
+  let best = allowed[0] ?? null;
+  let bestDistance = Infinity;
+  for (const candidate of allowed) {
+    const value = parse(candidate);
+    if (value === null) continue;
+    const distance = Math.abs(Math.log(value) - Math.log(wanted));
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = candidate;
+    }
+  }
+  return best;
+}
+
+/** 视频时长 → 该模型允许的整秒（夹到区间里）。 */
+export function clampSeconds(value: unknown, profile: Pick<ChannelVideoProfile, 'minSeconds' | 'maxSeconds'>): number | null {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return Math.min(profile.maxSeconds, Math.max(profile.minSeconds, Math.round(seconds)));
+}
+
 
 const DEFAULT_TIMEOUT_MS = 900_000;
 const MIN_TIMEOUT_MS = 5_000;
@@ -388,7 +1003,10 @@ const KIND_HINTS: ReadonlyArray<readonly [RegExp, CloudKind]> = Object.freeze([
     'image' as CloudKind,
   ],
   [
-    /(?:^|[-_/.])(?:t2v|i2v|v2v|video|veo|sora|kling|seedance|wan2|hunyuanvideo|hailuo|cogvideo|ltx)/i,
+    // `minimax-h3-comfyui-*`（ZZAI 的 ComfyUI 工作流系列）名里没有 t2v/video 这类词根，
+    // 不单独列就会被落到下面的默认值「图像」—— 勾进来挂到视频节点上是 422。
+    // `Topaz-Upscale-*` / `RH-Upscale` 是 ZZAI 的视频超分（v1.100），名字里同样没有 video。
+    /(?:^|[-_/.])(?:t2v|i2v|v2v|video|veo|sora|kling|seedance|wan2|hunyuanvideo|hailuo|cogvideo|ltx|minimax-h3-comfyui|topaz[-_ ]?upscale|rh[-_ ]?upscale)/i,
     'video' as CloudKind,
   ],
   [
@@ -493,7 +1111,22 @@ export function publicChannel(channel: CloudChannel): Record<string, unknown> {
     dialect: channel.dialect ?? null,
     dialectDetected: channelDialect(channel),
     timeoutMs: channel.timeoutMs,
-    models: channel.models,
+    // 视频模型的参数表顺手带给界面：档位 / 宽高比 / 时长区间按模型**真收的**来出下拉，
+    // 别让用户选到必然 400 的组合（ZZAI 的 ComfyUI 各工作流词表完全不同）。
+    models: channel.models.map((model) => {
+      const zhenzhen = channelDialect(channel) === 'zhenzhen';
+      if (model.kind === 'video') {
+        const profile = zhenzhen ? zzaiVideoProfile(model.id) : null;
+        return profile ? { ...model, videoProfile: profile } : model;
+      }
+      // 图像侧同理：图层拆分模型要带档位表（`auto`/`1k`/`1.5k`/`2k`）与「只吃一张图」的语义，
+      // 否则界面上会按普通文生图给它 1K/2K/4K 与 14 张参考图。
+      if (model.kind === 'image') {
+        const profile = zhenzhen ? zzaiImageProfile(model.id) : null;
+        return profile ? { ...model, imageProfile: profile } : model;
+      }
+      return model;
+    }),
     updatedAt: channel.updatedAt ?? null,
   };
 }
@@ -890,6 +1523,20 @@ export function workfisherResolution(body: Record<string, unknown> | null): stri
 }
 
 /**
+ * ZZAI 图像的档位词：`1k` / `2k` / `4k`（文档默认 2k）。
+ *
+ * 与 FisherAI 同一套口径，但视频档（720p/1080p）按长短边折到 1k/2k ——
+ * 图像任务拿到画布的视频档只可能来自「模型类型勾错」，原样发上去是 400。
+ */
+export function zzaiImageResolution(body: Record<string, unknown> | null): string {
+  const raw = typeof body?.resolution === 'string' ? body.resolution.trim().toLowerCase() : '';
+  if (raw === '4k') return '4k';
+  if (raw === '2k' || raw === '1440p' || raw === '1080p') return '2k';
+  if (raw === '1k' || raw === '720p') return '1k';
+  return '2k';
+}
+
+/**
  * 百炼的档位词：`1k` / `2k` / `4k`（可灵 v3-omni 三档都收，v3 只收前三档里的 1k/2k）。
  * 视频档（720p/1080p）一律按 1k —— 这个端点不收像素档，原样发上去是 400。
  */
@@ -962,7 +1609,8 @@ function referenceFields(
 ): Record<string, unknown> {
   if (!images.length) return {};
   if (dialect === 'modelscope') return { image_url: [...images] };
-  if (dialect === 'workfisher') return { images: [...images] };
+  // FisherAI 与 ZZAI 都是顶层 `images[]`（公网直链），不是 OpenAI 的 `image`。
+  if (dialect === 'workfisher' || dialect === 'zhenzhen') return { images: [...images] };
   return { image: images.length === 1 ? images[0] : images };
 }
 
@@ -1040,6 +1688,76 @@ export function buildChannelPayload(input: {
     if (speed === 'relax' || speed === 'fast' || speed === 'turbo') payload.speed = speed;
     // `count` 不发给端点（MJ 不收 n）；它只在 router 收尾时决定留几张。
     if (images.length) payload.image_urls = [...images];
+    return payload;
+  }
+  if (kind === 'image' && dialect === 'zhenzhen') {
+    /**
+     * ZZAI 的异步图片任务（`POST /v1/image/generations` → `GET /v1/image/generations/{id}`）。
+     *
+     * 与 FisherAI 图像分支的区别：档位 / 宽高比 / 输出格式**全在 `metadata` 里**，顶层没有
+     * `size` / `resolution`（文档里 Seedream 那套认 `metadata.width/height`，但传它不认识的
+     * 分辨率词是 400，所以这里只发它列过的 `1k` / `2k` / `4k`）。
+     * 参考图同样只收公网直链，调用方已经过 `/files/upload` 换好链接。
+     */
+    if (isLayerDecompositionModel(model.id)) {
+      /**
+       * 图层拆分（2026-11-21 实测通过，官方 docs/llms.txt 与定价页同一套）：
+       *
+       *   POST {base}/v1/image/generations
+       *   { model:'dola-seedream-5.0-flash-layer-decomposition', images:[一张公网直链],
+       *     prompt?: '可选：想拆哪些元素', metadata:{ resolution:'auto', output_format:'png' } }
+       *   → { code:'success', data:{ task_id } }
+       *   GET {base}/v1/image/generations/{id}
+       *   → data.status='SUCCESS'、data.data.content.image_urls = [底图, 图层1, … 图层N]
+       *     （按 zindex 排好；`layers[]` 里是同一批 URL 加名字/包围盒，画布只吃 URL 列表）
+       *
+       * 三处与普通图像分支不同，错一处都是白花钱：
+       *   ① `images` 必须**恰好一张**（多图是 400；少图是「提交成功、跑完没结果」）；
+       *   ② 档位换成 `auto`/`1k`/`1.5k`/`2k`（普通那套的 4k 不在表里）；
+       *   ③ 底图给 `png`（默认 jpeg）—— 拆分结果后面要进调色合成器，有损底图会让图层对不上。
+       *
+       * `prompt` 是**可选**的（0~2000 字）：留空时上游按「自动识别主要元素」拆，
+       * 这正是用户「我只想拆图」的场景，所以空串就不发这个字段。
+       */
+      if (!images.length) {
+        throw new ChannelRequestError(
+          '图层拆分需要一张待拆分的图片（这个模型不会凭空画图）。',
+          422,
+          'CHANNEL_LAYER_INPUT_REQUIRED',
+          '把任意图片节点（或上传图片）连到图层拆分节点的输入端，再点生成。',
+        );
+      }
+      const metadata: Record<string, unknown> = {
+        resolution: zzaiLayerResolution(body),
+        output_format: 'png',
+      };
+      const text = prompt.trim().slice(0, 2000);
+      return {
+        model: model.id,
+        images: [images[0]],
+        ...(text ? { prompt: text } : {}),
+        metadata,
+      };
+    }
+    const payload: Record<string, unknown> = { model: model.id, prompt };
+    // GPT Image 2.6 低价版（v1.105）：顶层 size/resolution/quality/output_format/n=1。
+    // 与下面 Seedream 那套（metadata）**不能混** —— 顶层字段是官方示例的写法，
+    // 而 metadata 里只放 ratio 的写法在这条模型上会被当作「没给档位/画质」。
+    if (isZzaiGptImageModel(model.id)) {
+      payload.size = channelAspectRatio(body) ?? '1:1';
+      payload.resolution = zzaiGptImageResolution(body);
+      payload.quality = zzaiImageQuality(body);
+      payload.output_format = zzaiImageOutputFormat(body);
+      // n 固定 1（n=2 是 400）；参考图最多 16 张（多出来的由 router 在提交前拦）。
+      payload.n = 1;
+      if (images.length) payload.images = [...images.slice(0, 16)];
+      return payload;
+    }
+    if (images.length) payload.images = [...images];
+    const metadata: Record<string, unknown> = { resolution: zzaiImageResolution(body) };
+    const ratio = channelAspectRatio(body);
+    if (ratio) metadata.ratio = ratio;
+    payload.metadata = metadata;
     return payload;
   }
   if (kind === 'image' && dialect === 'workfisher') {
@@ -1134,6 +1852,81 @@ export function buildChannelPayload(input: {
     if (Object.keys(metadata).length) payload.metadata = metadata;
     return payload;
   }
+  if (kind === 'video' && dialect === 'zhenzhen') {
+    /**
+     * ZZAI 的异步视频任务（MiniMax H3 ComfyUI 系列走这条，2026-11-21 接）：
+     *
+     *   POST {base}/v1/video/generations
+     *   { model, prompt, images:[公网直链], seconds:"5",
+     *     metadata:{ resolution:"480p", ratio:"16:9", audio_urls:[…], video_url:[…], seed } }
+     *   → { code:'success', data:{ task_id } }（任务号也可能在顶层 `id`，channelTaskId 两边都认）
+     *   GET {base}/v1/video/generations/{id}
+     *   → { code:'success', data:{ status:'SUCCESS', result_url, data:{content:{video_url}} } }
+     *
+     * 三处**按模型夹**（表在 ZZAI_H3_PROFILES）：秒数区间、分辨率档、宽高比 ——
+     * 这一家对不认识的档位是提交即拒，报错只写 "invalid request parameters"，
+     * 从画布这边看不出是档位的问题。认不出来的模型（别家的 t2v/i2v）原样透传。
+     * 参考视频 / 参考音频只在该模型真收时才带上（角色替换收视频、数字人收音频）。
+     */
+    // 超分模型（Topaz-Upscale-LowPirce / RH-Upscale，v1.100）：只收一段源视频 + 目标档位 + 超分质量。
+    // 与 H3 那批**形状完全不同**（没有 prompt/seconds/ratio/images）—— 照 H3 的字段发过去
+    // 端点不会报错，只会当没收到视频，最后回一句「没有结果」，所以单独一条分支。
+    if (zzaiVideoProfile(model.id)?.upscaler === true) {
+      const source = videos[0];
+      if (!source) {
+        throw new ChannelRequestError(
+          '视频超分需要先连接一段源视频（MP4）：这个模型不按提示词生成，只把已有视频提升分辨率。',
+          422,
+          'CHANNEL_SOURCE_VIDEO_REQUIRED',
+          '把「上传视频」或任意视频节点的输出连到超分节点的输入端，再点生成。',
+        );
+      }
+      return {
+        model: model.id,
+        metadata: {
+          video_url: [source],
+          resolution: upscaleTargetResolution(body?.resolution),
+          quality: upscaleQuality(body?.quality),
+        },
+      };
+    }
+    const profile = zzaiVideoProfile(model.id);
+    const payload: Record<string, unknown> = { model: model.id, prompt };
+    const requestedSeconds = Number(body?.duration);
+    const seconds = profile
+      ? clampSeconds(requestedSeconds, profile)
+      : Number.isFinite(requestedSeconds) && requestedSeconds > 0
+        ? Math.round(requestedSeconds)
+        : null;
+    if (seconds !== null) payload.seconds = String(seconds);
+    if (images.length) {
+      payload.images = [...images.slice(0, profile?.maxImages ?? images.length)];
+    }
+    const metadata: Record<string, unknown> = {};
+    const rawResolution = typeof body?.resolution === 'string' ? body.resolution.trim() : '';
+    if (profile) {
+      const resolution = closestVideoResolution(rawResolution, profile.resolutions);
+      if (resolution) metadata.resolution = resolution;
+      const ratio = closestAspectRatio(channelAspectRatio(body) ?? '', profile.aspectRatios);
+      if (ratio) metadata.ratio = ratio;
+    } else {
+      if (rawResolution) metadata.resolution = rawResolution.toLowerCase();
+      const ratio = channelAspectRatio(body);
+      if (ratio) metadata.ratio = ratio;
+    }
+    const seed = Number(body?.seed);
+    if (body?.seed !== undefined && body.seed !== '' && Number.isFinite(seed)) {
+      if (!profile || profile.seed) metadata.seed = Math.trunc(seed);
+    }
+    if (audios.length && (!profile || profile.maxAudios > 0)) {
+      metadata.audio_urls = [...audios.slice(0, profile?.maxAudios ?? audios.length)];
+    }
+    if (videos.length && (!profile || profile.maxVideos > 0)) {
+      metadata.video_url = [...videos.slice(0, profile?.maxVideos ?? videos.length)];
+    }
+    if (Object.keys(metadata).length) payload.metadata = metadata;
+    return payload;
+  }
   const payload: Record<string, unknown> = { model: model.id, prompt };
   if (count > 1 && dialect !== 'modelscope') payload.n = count;
   if (kind === 'image') {
@@ -1189,6 +1982,8 @@ export function channelPath(channel: CloudChannel, kind: CloudKind): string {
   // 百炼的图像路径依赖 baseUrl 是否已经带 /api/v1，必须按实例算（见 dashscopeImagePath）；
   // 文本走兼容模式，路径固定。
   if (dialect === 'dashscope' && kind === 'image') return dashscopeImagePath(channel.baseUrl);
+  // ZZAI 的路径同样取决于 baseUrl 有没有带 /v1（见 zhenzhenApiPath），必须按实例算。
+  if (dialect === 'zhenzhen') return zhenzhenApiPath(channel.baseUrl, kind);
   return DIALECT_PATHS[dialect]?.[kind] ?? DEFAULT_PATHS[kind];
 }
 
@@ -1236,12 +2031,20 @@ export function channelAsyncHeaders(dialect: ChannelDialect = 'modelscope'): Rec
   // 百炼只认它自己的异步头；缺了这一句会直接报
   // "current user api does not support synchronous calls"（图像任务只支持异步）。
   if (dialect === 'dashscope') return { 'X-DashScope-Async': 'enable' };
-  // 只有 FisherAI 那套网关不认这个头；OpenAI 兼容的中转站一律忽略未知头，
+  // 只有 FisherAI / ZZAI 那两套网关不认这个头；OpenAI 兼容的中转站一律忽略未知头，
   // 所以保持 v1.11 起的老行为（非文本请求都带），免得动到已经跑通的通道。
   // Midjourney 与 FisherAI 是同一个网关（/v1/midjourney/*），同样不带。
+  if (dialect === 'zhenzhen') {
+    // ZZAI 的入口有 Cloudflare 防护，文档明确要求带一个像样的 User-Agent
+    // （Python-urllib 的默认值会被拦成 403 + 非 JSON 的 "error code: 1010"；Node fetch 的默认值同理不保险）。
+    return { 'user-agent': CHANNEL_USER_AGENT };
+  }
   if (dialect === 'workfisher' || dialect === 'midjourney') return {};
   return { 'X-ModelScope-Async-Mode': 'true' };
 }
+
+/** 发给端点时自称的身份（ZZAI 那套要求明确的 UA；别的方言沿用默认，不动已跑通的链路）。 */
+export const CHANNEL_USER_AGENT = 'dsh-aifisher-canvas/1.100 (+https://github.com/duyumingze/dsh-aifisher-canvas)';
 
 /** 轮询任务的请求地址与头（魔搭从 base 拼 /tasks/{id}；FisherAI 是「提交地址 + /{id}」）。 */
 export function channelTaskPoll(input: {
@@ -1260,12 +2063,15 @@ export function channelTaskPoll(input: {
       headers: { accept: 'application/json' },
     };
   }
-  if (dialect === 'workfisher') {
+  if (dialect === 'workfisher' || dialect === 'zhenzhen') {
     const submit =
       (input.submitUrl && input.submitUrl.trim()) || `${input.channel.baseUrl}/image/generations`;
     return {
       url: `${submit.replace(/\/+$/, '')}/${encodeURIComponent(input.taskId)}`,
-      headers: { accept: 'application/json' },
+      headers: {
+        accept: 'application/json',
+        ...(dialect === 'zhenzhen' ? { 'user-agent': CHANNEL_USER_AGENT } : {}),
+      },
     };
   }
   if (dialect === 'dashscope') {
@@ -1485,7 +2291,11 @@ export async function uploadChannelAsset(input: {
   const extension = extname(input.filename).toLowerCase() || '.png';
   const mime = EXTENSION_MIME[extension] ?? 'image/png';
   const baseUrl = input.channel.baseUrl.replace(/\/+$/u, '');
-  const url = `${baseUrl}${WORKFISHER_UPLOAD_PATH}`;
+  const dialect = channelDialect(input.channel);
+  const url =
+    dialect === 'zhenzhen'
+      ? `${baseUrl}${zhenzhenUploadPath(baseUrl)}`
+      : `${baseUrl}${WORKFISHER_UPLOAD_PATH}`;
   const cacheKey = uploadCacheKey(baseUrl, input.bytes);
   const cached = uploadUrlCache.get(cacheKey);
   if (cached && Date.now() - cached.at < UPLOAD_URL_TTL_MS) {
@@ -1510,6 +2320,7 @@ export async function uploadChannelAsset(input: {
         method: 'POST',
         headers: {
           accept: 'application/json',
+          ...(dialect === 'zhenzhen' ? { 'user-agent': CHANNEL_USER_AGENT } : {}),
           ...(input.channel.apiKey ? { authorization: `Bearer ${input.channel.apiKey}` } : {}),
         },
         body: form,

@@ -43,6 +43,13 @@ edit  →  （看返回里的 snapshot）
 
 **节点落位（v1.53）**：`create` 的坐标会被 host 兜底 —— 没给 `x/y`、或给的坐标会与已有节点重叠时，host 会把节点放到已有内容右侧的空位（约 40px 间隙）；显式坐标落在空地则原样保留。所以 agent 不用为了「别盖住别的节点」自己算坐标，直接把 `x/y` 交给 host 判断即可。
 
+**视频超分节点（v1.100）**：它**不是新的 `type`**（生成链路/审批/历史全按 `Video` 分流）。
+agent 要建它：`create type:"Video"` → `configure` 成 `models{type:"Video"}` 里名字含「视频超分」的那条
+（端点模型 `Topaz-Upscale-LowPirce`）→ `connect` 一段视频进来。该模型**不需要提示词**，
+`parameters` 里给 `resolution`（`720p` / `1080p` / `2K` / `4K`）与
+`quality`（`Ultra` / `Max` / `High` / `Medium` / `Low`，默认 `Max`）。`prepareGeneration` 照常准备，
+费用确认仍然只在画布 UI。用户手动入口是右键「添加节点 → 视频超分」或 Shift+A 搜「超分」。
+
 `edit` 返回 `{ok, revision, operationId, created:[{ref,id}]}`。`operationId` 可以喂给 `action:"undo"`（同样要带 `revision`），但画布有后续修改后会失效（`CONFLICT`）。
 
 ### recipe：一次展开分镜（v1.55）

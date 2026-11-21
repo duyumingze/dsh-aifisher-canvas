@@ -92,6 +92,17 @@ export function createCanvasNode(
   };
   const image = freshModel(runtime.imageModels, 'image'),
     video = freshModel(runtime.videoModels, 'video');
+  // dsh-aifisher-canvas v1.100：「视频超分」是**预设类型**，落成普通 Video 节点
+  // （生成链路 / 批次审批 / 历史与截帧都按 Video 分流，另开类型要把这些门禁全部复制一遍）。
+  const upscaleRequested = type === 'Video Upscale';
+  if (upscaleRequested) type = 'Video';
+  const upscaleModel = upscaleRequested
+    ? runtime.videoModels.find((entry) => {
+        const extra = entry as unknown as { cloudModelId?: string };
+        return extra.cloudModelId === 'Topaz-Upscale-LowPirce'
+          || /topaz[-_ ]?upscale/i.test(entry.name);
+      })
+    : undefined;
   const audio = freshModel(runtime.audioModels, 'audio'),
     text = freshModel(runtime.textModels, 'text');
   const upload = ['Upload Image', 'Upload Video', 'Upload Audio'].includes(type);
@@ -99,7 +110,7 @@ export function createCanvasNode(
     type === 'Image'
       ? image
       : type === 'Video'
-        ? video
+        ? (upscaleModel ?? video)
         : type === 'Audio'
           ? audio
           : type === 'Text'
@@ -111,20 +122,23 @@ export function createCanvasNode(
     type,
     ...point,
     prompt: '',
+    ...(upscaleRequested ? { title: '视频超分' } : {}),
     status: upload ? 'success' : 'idle',
     model: model?.name ?? (type === 'ComfyUI' ? 'ComfyUI' : 'Upload'),
     imageModel: type === 'Image' ? image?.name : undefined,
-    videoModel: type === 'Video' ? video?.name : undefined,
+    videoModel: type === 'Video' ? (upscaleModel ?? video)?.name : undefined,
     audioModel: type === 'Audio' ? audio?.name : undefined,
     textModel: type === 'Text' ? text?.name : undefined,
     imageMode: type === 'Image' ? (image?.imageModes?.[0]?.value ?? 'text-to-image') : undefined,
-    videoMode: type === 'Video' ? (video?.videoModes?.[0]?.value ?? 'text-to-video') : undefined,
+    videoMode: type === 'Video'
+      ? (upscaleRequested ? 'video-edit' : (video?.videoModes?.[0]?.value ?? 'text-to-video'))
+      : undefined,
     audioMode: type === 'Audio' ? (audio?.audioModes?.[0]?.value ?? 'instrumental') : undefined,
     textMode: type === 'Text' ? (text?.languageModes?.[0]?.value ?? 'multimodal-chat') : undefined,
     comfyMode: template?.id,
     isCameraUIOpen: type === 'ComfyUI' ? true : undefined,
     aspectRatio: type === 'Video' ? '16:9' : '1:1',
-    resolution: type === 'Video' ? '720p' : '1K',
+    resolution: type === 'Video' ? (upscaleRequested ? '1080p' : '720p') : '1K',
     parentIds: template ? template.inputs.map(() => '') : [],
     projectId: projectId || undefined,
   }) as CanvasNode;
@@ -132,6 +146,9 @@ export function createCanvasNode(
     const models = type === 'Image' ? runtime.imageModels : runtime.videoModels;
     const selectedModel = models.find((entry) => entry.name === node.model);
     Object.assign(node, newNodeDimensions(type, projectId, selectedModel));
+    // 超分预设的「1080p」是用户点「视频超分」那一瞬的意图，不能被「上一次用过的视频档位」
+    // 覆盖（上一次可能只是 480p 草稿）。
+    if (upscaleRequested) Object.assign(node, { resolution: '1080p' });
   }
   return node;
 }

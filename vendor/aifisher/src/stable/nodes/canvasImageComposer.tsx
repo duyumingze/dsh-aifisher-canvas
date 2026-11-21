@@ -89,7 +89,11 @@ export function CanvasImageComposer(
   const priceLabel = deferredPrice
     ? `${creditProvider}积分`
     : unitPrice === null ? '暂无可靠报价' : (unitPrice * billingCount).toFixed(2);
+  // dsh-aifisher-canvas v1.101：图层拆分这类单一用途模型不收提示词（空着 = 自动识别主要元素），
+  // 生成按钮不该被空提示词锁住（与视频超分的 promptOptional 同一套语义）。
+  const promptOptional = (model as { promptOptional?: boolean }).promptOptional === true;
   const hasInput =
+    promptOptional ||
     !!node.imageAngle ||
     !!(node.prompt || '').trim() ||
     assets.some(

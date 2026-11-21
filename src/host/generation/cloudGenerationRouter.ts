@@ -58,9 +58,15 @@ import {
   channelTaskId,
   channelTaskPoll,
   channelTaskState,
+  CHANNEL_USER_AGENT,
   describeFetchFailure,
   inlineChannelReferences,
   isConnectLevelFetchFailure,
+  isLayerDecompositionModel,
+  isVideoUpscaler,
+  isZzaiGptImageModel,
+  layerResultUrls,
+  layerStackOf,
   midjourneyImageUrls,
   publicChannelReferences,
   readCloudChannels,
@@ -143,6 +149,8 @@ interface FinishContext {
   model?: string;
   /** 自配通道：回执里带上通道信息（含实际生效的请求方言），画布/日志能看出这批图是走哪条通道、哪套方言来的。 */
   channel?: { id: string; label: string; dialect?: ChannelDialect };
+  /** 图层拆分的几何（远端 URL）；落盘后换成素材库 URL 再回给画布。 */
+  layerStack?: ReturnType<typeof layerStackOf>;
 }
 
 /** 三条路共用的收尾：文本取 text，媒体取 resultUrl/resultUrls 并落素材库。 */
@@ -223,11 +231,36 @@ async function finishCloudResponse(
     sendJson(res, 502, { error: '云端结果无法落盘。', code: 'CLOUD_RESULT_UNRECOGNIZED', ...channel });
     return true;
   }
+  /**
+   * 图层几何：把每层的远端 URL 换成刚落盘的素材库 URL（同一个下标 —— 两边都由
+   * `layerResultUrls` 的规范化顺序决定）。数量对不上就不回几何，
+   * 宁可在画布上退回「多图」也不要给一组错位的坐标。
+   */
+  let layerStack: Record<string, unknown> | undefined;
+  if (context.layerStack) {
+    const layers = context.layerStack.layers;
+    if (layers.length === urls.length) {
+      layerStack = {
+        width: context.layerStack.width,
+        height: context.layerStack.height,
+        layers: layers.map((layer, index) => ({
+          url: urls[index],
+          ...(layer.name ? { name: layer.name } : {}),
+          zindex: layer.zindex,
+          x: layer.x,
+          y: layer.y,
+          width: layer.width,
+          height: layer.height,
+        })),
+      };
+    }
+  }
   sendJson(res, 200, {
     success: true,
     provider: context.provider,
     resultUrl: urls[0],
     resultUrls: urls,
+    ...(layerStack ? { layerStack } : {}),
     ...(context.model ? { model: context.model } : {}),
     ...(isObject(parsed) && typeof parsed.created === 'number' ? { createdAt: parsed.created } : {}),
     ...channel,
@@ -288,7 +321,13 @@ async function postChannelRequest(input: {
         headers: {
           'content-type': 'application/json',
           accept: 'application/json',
-          ...(kind === 'text' ? {} : channelAsyncHeaders(plan.dialect)),
+          // 文本请求本来不带异步头；但 ZZAI 的入口有 Cloudflare 防护，**所有**请求都得带 UA，
+          // 所以这一处单独补（其余方言维持原样）。
+          ...(kind === 'text'
+            ? plan.dialect === 'zhenzhen'
+              ? { 'user-agent': CHANNEL_USER_AGENT }
+              : {}
+            : channelAsyncHeaders(plan.dialect)),
           ...authHeader,
         },
         body: JSON.stringify(plan.payload),
@@ -451,6 +490,10 @@ async function handleChannelGeneration(
   let images: string[] = [];
   let videos: string[] = [];
   let audios: string[] = [];
+  // 这几套方言的端点只收**公网直链**（画布本机素材要先过 /files/upload 换链接）：
+  // FisherAI、Midjourney（同一网关）、ZZAI 真真AI（api.seedance.nz）。
+  const uploadReferences =
+    dialect === 'workfisher' || dialect === 'midjourney' || dialect === 'zhenzhen';
   try {
     if (references.length && (kind === 'image' || kind === 'video')) {
       // FisherAI 只收公网直链：data URL / 本站素材要先 /files/upload 换链接；
@@ -458,22 +501,22 @@ async function handleChannelGeneration(
       // 百炼（可灵）同样只收公网直链，但它没有自己的上传口 —— 本机素材直接给可操作的 422，
       // 不把 data URL 发过去被当成「没传参考图」。
       // Midjourney 与 FisherAI 同一个网关，`image_urls` 同样只认公网直链，走同一个上传口。
-      images =
-        dialect === 'workfisher' || dialect === 'midjourney'
-          ? await uploadChannelReferences(channel, references, {
+      // ZZAI 也有自己的 `/v1/files/upload`（multipart 的 `file`，回 `{url}`，24 小时有效）。
+      images = uploadReferences
+        ? await uploadChannelReferences(channel, references, {
+            ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
+            fetcher,
+          })
+        : dialect === 'dashscope'
+          ? await publicChannelReferences(references, {
               ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
-              fetcher,
             })
-          : dialect === 'dashscope'
-            ? await publicChannelReferences(references, {
-                ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
-              })
-            : await inlineChannelReferences(references, {
-                ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
-              });
+          : await inlineChannelReferences(references, {
+              ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
+            });
     }
-    // 待编辑视频 / 参考音频同样只在 FisherAI 那套请求体里出现，也只收公网直链。
-    if (kind === 'video' && dialect === 'workfisher' && (videoReferences.length || audioReferences.length)) {
+    // 待编辑视频 / 参考音频同样只在 FisherAI / ZZAI 那两套请求体里出现，也只收公网直链。
+    if (kind === 'video' && uploadReferences && (videoReferences.length || audioReferences.length)) {
       videos = videoReferences.length
         ? await uploadChannelReferences(channel, videoReferences, {
             ...(deps.mediaStore ? { mediaStore: deps.mediaStore } : {}),
@@ -500,6 +543,37 @@ async function handleChannelGeneration(
       return true;
     }
     throw error;
+  }
+
+  // 视频超分（Topaz-Upscale-LowPirce / RH-Upscale，v1.100）只收一段源视频：
+  // 没有源视频时上游会「提交成功、跑完没结果」，用户只看到一句没头没尾的失败，
+  // 所以在这里先说清楚缺的是哪一步。
+  if (kind === 'video' && isVideoUpscaler(model.id) && !videoReferences.length) {
+    sendJson(res, 422, {
+      error:
+        `模型「${model.id}」是视频超分：需要先连接一段源视频（MP4），它不按提示词生成。`,
+      code: 'CHANNEL_SOURCE_VIDEO_REQUIRED',
+      channel: channel.id,
+      channelLabel: channel.label,
+      model: model.id,
+      hint: '把「上传视频」或任意视频节点的输出连到超分节点的输入端，再点生成。',
+    });
+    return true;
+  }
+
+  // 图层拆分（ZZAI 的 Seedream 系列，v1.101）必须**恰好一张**待拆图：
+  // 没连图时上游会「提交成功、跑完没结果」（凭空画不了图），所以在这里先说清缺什么，
+  // 而不是发一个空 images 的请求上去等一次白跑。多连的图也只取第一张（端点只收一张）。
+  if (kind === 'image' && isLayerDecompositionModel(model.id) && !images.length) {
+    sendJson(res, 422, {
+      error: `模型「${model.id}」是图层拆分：需要先连接一张待拆分的图片，它不会凭空画图。`,
+      code: 'CHANNEL_LAYER_INPUT_REQUIRED',
+      channel: channel.id,
+      channelLabel: channel.label,
+      model: model.id,
+      hint: '把任意图片节点（或上传图片）连到图层拆分节点的输入端，再点生成。',
+    });
+    return true;
   }
 
   const plan = buildChannelRequest({ channel, model, kind, body, images, videos, audios });
@@ -573,10 +647,45 @@ async function handleChannelGeneration(
     raw = JSON.stringify(parsed);
   }
 
-  const wanted = kind === 'text' ? 1 : channelRequestCount(body);
-  // 魔搭与 FisherAI 都不认「一次多张」：魔搭忽略 n，FisherAI 的低价扩展版一个任务只回一张。
-  // 所以叫了几张就真的提交几次，再把结果合并 —— 不能让「生成数量」那个控件空转。
-  if ((plan.dialect === 'modelscope' || plan.dialect === 'workfisher') && wanted > 1) {
+  /**
+   * 图层拆分：收尾只认 `data.data.content.image_urls`（上游按 zindex 排好：底图 → 图层 1 → …）。
+   *
+   * 为什么不能交给通用收集：同一个底图在回执里会出现两次且 URL 域不同
+   * （`data.result_url` 走 xiaoyaoyou 域名、`content.image_url` 走 COS 域名，指向同一份对象），
+   * 通用收集按完整 URL 去重 → 画布上多出一张底图、后面每一格都错位（2026-11-21 真机踩到）。
+   *
+   * 几何（每层贴哪儿、多大）必须**在改写 parsed 之前**从原始回执里取 —— 改成
+   * `{output_images}` 之后就只剩 URL 了。画布的调色合成器靠它把图层贴回原位。
+   */
+  let layerStack: ReturnType<typeof layerStackOf> = null;
+  if (kind === 'image' && isLayerDecompositionModel(model.id)) {
+    layerStack = layerStackOf(parsed);
+    const ordered = layerResultUrls(parsed);
+    if (ordered.length) {
+      parsed = { output_images: ordered };
+      raw = JSON.stringify(parsed);
+    }
+  }
+
+  // 视频超分一个任务只处理一段源视频：生成数量 > 1 也不该真的提交多次
+  // （每次都会按秒计费，而同一个源视频再超分一次没有意义）。
+  // 图层拆分同理：一次请求就产出「1 张底图 + 最多 16 个图层」并按**实际输出张数**计费
+  // （2026-11-21 实测 11 张 ¥1.232），「生成数量」在这条路上等于「把同一张图拆 N 遍、付 N 次钱」。
+  // GPT Image 2.6 低价版再同理：端点 n 固定 1，多出来的「张数」只可能是重复付费提交。
+  const singleShot =
+    kind === 'text' ||
+    (kind === 'video' && isVideoUpscaler(model.id)) ||
+    (kind === 'image' && isLayerDecompositionModel(model.id)) ||
+    // GPT Image 2.6 低价版：端点 n 只收 1（n=2 是 400），「生成数量」不能变成多次付费提交
+    (kind === 'image' && isZzaiGptImageModel(model.id));
+  const wanted = singleShot ? 1 : channelRequestCount(body);
+  // 魔搭与 FisherAI 都不认「一次多张」：魔搭忽略 n，FisherAI 的低价扩展版一个任务只回一张；
+  // ZZAI 的这批工作流同样是一任务一结果（n 不参与），所以叫了几张就真的提交几次，再合并 ——
+  // 不能让「生成数量」那个控件空转。
+  if (
+    (plan.dialect === 'modelscope' || plan.dialect === 'workfisher' || plan.dialect === 'zhenzhen') &&
+    wanted > 1
+  ) {
     const urls: string[] = [];
     const b64: string[] = [];
     collectInto(parsed, urls, b64);
@@ -615,6 +724,7 @@ async function handleChannelGeneration(
     provider: 'cloud',
     model: model.id,
     channel: { id: channel.id, label: channel.label, dialect: plan.dialect },
+    ...(layerStack ? { layerStack } : {}),
   });
 }
 
@@ -741,6 +851,14 @@ async function pollChannelTask(input: {
     if (status.state === 'succeeded') return read;
     if (status.state === 'failed') {
       const reason = channelTaskError(read.parsed);
+      /**
+       * 「上游拉不到我们给的图」是这家端点最常见的一种失败：素材先 POST /files/upload 换成了
+       * 它自己图床上的签名直链，再由**上游模型**去下载 —— 图太大/图床慢就会超时
+       * （2026-11-21 实测：8.8MB 的图失败、722KB 的同款图 62 秒成功，两者请求体完全一样）。
+       * 端点只回一句「File processing failed due to a timeout while downloading the image」，
+       * 从画布这边看不出该改什么，所以在这里补一句人话。
+       */
+      const downloadTimeout = /timeout while downloading|下载图片时超时/i.test(reason ?? '');
       // Midjourney 的 MODAL 是「任务在等补参数」（局部重绘要先给 mask）；画布不接二次补参，
       // 照通用文案说「端点没给原因」会让人以为任务挂了。
       const modal = /^modal$/i.test(status.raw.trim());
@@ -753,6 +871,13 @@ async function pollChannelTask(input: {
             ? `云端通道「${channel.label}」的任务停在 MODAL（等待补参数，画布不支持二次补参）` +
               `（任务号 ${taskId}）。`
             : `云端通道「${channel.label}」的任务失败${reason ? `：${reason}` : '（端点没给原因）'}。`,
+          ...(downloadTimeout
+            ? {
+                hint:
+                  '上游下载我们给它的参考图超时了（图太大或图床慢）：换一张小一点的图' +
+                  '（几 MB 以内最快），或稍后重试。这次任务失败不扣费。',
+              }
+            : {}),
         },
       };
     }

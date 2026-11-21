@@ -1,6 +1,7 @@
 import type * as React from 'react';
 import {
   cloneCanvasNodes,
+  deleteCanvasNodes,
   hasGeneratingCanvasNodes,
   GENERATING_COPY_MESSAGE,
   insertClonedCanvasNodes,
@@ -134,6 +135,44 @@ export function useCanvasCommands(
   const handlePaste = hooks.useCallback(() => insertCopy(clipboard.current, true), [insertCopy]);
   const hasCopiedNodes = hooks.useCallback(() => clipboard.current.length > 0, []);
 
+  // ---- dsh-aifisher-canvas：Shift+D / Alt+D 复制并移动（补丁 3.16）----
+  //
+  // 和 Ctrl+C/V 的两点差别：
+  //   ① 落点是「原地偏移 40px」而不是鼠标处，复制完直接进抓取（Blender 的 Shift+D）；
+  //   ② Esc 取消时连这批复制的节点一起撤掉（粘贴错了只能再删一次）。
+  //
+  // 复制前先 pushHistory：把「上一次提交之后攒下的改动」（建节点这类不会自己提交的操作）
+  // 顺手落成一步，撤销才不会跨过它跳回很早以前。落在同一状态上是空操作，没有副作用。
+  const DUPLICATE_OFFSET = 40;
+  const duplicateSelection = hooks.useCallback(() => {
+    const selected = nodes.filter((node) => selectedNodeIds.includes(node.id));
+    if (!selected.length) return null;
+    if (hasGeneratingCanvasNodes(selected)) {
+      window.alert(GENERATING_COPY_MESSAGE);
+      return null;
+    }
+    const previousSelection = [...selectedNodeIds];
+    const adapter = window.__FISHERAI_CANVAS_CLIPBOARD__;
+    const { newNodes, idMap } = (adapter?.clone ?? cloneCanvasNodes)(snapshot(selected), {
+      offset: DUPLICATE_OFFSET,
+      createId,
+      preserveParentConnections: true,
+    });
+    if (!newNodes.length) return null;
+    pushHistory?.();
+    setNodes((current) =>
+      (adapter?.insert ?? insertClonedCanvasNodes)(current, newNodes, idMap, {
+        preserveChildConnections: false,
+      }),
+    );
+    setSelectedNodeIds(newNodes.map((node) => node.id));
+    return {
+      ids: newNodes.map((node) => node.id),
+      nodes: newNodes,
+      previousSelection,
+    };
+  }, [nodes, selectedNodeIds, createId, setNodes, setSelectedNodeIds, pushHistory]);
+
   // ---- dsh-aifisher-canvas：Blender 手感（G 抓取移动 / X 删除），见补丁 3.8x --------
   //
   // 位移以「起手位置 + 起手指针」为基准算，不累加增量：中途锁轴 / 缩放都不会漂。
@@ -147,6 +186,10 @@ export function useCanvasCommands(
     zoom: number;
     axis: 'x' | 'y' | null;
     moved: boolean;
+    /** 复制并移动（Shift+D）：Esc 要把这批复制的节点整个撤掉。 */
+    removeOnCancel: boolean;
+    /** 取消复制时把选区还给复制前那些节点。 */
+    previousSelection: string[];
     apply: () => void;
     stop: () => void;
   } | null>(null);
@@ -158,6 +201,15 @@ export function useCanvasCommands(
       grabRef.current = null;
       grab.stop();
       if (!commit) {
+        // Shift+D 复制并移动：Esc = 连刚复制出来的整批节点一起取消（Blender 同款）。
+        // 位置不用回正 —— 它们本来就站在复制时的偏移落点上，整批删掉即可；
+        // 这时画布状态已经回到复制前，所以不必再往撤销栈里补一步。
+        if (grab.removeOnCancel) {
+          const adapter = window.__FISHERAI_CANVAS_CLIPBOARD__;
+          setNodes((current) => (adapter?.delete ?? deleteCanvasNodes)(current, grab.ids));
+          setSelectedNodeIds(grab.previousSelection);
+          return;
+        }
         // 取消：把位置放回起手那一刻（不记历史）
         setNodes((current) =>
           current.map((node) => {
@@ -167,7 +219,8 @@ export function useCanvasCommands(
         );
         return;
       }
-      if (!grab.moved) return;
+      // 复制并移动：复制这一下本身也算一步 —— 复制完没移动也要能 Ctrl+Z 撤回去。
+      if (!grab.moved && !grab.removeOnCancel) return;
       const commitHistory = pushHistory;
       if (!commitHistory) return;
       // 等 React 把最后一帧位置提交完再记历史（和 vendor 拖节点松手后的 deferFrame 同一做法）
@@ -175,15 +228,23 @@ export function useCanvasCommands(
       if (typeof window.requestAnimationFrame === 'function') window.requestAnimationFrame(run);
       else window.setTimeout(run, 16);
     },
-    [pushHistory, setNodes],
+    [pushHistory, setNodes, setSelectedNodeIds],
   );
 
-  const startGrab = hooks.useCallback(() => {
+  const startGrab = hooks.useCallback((forced?: {
+    ids?: string[];
+    nodes?: CanvasClipboardNode[];
+    previousSelection?: string[];
+    removeOnCancel?: boolean;
+  }) => {
     if (grabRef.current) return;
-    const ids = selectedNodeIds.filter((id) => nodes.some((node) => node.id === id));
+    // 「复制并移动」会传入刚复制出来的那批：那次 setNodes 还没回到 props，不能用 nodes 算。
+    const sourceNodes = forced?.nodes ?? nodes;
+    const sourceIds = forced?.ids ?? selectedNodeIds;
+    const ids = sourceIds.filter((id) => sourceNodes.some((node) => node.id === id));
     if (!ids.length) return;
     const positions = new Map<string, { x: number; y: number }>();
-    for (const node of nodes) {
+    for (const node of sourceNodes) {
       if (ids.includes(node.id)) positions.set(node.id, { x: node.x, y: node.y });
     }
     const origin = pointer.current ?? { clientX: 0, clientY: 0 };
@@ -196,6 +257,8 @@ export function useCanvasCommands(
       zoom,
       axis: null,
       moved: false,
+      removeOnCancel: Boolean(forced?.removeOnCancel),
+      previousSelection: forced?.previousSelection ?? ids,
       apply: () => undefined,
       stop: () => undefined,
     };
@@ -342,6 +405,28 @@ export function useCanvasCommands(
         startGrab();
         return;
       }
+      // Shift+D / Alt+D = 复制选中节点并跟着鼠标移动（Blender 的 duplicate；Alt 是同义键）
+      if (
+        key === 'd' &&
+        (event.shiftKey || event.altKey) &&
+        !event.ctrlKey &&
+        !event.metaKey
+      ) {
+        // 抓取中再按不算：一次手势只复制一批
+        if (!grabRef.current) {
+          event.preventDefault();
+          const duplicated = duplicateSelection();
+          if (duplicated) {
+            startGrab({
+              ids: duplicated.ids,
+              nodes: [...nodes, ...duplicated.nodes],
+              previousSelection: duplicated.previousSelection,
+              removeOnCancel: true,
+            });
+          }
+        }
+        return;
+      }
       // X 与 Delete / Backspace 同义（Blender 里 X 就是删；Ctrl+X 之类不拦）
       if (
         key === 'delete' ||
@@ -378,6 +463,7 @@ export function useCanvasCommands(
     groupSelectedNodes,
     handleCopy,
     startGrab,
+    duplicateSelection,
   ]);
 
   return { handleCopy, handlePaste, hasCopiedNodes };

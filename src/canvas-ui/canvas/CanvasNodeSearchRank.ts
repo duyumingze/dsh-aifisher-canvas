@@ -111,6 +111,14 @@ const NODE_ENTRIES: ReadonlyArray<Omit<CanvasNodeSearchEntry, 'id'>> = [
     keywords: ['junction', 'reroute', 'zhuanjie', 'zj', '转接', '转接口', '中继', '合线'],
     group: '节点',
   },
+  {
+    // v1.100：视频超分（ZZAI 的 Topaz-Upscale-LowPirce）—— 建出来是预置好的 Video 节点
+    type: 'Video Upscale',
+    label: '视频超分',
+    description: '把已有视频提升到 720p / 1080p / 2K / 4K，连一段源视频即可',
+    keywords: ['upscale', 'chaofen', 'cf', '超分', '视频超分', '放大', '清晰度', 'topaz', '4k'],
+    group: '节点',
+  },
 ];
 
 /**

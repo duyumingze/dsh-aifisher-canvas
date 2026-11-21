@@ -268,6 +268,33 @@ const emptyProjectId = 'browser-empty-proj';
 }
 
 /**
+ * 复制并移动（v1.103，?xduplicate=1）的种子项目：一张文本节点。
+ *
+ * 用文本节点而不是图片节点：复制这条链路不该依赖任何媒体文件（真浏览器里卡片必须有内容，
+ * 才量得到 transform / 选中态）。项目里只放一张，场景自己复制 / 落下 / 再复制 / Esc 取消。
+ */
+const duplicateProjectId = 'browser-duplicate-proj';
+{
+  const saved = await dispatchApi(
+    'POST',
+    new URL('/api/aifisher/canvas/workflows', ORIGIN),
+    Buffer.from(
+      JSON.stringify({
+        id: duplicateProjectId,
+        revision: 0,
+        title: '真浏览器验证：复制并移动',
+        // 节点由场景自己用「建节点」桥建（避免点卡片带进拖拽 / 指针捕获）。
+        nodes: [],
+        groups: [],
+        viewport: { x: 0, y: 0, zoom: 1 },
+      }),
+      'utf8',
+    ),
+  );
+  console.log(`[browser] 预置复制场景项目 ${duplicateProjectId}（一张文本节点）→ ${saved.status}`);
+}
+
+/**
  * 图片编辑场景（v1.26，?xedit=studio|annotate）的种子项目。
  *
  * 需要一个**能被浏览器真正解码**的图片节点（jsdom 那边用的 1x1 data URL 在真机上
@@ -920,6 +947,154 @@ function scopeChartPng() {
     );
     console.log(`[browser] 预置调色面板项目 ${id}（图像 → 调色）→ ${saved.status}`);
   }
+}
+
+/**
+ * 纯色 RGBA PNG（图层文档场景的素材）。
+ *
+ * `scopeChartPng` 给的是 RGB（无透明通道），而图层拆分的关键正是**透明**：
+ * 每一层只在它自己的矩形里有像素、矩形外全透明。所以这里单独写一个 8bit RGBA（color type 6）。
+ */
+function solidRgbaPng(width, height, [r, g, b, a]) {
+  const crcTable = Array.from({ length: 256 }, (_, index) => {
+    let value = index;
+    for (let bit = 0; bit < 8; bit += 1)
+      value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+    return value >>> 0;
+  });
+  const crc32 = (buffer) => {
+    let value = 0xffffffff;
+    for (const byte of buffer) value = crcTable[(value ^ byte) & 0xff] ^ (value >>> 8);
+    return (value ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(data.length, 0);
+    const body = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(body), 0);
+    return Buffer.concat([length, body, crc]);
+  };
+  const stride = width * 4 + 1;
+  const raw = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y += 1) {
+    const row = y * stride;
+    raw[row] = 0; // filter: none
+    for (let x = 0; x < width; x += 1) {
+      raw[row + 1 + x * 4] = r;
+      raw[row + 2 + x * 4] = g;
+      raw[row + 3 + x * 4] = b;
+      raw[row + 4 + x * 4] = a;
+    }
+  }
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; // bit depth
+  ihdr[9] = 6; // color type: truecolor + alpha
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr),
+    chunk('IDAT', deflateSync(raw, { level: 9 })),
+    chunk('IEND', Buffer.alloc(0)),
+  ]);
+}
+
+/**
+ * 图层文档场景（v1.101，?xcompositor=layers）的种子项目。
+ *
+ * 用户 2026-11-21：「接入调色节点后它的图层混合方式不对，顺序也不对，我想要走的是通过
+ * 混合节点的方式来混合，并且保留正确的位置」。这一场用三张**纯色**图把三件事钉成像素：
+ *   底图（20,60,120）整幅 320×180；绿块（30,200,60）在 (40,20) 120×60；
+ *   红块（220,40,40, 半透明 128）在 (160,90) 120×60。
+ * 采样：
+ *   · 绿块中心 = 绿 → 说明这一层**贴在自己的位置**上；
+ *   · 红块中心 = 红蓝各半 → 说明是**上叠**（不是直接取样某一张）、且顺序在上面；
+ *   · 空白处 = 底图 → 说明图层**没有铺满全幅**（错位/整幅拉伸会把它盖掉）。
+ */
+const layerDocProjectId = 'browser-layer-doc-proj';
+{
+  const dir = join(fakeHome, 'storages', 'dsh-aifisher-canvas', 'media', layerDocProjectId, 'images');
+  mkdirSync(dir, { recursive: true });
+  const files = [
+    ['layer-base.png', 320, 180, [20, 60, 120, 255]],
+    ['layer-green.png', 120, 60, [30, 200, 60, 255]],
+    ['layer-red.png', 120, 60, [220, 40, 40, 128]],
+  ];
+  const urls = {};
+  for (const [name, width, height, rgba] of files) {
+    writeFileSync(join(dir, name), solidRgbaPng(width, height, rgba));
+    urls[name] = `/api/aifisher/canvas/media/${layerDocProjectId}/images/${name}`;
+  }
+  const saved = await dispatchApi(
+    'POST',
+    new URL('/api/aifisher/canvas/workflows', ORIGIN),
+    Buffer.from(
+      JSON.stringify({
+        id: layerDocProjectId,
+        revision: 0,
+        title: '图层文档真机验证',
+        nodes: [
+          {
+            id: 'layer-doc',
+            type: 'Upload Image',
+            x: 80,
+            y: 460,
+            title: '图层文档',
+            status: 'success',
+            model: '图层拆分',
+            resultUrl: urls['layer-base.png'],
+            resultUrls: [urls['layer-base.png']],
+            resultAspectRatio: '320/180',
+            aspectRatio: '16:9',
+            parentIds: [],
+            projectId: layerDocProjectId,
+            width: 320,
+            height: 180,
+            layerStack: {
+              width: 320,
+              height: 180,
+              layers: [
+                { url: urls['layer-base.png'], zindex: 0, x: 0, y: 0, width: 320, height: 180 },
+                {
+                  url: urls['layer-green.png'],
+                  name: '绿块',
+                  zindex: 1,
+                  x: 40,
+                  y: 20,
+                  width: 120,
+                  height: 60,
+                },
+                {
+                  url: urls['layer-red.png'],
+                  name: '红块',
+                  zindex: 2,
+                  x: 160,
+                  y: 90,
+                  width: 120,
+                  height: 60,
+                },
+              ],
+            },
+          },
+          {
+            id: 'layer-grade',
+            type: 'Color Grade',
+            x: 560,
+            y: 460,
+            title: '图层调色',
+            status: 'idle',
+            parentIds: ['layer-doc'],
+            projectId: layerDocProjectId,
+          },
+        ],
+        groups: [],
+        viewport: { x: 0, y: 0, zoom: 1 },
+      }),
+      'utf8',
+    ),
+  );
+  console.log(`[browser] 预置图层文档项目 ${layerDocProjectId}（3 层 → 调色）→ ${saved.status}`);
 }
 
 /**
@@ -1782,6 +1957,8 @@ const HOST_PAGE = `<!doctype html>
         archive: archiveSteps,
         /** v1.49：切刀（?xknife=1 场景，见 buildKnifeScene） */
         knife: knifeSteps,
+        /** v1.103：复制并移动（?xduplicate=1 场景，见 buildDuplicateScene） */
+        duplicate: duplicateSteps,
         /** v1.71：转接（?xreroute=1 场景，见 buildRerouteScene） */
         reroute: rerouteSteps,
         /** v1.72：调色面板（?xcompositor=1 场景，见 buildCompositorScene） */
@@ -1794,6 +1971,8 @@ const HOST_PAGE = `<!doctype html>
         compositorMix: compositorMixSteps,
         /** v1.96：混合系数 0=A / 1=B 的像素口径（?xcompositor=factor 场景，见 buildCompositorFactorScene） */
         compositorFactor: compositorFactorSteps,
+        /** v1.101：图层文档（一层一个口 + 按 bbox 放置 + 上叠）的像素口径（?xcompositor=layers） */
+        compositorLayers: compositorLayersSteps,
         /** v1.94：遮罩（Blender 样条；?xcompositor=mask 场景，见 buildCompositorMaskScene） */
         compositorMask: compositorMaskSteps,
       };
@@ -5101,6 +5280,132 @@ const HOST_PAGE = `<!doctype html>
     };
 
     /**
+     * 复制并移动（?xduplicate=1，v1.103）。
+     *
+     * 用户 2026-11-21：「做一个画布功能，节点复制并移动。按alt或者shift+d。调色节点也要」。
+     * jsdom（test-canvas-blender-keys / test-canvas-compositor）验的是节点数据与撤销栈；
+     * 这一场在**真浏览器**里派发真 PointerEvent / KeyboardEvent，验 jsdom 量不到的两件事：
+     *   ① 卡片真的变多、副本真的被选中、真的跟着鼠标走（读的是画布渲染出来的 transform）；
+     *   ② Esc 真的把这批副本整批撤掉，原节点一个不少。
+     * 截图停在最后一步之后：原地那批「复制 + 落下」的副本留在画布上并保持选中，
+     * 第二批取消掉的副本不该出现 —— 一眼能看出复制成功、取消也干净。
+     */
+    const duplicateScene = new URLSearchParams(location.search).get('xduplicate') === '1';
+    const duplicateSteps = {
+      done: false,
+      before: null,
+      afterCopy: null,
+      moved: null,
+      afterDrop: null,
+      afterCancel: null,
+      error: '',
+    };
+    const buildDuplicateScene = async () => {
+      if (!duplicateScene) return;
+      try {
+        const cards = () => [
+          ...document.querySelectorAll('#canvas-viewport-content [data-node-id]'),
+        ];
+        const idOf = (card) => card?.getAttribute('data-node-id') || '';
+        const posOf = (card) => {
+          // 注意这里是写进宿主页的模板字符串：正则里的反斜杠要写两遍（\\d / \\s）。
+          const match = /translate\\(([-0-9.eE+]+)px,\\s*([-0-9.eE+]+)px\\)/.exec(
+            card?.style?.transform || '',
+          );
+          return match ? { x: Math.round(Number(match[1])), y: Math.round(Number(match[2])) } : null;
+        };
+        const selectedCards = () =>
+          cards().filter((card) => card.getAttribute('data-node-selected') === 'true');
+        await until(() => !!document.getElementById('canvas-background'), 20000);
+        await wait(700);
+        const surface = document.getElementById('canvas-background');
+        if (!surface) throw new Error('画布底盘没挂上（#canvas-background 不存在）');
+
+        const send = (target, type, x, y, extra) =>
+          target.dispatchEvent(
+            new PointerEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              clientX: x,
+              clientY: y,
+              button: 0,
+              buttons: type === 'pointerup' ? 0 : 1,
+              pointerId: 93,
+              pointerType: 'mouse',
+              isPrimary: true,
+              ...(extra || {}),
+            }),
+          );
+        const pressKey = (options) =>
+          window.dispatchEvent(
+            new KeyboardEvent('keydown', {
+              bubbles: true,
+              cancelable: true,
+              ...options,
+            }),
+          );
+
+        // 用「建节点」桥建一张文本节点（它会自动被选中）—— 这一场不点卡片：
+        // 真浏览器里「点卡片」会走 vendor 的拖拽/指针捕获（合成 PointerEvent 的
+        // pointerId 不是真指针），哪条路径被带歪都量不准「复制」本身。
+        // 「点卡片选中 → Shift+D」那一条由 jsdom 的 test-canvas-blender-keys 守着。
+        window.dispatchEvent(
+          new CustomEvent('fisherai:add-canvas-node', {
+            detail: { type: 'Image', point: { x: 200, y: 160 } },
+          }),
+        );
+        await until(() => cards().length === 1, 8000);
+        await wait(300);
+        const source = cards()[0];
+        const sourceId = idOf(source);
+        duplicateSteps.before = {
+          id: sourceId,
+          pos: posOf(source),
+          text: String(source?.textContent || '').replace(/\\s+/g, ' ').slice(0, 40),
+        };
+
+        await wait(80);
+        pressKey({ key: 'D', code: 'KeyD', shiftKey: true });
+        await wait(280);
+        const copies = selectedCards();
+        duplicateSteps.afterCopy = {
+          count: cards().length,
+          selected: copies.map(idOf),
+          pos: copies[0] ? posOf(copies[0]) : null,
+          text: String(copies[0]?.textContent || '').replace(/\\s+/g, ' ').slice(0, 40),
+          clipboard: window.__FISHERAI_CANVAS_CLIPBOARD__?.getDiagnostics?.() || null,
+        };
+        const copyId = idOf(copies[0]);
+
+        // ⚠️ 这一场量「手势链与数据」，不量「偏移了多少像素」：
+        // 真浏览器里合成 PointerEvent 驱动不了 vendor 的指针抓取（连既有的 G 抓取都不动，
+        // 见 jsdom 的 test-canvas-blender-keys 才是位移口径的权威）。所以这里只留
+        // 「复制出一张 + 被选中 + 内容带过去 + Esc 能整批撤掉」这几条与指针无关的事实。
+        //
+        // 左键落下：结束抓取，副本留在画布上
+        send(surface, 'pointerdown', 840, 520);
+        send(surface, 'pointerup', 840, 520);
+        await wait(260);
+        duplicateSteps.afterDrop = { count: cards().length, copyId };
+
+        // 再复制一次、直接 Esc：副本必须整批撤掉，画布回到两张
+        pressKey({ key: 'D', code: 'KeyD', shiftKey: true });
+        await wait(280);
+        const afterSecond = cards().length;
+        pressKey({ key: 'Escape', code: 'Escape' });
+        await wait(320);
+        duplicateSteps.afterCancel = {
+          afterSecond,
+          after: cards().length,
+          ids: cards().map(idOf),
+        };
+      } catch (error) {
+        duplicateSteps.error = String((error && error.stack) || error);
+      }
+      duplicateSteps.done = true;
+    };
+
+    /**
      * 转接场景（?xreroute=1，v1.71）：直接看合并后的画布（A → J → C/D）。
      * jsdom（test-canvas-reroute）验的是手势与结构；这一场只验「真浏览器里
      * J 卡片长什么样、透传缩略图对不对、连线是不是三条」。
@@ -6457,6 +6762,93 @@ const HOST_PAGE = `<!doctype html>
     };
 
     /**
+     * 图层文档（v1.101，?xcompositor=layers）：用户 2026-11-21
+     * 「接入调色节点后它的图层混合方式不对，顺序也不对，我想要走的是通过混合节点的方式来混合，
+     *  并且保留正确的位置」。
+     *
+     * 这一场不点任何东西 —— 打开合成器，默认图就应该已经铺成「放置 → Alpha 上叠」链，
+     * 然后读预览像素：
+     *   · 绿块中心 = 绿（这一层贴在自己的矩形里）；
+     *   · 红块中心 = 红蓝各半（上叠，且在绿块之上）；
+     *   · 两处空白 = 底图蓝（图层没有被拉伸成整幅）。
+     * 坐标注意：readPixels 原点在**左下**，文档里的 y 是左上原点，所以 fy = 1 - y/H。
+     */
+    const compositorLayersScene =
+      new URLSearchParams(location.search).get('xcompositor') === 'layers';
+    const compositorLayersSteps = {
+      opened: false,
+      inputPorts: 0,
+      placeNodes: 0,
+      alphaNodes: 0,
+      placeTitle: '',
+      portTitles: '',
+      greenCenter: null,
+      redCenter: null,
+      emptyTopRight: null,
+      emptyBottomLeft: null,
+      chainTitles: '',
+      error: '',
+      done: false,
+    };
+    const buildCompositorLayersScene = async () => {
+      if (!compositorLayersScene) return;
+      try {
+        applyDshDesktopEmulation();
+        await until(() => document.querySelector('[data-fisherai-open-compositor]'), 20000);
+        await wait(400);
+        document
+          .querySelector('[data-fisherai-open-compositor]')
+          .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await until(() => document.querySelector('.cg-root'), 8000);
+        await wait(1400);
+        const root = document.querySelector('.cg-root');
+        compositorLayersSteps.opened = true;
+        const cards = [...root.querySelectorAll('.cg-node')];
+        compositorLayersSteps.chainTitles = cards
+          .map((card) => card.querySelector('.cg-node-title')?.textContent?.trim() ?? '')
+          .join(' | ');
+        const placeCards = cards.filter((card) => /^放置 ·/.test(
+          card.querySelector('.cg-node-title')?.textContent?.trim() ?? '',
+        ));
+        const alphaCards = cards.filter((card) => /^上叠 ·/.test(
+          card.querySelector('.cg-node-title')?.textContent?.trim() ?? '',
+        ));
+        compositorLayersSteps.placeNodes = placeCards.length;
+        compositorLayersSteps.alphaNodes = alphaCards.length;
+        compositorLayersSteps.placeTitle = String(
+          placeCards[0]?.querySelector('.cg-node-title')?.textContent ?? '',
+        );
+        const inputCard = cards.find((card) => card.querySelector('.cg-node-kind')?.textContent === '3');
+        const inputPorts = root.querySelectorAll('.cg-port.cg-out[data-side="out"]').length;
+        compositorLayersSteps.inputPorts = Number(
+          inputCard?.querySelector('.cg-node-kind')?.textContent ?? inputPorts,
+        );
+        compositorLayersSteps.portTitles = [...(inputCard?.querySelectorAll('.cg-port.cg-out') ?? [])]
+          .map((port) => port.title)
+          .join(' | ');
+
+        const canvas = root.querySelector('.cg-preview-canvas');
+        const gl = canvas?.getContext('webgl2');
+        const sample = (fx, fy) => {
+          if (!canvas || !gl) return null;
+          const pixel = new Uint8Array(4);
+          const x = Math.min(canvas.width - 1, Math.max(0, Math.round(canvas.width * fx)));
+          const y = Math.min(canvas.height - 1, Math.max(0, Math.round(canvas.height * fy)));
+          gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+          return [pixel[0], pixel[1], pixel[2]];
+        };
+        // 绿块中心 (100, 50) / 红块中心 (220, 120) / 右上空 (300, 10) / 左下空 (20, 170)
+        compositorLayersSteps.greenCenter = sample(100 / 320, 1 - 50 / 180);
+        compositorLayersSteps.redCenter = sample(220 / 320, 1 - 120 / 180);
+        compositorLayersSteps.emptyTopRight = sample(300 / 320, 1 - 10 / 180);
+        compositorLayersSteps.emptyBottomLeft = sample(20 / 320, 1 - 170 / 180);
+      } catch (error) {
+        compositorLayersSteps.error = String((error && error.stack) || error);
+      }
+      compositorLayersSteps.done = true;
+    };
+
+    /**
      * 遮罩（v1.94，?xcompositor=mask）：用户 2026-11-11 原话
      * 「在调色面板做绘制功能。我需要遮罩功能，但是要用混合节点来实现，接入黑白遮罩图像来实现。
      *  参考 blender 的遮罩操作方式。」
@@ -6922,12 +7314,14 @@ const HOST_PAGE = `<!doctype html>
     void buildLastModelScene();
     void buildArchiveScene();
     void buildKnifeScene();
+    void buildDuplicateScene();
     void buildRerouteScene();
     void buildCompositorScene();
     void buildCompositorPanelScene();
     void buildCompositorWheelsScene();
     void buildCompositorMixScene();
     void buildCompositorFactorScene();
+    void buildCompositorLayersScene();
     void buildCompositorMaskScene();
   </script>
 </body>
@@ -7378,6 +7772,12 @@ const SCENES = [
   ['knife', `${ORIGIN}/?resume=${knifeProjectId}&xknife=1`, `?resume=${knifeProjectId}&xknife=1`,
     (probe) => probe.knife?.done === true, 26000],
   /**
+   * 复制并移动（v1.103）：用户「做一个画布功能，节点复制并移动。按alt或者shift+d。调色节点也要」。
+   * 场景：选中一张文本节点 → Shift+D → 副本跟着鼠标走 → 左键落下 → 再复制一次按 Esc 取消。
+   */
+  ['duplicate', `${ORIGIN}/?resume=${duplicateProjectId}&xduplicate=1`, `?resume=${duplicateProjectId}&xduplicate=1`,
+    (probe) => probe.duplicate?.done === true, 22000],
+  /**
    * 转接（v1.71）：种子项目已经把结构写成 A → J → (C, D)，只看真浏览器里的卡片/连线/透传图。
    */
   ['reroute', `${ORIGIN}/?resume=${rerouteProjectId}&xreroute=1`, `?resume=${rerouteProjectId}&xreroute=1`,
@@ -7420,6 +7820,13 @@ const SCENES = [
    */
   ['compositor-factor', `${ORIGIN}/?resume=${compositorPanelProjectId}&xcompositor=factor`, `?resume=${compositorPanelProjectId}&xcompositor=factor`,
     (probe) => probe.compositorFactor?.done === true, 32000],
+  /**
+   * 图层文档（v1.101）：用户 2026-11-21「接入调色节点后它的图层混合方式不对，顺序也不对，
+   * 我想要走的是通过混合节点的方式来混合，并且保留正确的位置」。
+   * 打开合成器直接读像素：绿块在自己的位置、红块半透明叠在上面、空白处还是底图。
+   */
+  ['compositor-layers', `${ORIGIN}/?resume=${layerDocProjectId}&xcompositor=layers`, `?resume=${layerDocProjectId}&xcompositor=layers`,
+    (probe) => probe.compositorLayers?.done === true, 32000],
   /**
    * 遮罩（v1.94）：用户 2026-11-11「在调色面板做绘制功能。我需要遮罩功能，
    * 但是要用混合节点来实现，接入黑白遮罩图像来实现。参考 blender 的遮罩操作方式」。
@@ -8921,6 +9328,42 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
   }
 
   /**
+   * 复制并移动（?xduplicate=1，v1.103）：用户「做一个画布功能，节点复制并移动。
+   * 按alt或者shift+d。调色节点也要」。
+   *
+   * 这一场只验**与指针无关**的事实：Shift+D 真能复制出节点并被选中、节点内容整份带过去、
+   * Esc 真能把这批副本整批撤掉。偏移量 / 跟手 / 落点这些「位移口径」由 jsdom 的
+   * test-canvas-blender-keys 与 test-canvas-compositor 定 —— 真浏览器里合成的
+   * PointerEvent 驱动不了 vendor 的指针抓取（连既有的 G 抓取都不动），拿它量位移会假红。
+   */
+  if (label === 'duplicate') {
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const scene = probe.duplicate ?? {};
+    report('复制场景跑完了（真派发了 Shift+D / 左键 / Esc，没有半途报错）',
+      scene.done === true && !scene.error, String(scene.error ?? '').slice(0, 240));
+    report('Shift+D 复制出一张卡，并且副本被选中',
+      scene.afterCopy?.count === 2 && Array.isArray(scene.afterCopy?.selected) &&
+        scene.afterCopy.selected.length === 1 &&
+        scene.afterCopy.selected[0] !== scene.before?.id,
+      JSON.stringify({ before: scene.before, afterCopy: scene.afterCopy }));
+    report('副本把节点内容整份带过去（不是一张空壳卡）',
+      !!scene.afterCopy?.text &&
+        String(scene.afterCopy.text) === String(scene.before?.text ?? '') &&
+        String(scene.afterCopy.text).length > 4,
+      JSON.stringify({ source: scene.before?.text, copy: scene.afterCopy?.text }));
+    report('左键落下后副本留在画布上（数量保持 2）',
+      scene.afterDrop?.count === 2, JSON.stringify(scene.afterDrop ?? null));
+    report('再复制一次后按 Esc：副本整批撤掉，画布回到两张卡',
+      scene.afterCancel?.afterSecond === 3 && scene.afterCancel?.after === 2 &&
+        Array.isArray(scene.afterCancel?.ids) &&
+        scene.afterCancel.ids.includes(scene.before?.id),
+      JSON.stringify(scene.afterCancel ?? null));
+  }
+
+  /**
    * 转接（?xreroute=1，v1.71）：用户「shift+鼠标右键划过的线合并并添加转接口」。
    * 种子项目就是合并后的结构（A → J → C/D），这里验真浏览器里卡片与连线的交付形态。
    */
@@ -9221,6 +9664,47 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
   }
 
   /**
+   * 图层文档（?xcompositor=layers，v1.101）：用户 2026-11-21 两条报障
+   * 「图层混合方式不对、顺序也不对」+「保留正确的位置」。
+   * 三个纯色图层（底图整幅 + 绿块 + 半透明红块），打开合成器直接读预览像素：
+   *   绿块中心=绿、红块中心=红蓝各半、空白处=底图蓝 —— 位置、顺序、上叠三件事一次钉住。
+   */
+  if (label === 'compositor-layers') {
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const scene = probe.compositorLayers ?? {};
+    const near = (pixel, rgb, tolerance = 24) =>
+      Array.isArray(pixel) &&
+      rgb.every((value, index) => Math.abs(Number(pixel[index]) - value) <= tolerance);
+    report('图层文档场景跑完了（没有半途报错）', scene.done === true && !scene.error,
+      String(scene.error ?? '').slice(0, 300));
+    report('输入节点按「一层一个口」展开（3 层 = 3 个输出口）',
+      Number(scene.inputPorts) === 3, `ports=${scene.inputPorts} titles=${scene.portTitles}`);
+    report('默认图自动铺了两个「放置」+ 两个「Alpha 上叠」（底图不放置）',
+      Number(scene.placeNodes) === 2 && Number(scene.alphaNodes) === 2,
+      `place=${scene.placeNodes} alpha=${scene.alphaNodes} chain=${scene.chainTitles}`);
+    report('放置节点的标题带层名（可读）',
+      /放置 · 绿块/.test(String(scene.portTitles)) ||
+        /放置 · 绿块/.test(String(scene.chainTitles)) ||
+        /绿块/.test(String(scene.chainTitles)),
+      String(scene.placeTitle ?? ''));
+    if (scene.greenCenter) {
+      report('绿块中心是绿（这一层贴在自己的矩形里，没被拉伸成整幅）',
+        near(scene.greenCenter, [30, 200, 60]), JSON.stringify(scene.greenCenter));
+      report('红块中心是红蓝各半（上叠，且红块在绿块之上）',
+        near(scene.redCenter, [120, 50, 80], 26), JSON.stringify(scene.redCenter));
+      report('右上空白处仍是底图蓝（图层没有盖住整幅）',
+        near(scene.emptyTopRight, [20, 60, 120]), JSON.stringify(scene.emptyTopRight));
+      report('左下空白处仍是底图蓝',
+        near(scene.emptyBottomLeft, [20, 60, 120]), JSON.stringify(scene.emptyBottomLeft));
+    } else {
+      console.log(`[browser] SKIP  ${label}: 这个 headless 环境读不到预览像素`);
+    }
+  }
+
+  /**
    * 遮罩（?xcompositor=mask，v1.95）：用户 2026-11-11 原文
    * 「这里要点击然后跳转另外一个页面来画遮罩，我觉得直接在左上角的预览切换成遮罩来上添加
    *  绘制就好了。添加圆形和方型的遮罩工具，可以直接在画布预览区域 shift+a 搜索添加形状。
@@ -9308,16 +9792,17 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
     report('截图取证：设置 → 闭源服务 → OpenAI 通道面板在画面里（有实际尺寸）',
       shot.panel === true && Number(shot.width) > 600 && Number(shot.height) > 240 && Number(shot.cards) >= 1,
       `${shot.width}×${shot.height} cards=${shot.cards}`);
-    report('请求方言下拉有六项（自动 / OpenAI 兼容 / 魔搭 / FisherAI / 阿里云百炼 / Midjourney）',
-      shot.dialectOptions === 6 && shot.dialectValue === '',
+    report('请求方言下拉有七项（自动 / OpenAI 兼容 / 魔搭 / FisherAI / 阿里云百炼 / Midjourney / ZZAI 真真AI）',
+      shot.dialectOptions === 7 && shot.dialectValue === '',
       `options=${shot.dialectOptions} value=${shot.dialectValue}`);
-    report('四个一键预设都在（魔搭 API-Inference + FisherAI + 阿里云百炼 + FisherAI Midjourney）',
+    report('五个一键预设都在（魔搭 + FisherAI + 阿里云百炼 + FisherAI Midjourney + ZZAI 真真AI）',
       Array.isArray(shot.presetLabels) &&
-        shot.presetLabels.length === 4 &&
+        shot.presetLabels.length === 5 &&
         /魔搭/.test(String(shot.presetLabels[0] || '')) &&
         /FisherAI/.test(String(shot.presetLabels[1] || '')) &&
         /百炼/.test(String(shot.presetLabels[2] || '')) &&
-        /Midjourney/.test(String(shot.presetLabels[3] || '')),
+        /Midjourney/.test(String(shot.presetLabels[3] || '')) &&
+        /ZZAI/.test(String(shot.presetLabels[4] || '')),
       JSON.stringify(shot.presetLabels));
     report('面板说明里写清了 FisherAI 的路径差异（/image/generations）',
       /image\/generations/.test(String(shot.text || '')),
@@ -9374,8 +9859,8 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
      * v1.92 百炼 / v1.93 Midjourney 各加一套 → 现在 6 项。
      */
     const dialect = settings.channelDialect ?? {};
-    report('通道卡片里有「请求方言」下拉，默认停在「自动」（自动 + OpenAI/魔搭/FisherAI/百炼/Midjourney 六项）',
-      dialect.selectPresent === true && dialect.value === '' && dialect.optionCount === 6,
+    report('通道卡片里有「请求方言」下拉，默认停在「自动」（自动 + OpenAI/魔搭/FisherAI/百炼/Midjourney/ZZAI 七项）',
+      dialect.selectPresent === true && dialect.value === '' && dialect.optionCount === 7,
       JSON.stringify({ present: dialect.selectPresent, value: dialect.value, options: dialect.optionCount }));
     report('「自动」按地址判出来并写在界面上（魔搭域名 → 魔搭 ModelScope）',
       /自动/.test(dialect.hintText || '') && /魔搭 ModelScope/.test(dialect.hintText || ''),

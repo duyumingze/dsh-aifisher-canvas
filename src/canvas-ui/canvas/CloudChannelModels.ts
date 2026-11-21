@@ -41,6 +41,44 @@ export interface ChannelModelLike {
   id: string;
   kind: ChannelKind;
   label?: string;
+  /**
+   * host 随 `/cloud-channels` 下发的视频参数表（目前只有 ZZAI 的 ComfyUI 系列带）：
+   * 档位 / 宽高比 / 时长区间按**模型真收的**出下拉，别让人选到必然 400 的组合。
+   */
+  videoProfile?: ChannelVideoProfileLike;
+  /**
+   * 图像参数表（目前只有 ZZAI 的 Seedream 图层拆分系列带）：
+   * `layerDecomposition` = 这个模型只做图层拆分（只吃一张图、档位是 auto/1k/1.5k/2k、
+   * 一次产出底图 + N 个图层并按时输出张数计费）。
+   */
+  imageProfile?: ChannelImageProfileLike;
+}
+
+/** 与 host 的 `ChannelImageProfile` 同形（只取界面用得到的那几个字段）。 */
+export interface ChannelImageProfileLike {
+  layerDecomposition?: boolean;
+  resolutions?: string[];
+  outputNote?: string;
+  /** 画质词表（GPT Image 2.6 系：auto/low/medium/high/xhigh/max）→ 节点上的「画质」下拉。 */
+  qualities?: string[];
+  defaultQuality?: string;
+  /** 输出格式词表（png/jpeg/webp）→ 节点上的「输出格式」下拉。 */
+  outputFormats?: string[];
+  /** true = 端点 n 固定 1：不给「生成数量」，免得以为能一次出多张。 */
+  fixedCount?: boolean;
+}
+
+/** 与 host 的 `ChannelVideoProfile` 同形（只取界面用得到的那几个字段）。 */
+export interface ChannelVideoProfileLike {
+  resolutions?: string[];
+  aspectRatios?: string[];
+  minSeconds?: number;
+  maxSeconds?: number;
+  /** 超分模型的质量词表（Ultra/Max/High/Medium/Low）。 */
+  qualities?: string[];
+  defaultQuality?: string;
+  /** true = 只收一段源视频（不要把节点当文生视频用）。 */
+  upscaler?: boolean;
 }
 
 export interface ChannelLike {
@@ -71,7 +109,12 @@ function baseEntry(name: string, channelLabel: string) {
   } as Record<string, unknown>;
 }
 
-function imageEntry(name: string, channelLabel: string, dialect?: string) {
+function imageEntry(
+  name: string,
+  channelLabel: string,
+  dialect?: string,
+  profile?: ChannelImageProfileLike,
+) {
   /**
    * 百炼（DashScope）这套图像模型（可灵 v3 系）只收三种宽高比、三档分辨率；
    * 参考图虽然模型支持，但端点只要公网 http(s) 直链，画布上的素材都在本机 ——
@@ -87,8 +130,44 @@ function imageEntry(name: string, channelLabel: string, dialect?: string) {
    * 参考图和 FisherAI 一样要公网直链，host 会自动上传并缓存 12h。
    */
   const midjourney = dialect === 'midjourney';
+  /**
+   * 图层拆分（ZZAI 的 Seedream 系列，2026-11-21 接）：这个模型**只做一件事** ——
+   * 拿一张图拆成「底图 + 最多 16 个透明图层」。
+   *
+   * 三处必须跟着变的界面语义：
+   *   - 档位换成 `自动 / 1K / 1.5K / 2K`（端点不认 4K，也不认 auto 以外的像素词）；
+   *   - 只留一张图的输入（多图是 400，见模式里的 allowedInputs.image = 1）；
+   *   - 没有「生成数量」（一次请求就是一遍拆分，按实际输出张数计费），所以高级参数里只留说明；
+   *   - 提示词是**可选**的（空着 = 自动识别主要元素），所以条目挂 `promptOptional`。
+   */
+  const layer = profile?.layerDecomposition === true;
+  /**
+   * GPT Image 2.6 低价版（v1.105，ZZAI 的 `zhenzhen-image-g-v2.6-lowprice`）：
+   * 与普通自配图像模型只差三处界面语义 ——
+   *   - 档位 1K/2K/4K（随 `profile.resolutions` 出）；
+   *   - 多两个自己的下拉「画质」（quality）与「输出格式」（output_format），值直接进请求体；
+   *   - 端点 n 固定 1：**不给「生成数量」**（那个控件在这条路上只会让人以为能一次出多张）。
+   * 参考图最多 16 张（与官方一致），所以 maxInputs / allowedInputs 一起放到 16。
+   */
+  const fixedCount = profile?.fixedCount === true;
+  const referenceCap = fixedCount ? 16 : 14;
+  const lazyInputs = layer ? { text: 10, image: 1 } : { text: 14, image: 14 };
   return {
     ...baseEntry(name, channelLabel),
+    ...(layer
+      ? {
+          description:
+            `自配通道「${channelLabel}」提供的图层拆分模型：一次产出 1 张底图 + 最多 16 个透明图层，`
+            + '按实际输出张数计费。提示词可留空（自动识别主要元素）。',
+        }
+      : {}),
+    ...(fixedCount && !layer
+      ? {
+          description:
+            `自配通道「${channelLabel}」提供的 GPT Image 2.6 低价版：文生图 / 参考图编辑，`
+            + '每次出 1 张（端点 n 固定 1）。1K ¥0.044/张，2K/4K 按实际用量结算。',
+        }
+      : {}),
     ...(midjourney
       ? {
           description:
@@ -97,73 +176,131 @@ function imageEntry(name: string, channelLabel: string, dialect?: string) {
             + '参考图走垫图（公网直链，插件自动上传并缓存 12h）。',
         }
       : {}),
-    maxInputs: 14,
+    // 有档位价的模型给画布一个「每张多少钱」的估算（2K/4K 是 estimate 实测值，最终按用量结算）
+    ...(fixedCount && !layer ? { cost: { '1K': 0.044, '2K': 0.236, '4K': 0.315 } } : {}),
+    maxInputs: layer ? 11 : referenceCap,
+    // composer 的「没提示词不让生成」那道门按这个放行（vendor 补丁 3.13）
+    ...(layer ? { promptOptional: true } : {}),
     supportedReferenceTypes: ['text', 'image'],
     supportedImageFormats: SUPPORTED_IMAGE_FORMATS,
     maxImageSizeMb: 20,
     maxResolution: '',
-    resolutions: midjourney ? ['1K'] : ['1K', '2K', '4K'],
+    resolutions: profile?.resolutions?.length
+      ? [...profile.resolutions]
+      : midjourney
+        ? ['1K']
+        : ['1K', '2K', '4K'],
     // 可灵 v3-omni 的 aspect_ratio 只有 16:9 / 9:16 / 1:1；选别的会被端点 400。
     // Midjourney 收 MJ 自己的宽高比词表（与 vendor 内置的 Midjourney 条目同口径）。
+    // 图层拆分的画幅由输入图决定（端点不收 ratio），所以只给一个不参与请求的默认值。
     aspectRatios: midjourney
       ? ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9']
       : dashscope
         ? ['16:9', '9:16', '1:1']
-        : ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9'],
+        : layer
+          ? ['1:1']
+          : ['1:1', '2:3', '3:2', '3:4', '4:3', '9:16', '16:9', '21:9'],
     // ★ 必需：没有 imageModes 时 composer 会认为「当前模型不支持文生图」，生成按钮直接禁用
-    imageModes: [
-      { label: '文生图', value: 'text-to-image', allowedInputs: { text: 14 } },
-      { label: '图生图', value: 'image-to-image', allowedInputs: { text: 14, image: 14 } },
-    ],
-    advancedParams: midjourney
+    imageModes: layer
       ? [
-          {
-            key: 'generateCount',
-            label: '保留结果数',
-            type: 'slider',
-            default: 1,
-            // 一个任务固定 4 张候选，选 4 = 全留下
-            min: 1,
-            max: 4,
-          },
-          {
-            key: 'version',
-            label: '模型版本',
-            type: 'select',
-            default: '8.1',
-            options: [
-              { label: 'V8.2', value: '8.2' },
-              { label: 'V8.1', value: '8.1' },
-              { label: 'V7', value: '7' },
-              { label: 'V6.1', value: '6.1' },
-              { label: 'V5.2', value: '5.2' },
-              { label: 'V5.1', value: '5.1' },
-            ],
-          },
-          {
-            key: 'speed',
-            label: '生成速度',
-            type: 'select',
-            default: 'fast',
-            options: [
-              { label: 'Relax（最便宜，排队久）', value: 'relax' },
-              { label: 'Fast', value: 'fast' },
-              { label: 'Turbo（最快，约 2 倍价）', value: 'turbo' },
-            ],
-          },
+          // 「图层拆分」是唯一的特殊功能；文生图/图生图两档留着只是为了「自动」不变成死路
+          // （vendor 的 resolveImageGenerationMode 只认这两档名，否则连上图片就判成不支持）。
+          { label: '图层拆分', value: 'layer-decomposition', allowedInputs: lazyInputs },
+          { label: '文生图', value: 'text-to-image', allowedInputs: { text: 10 } },
+          { label: '图生图', value: 'image-to-image', allowedInputs: lazyInputs },
         ]
       : [
+          { label: '文生图', value: 'text-to-image', allowedInputs: { text: 16 } },
           {
-            key: 'generateCount',
-            label: '生成数量',
-            type: 'number',
-            default: 1,
-            min: 1,
-            step: 1,
-            // 可灵的 n 收 1–9；别的方言 host 侧统一夹在 8，这里只对百炼放到 9
-            ...(dashscope ? { max: 9 } : {}),
+            label: '图生图',
+            value: 'image-to-image',
+            allowedInputs: { text: 16, image: referenceCap },
           },
         ],
+    advancedParams: layer
+      ? []
+      : midjourney
+        ? [
+            {
+              key: 'generateCount',
+              label: '保留结果数',
+              type: 'slider',
+              default: 1,
+              // 一个任务固定 4 张候选，选 4 = 全留下
+              min: 1,
+              max: 4,
+            },
+            {
+              key: 'version',
+              label: '模型版本',
+              type: 'select',
+              default: '8.1',
+              options: [
+                { label: 'V8.2', value: '8.2' },
+                { label: 'V8.1', value: '8.1' },
+                { label: 'V7', value: '7' },
+                { label: 'V6.1', value: '6.1' },
+                { label: 'V5.2', value: '5.2' },
+                { label: 'V5.1', value: '5.1' },
+              ],
+            },
+            {
+              key: 'speed',
+              label: '生成速度',
+              type: 'select',
+              default: 'fast',
+              options: [
+                { label: 'Relax（最便宜，排队久）', value: 'relax' },
+                { label: 'Fast', value: 'fast' },
+                { label: 'Turbo（最快，约 2 倍价）', value: 'turbo' },
+              ],
+            },
+          ]
+        : fixedCount
+          ? [
+              ...(profile?.qualities?.length
+                ? [
+                    {
+                      key: 'quality',
+                      label: '画质',
+                      type: 'select',
+                      default: profile.defaultQuality ?? profile.qualities[0],
+                      options: profile.qualities.map((quality) => ({
+                        label: quality,
+                        value: quality,
+                      })),
+                    },
+                  ]
+                : []),
+              ...(profile?.outputFormats?.length
+                ? [
+                    {
+                      key: 'output_format',
+                      label: '输出格式',
+                      type: 'select',
+                      default: profile.outputFormats.includes('png')
+                        ? 'png'
+                        : profile.outputFormats[0],
+                      options: profile.outputFormats.map((format) => ({
+                        label: format,
+                        value: format,
+                      })),
+                    },
+                  ]
+                : []),
+            ]
+          : [
+              {
+                key: 'generateCount',
+                label: '生成数量',
+                type: 'number',
+                default: 1,
+                min: 1,
+                step: 1,
+                // 可灵的 n 收 1–9；别的方言 host 侧统一夹在 8，这里只对百炼放到 9
+                ...(dashscope ? { max: 9 } : {}),
+              },
+            ],
   };
 }
 
@@ -205,41 +342,89 @@ export function videoInputCap(modes: readonly VideoModeInputs[]): number {
   return cap;
 }
 
-function videoEntry(name: string, channelLabel: string, videoReference = false) {
+function videoEntry(
+  name: string,
+  channelLabel: string,
+  videoReference = false,
+  profile?: ChannelVideoProfileLike,
+) {
+  /**
+   * 视频超分（v1.100，ZZAI 的 `Topaz-Upscale-LowPirce`）：节点上只需要「一段源视频 +
+   * 目标档位 + 超分模型」。它**不认**提示词、秒数与宽高比（时长由上游读源视频），
+   * 所以这里不给那 4 个生成模式，也不给时长滑杆 —— 否则用户会被要求填一个端点会忽略的值，
+   * 而且空提示词会把生成按钮一直禁用。
+   */
+  const upscaler = profile?.upscaler === true;
   // ★ 必需，且值必须落在 vendor videoMode.ts 的词表里（image-to-video 之类不在词表里）
-  const videoModes: VideoModeInputs[] = [
-    { label: '文生视频', value: 'text-to-video', allowedInputs: { text: 10 } },
-    { label: '首帧', value: 'first-frame', allowedInputs: { text: 10, image: 1 } },
-    { label: '首尾帧', value: 'i2v-first-last-frame', allowedInputs: { text: 10, image: 2 } },
-    {
-      label: '多图参考',
-      value: 'reference-video',
-      allowedInputs: { text: 10, image: VIDEO_REFERENCE_IMAGE_LIMIT },
-    },
-  ];
+  const videoModes: VideoModeInputs[] = upscaler
+    ? [{ label: '视频超分', value: 'video-edit', allowedInputs: { video: 1 } }]
+    : [
+        { label: '文生视频', value: 'text-to-video', allowedInputs: { text: 10 } },
+        { label: '首帧', value: 'first-frame', allowedInputs: { text: 10, image: 1 } },
+        { label: '首尾帧', value: 'i2v-first-last-frame', allowedInputs: { text: 10, image: 2 } },
+        {
+          label: '多图参考',
+          value: 'reference-video',
+          allowedInputs: { text: 10, image: VIDEO_REFERENCE_IMAGE_LIMIT },
+        },
+      ];
   // 视频参考（v1.62，用户原话「帮我配置一个视频参考通道」）：
   // FisherAI（workfisher 方言）的 host 链路会把画布上的本机视频当成 `body.videos`，
   // 先 POST /files/upload 换成公网直链，再放进 metadata.video_url 提交；
   // 所以只有这类通道才多这一档，别的方言收到视频会**静默丢掉**（不如不给这一档）。
   // 值用 video-edit：vendor 的 resolveVideoGenerationMode 在「连了视频」时优先挑它。
-  if (videoReference) {
+  if (!upscaler && videoReference) {
     videoModes.push({ label: '视频参考', value: 'video-edit', allowedInputs: { text: 10, video: 1 } });
   }
+  /**
+   * 档位 / 宽高比 / 时长区间：有 host 下发的参数表就照它的来（ZZAI 的 ComfyUI 各工作流词表不同，
+   * 例如通用档只有 16:9/9:16、武戏/文戏 5 秒起、漫剧只到 768p）—— 选到不支持的组合会被端点直接拒。
+   */
+  const resolutions = profile?.resolutions?.length ? [...profile.resolutions] : ['480p', '720p', '1080p'];
+  const aspectRatios = profile?.aspectRatios?.length ? [...profile.aspectRatios] : ['16:9', '9:16', '1:1'];
+  const minSeconds = Math.max(1, Math.round(profile?.minSeconds ?? 2));
+  const maxSeconds = Math.max(minSeconds, Math.round(profile?.maxSeconds ?? 10));
+  const defaultSeconds = Math.min(maxSeconds, Math.max(minSeconds, 5));
+  const qualities = profile?.qualities ?? [];
   return {
     ...baseEntry(name, channelLabel),
-    timeEstimate: '5min',
+    timeEstimate: upscaler ? '10min' : '5min',
+    // composer 里「没有提示词就不许生成」的那道门：超分模型按 true 放行（vendor 补丁 3.12）
+    promptOptional: upscaler,
     // 见 videoInputCap：跟各模式的 allowedInputs 走，别再写死一个小数字把参考图挡在外面
     maxInputs: videoInputCap(videoModes),
-    supportedReferenceTypes: ['text', 'image'],
+    supportedReferenceTypes: upscaler ? ['video'] : ['text', 'image'],
     supportedImageFormats: SUPPORTED_IMAGE_FORMATS,
     maxImageSizeMb: 20,
-    resolutions: ['480p', '720p', '1080p'],
-    aspectRatios: ['16:9', '9:16', '1:1'],
+    resolutions,
+    aspectRatios,
     videoModes,
-    advancedParams: [
-      { key: 'duration', label: '生成时长', type: 'slider', default: 5, min: 2, max: 10, unit: 's' },
-      { key: 'generateCount', label: '生成数量', type: 'number', default: 1, min: 1, step: 1 },
-    ],
+    advancedParams: upscaler
+      ? [
+          ...(qualities.length
+            ? [
+                {
+                  key: 'quality',
+                  label: '超分模型',
+                  type: 'select',
+                  default: profile?.defaultQuality ?? qualities[0],
+                  options: qualities.map((quality) => ({ label: quality, value: quality })),
+                },
+              ]
+            : []),
+        ]
+      : [
+          {
+            key: 'duration',
+            label: '生成时长',
+            type: 'slider',
+            default: defaultSeconds,
+            min: minSeconds,
+            max: maxSeconds,
+            unit: 's',
+          },
+          { key: 'generateCount', label: '生成数量', type: 'number', default: 1, min: 1, step: 1 },
+        ],
   };
 }
 
@@ -323,15 +508,20 @@ export function buildChannelModelEntries(
             : kind === 'audio'
               ? audioEntry
               : textEntry;
-      // 视频模型的「视频参考」模式只给 workfisher（FisherAI）通道：只有那条链路会把本机视频
-      // 上传成公网直链（host 侧 /files/upload），别的方言收到 videos 是静默忽略。
+      // 视频模型的「视频参考」模式只给会**把本机视频上传成公网直链**的那两条链路
+      // （FisherAI / ZZAI 的 host 侧 /files/upload）；别的方言收到 videos 是静默忽略。
       // 图像条目的宽高比/模式同样按方言收紧（百炼/可灵只收 16:9、9:16、1:1，参考图要公网直链）。
       const dialect = channel.dialectDetected ?? '';
       const entry =
         kind === 'video'
-          ? (builder as typeof videoEntry)(name, channel.label, dialect === 'workfisher')
+          ? videoEntry(
+              name,
+              channel.label,
+              dialect === 'workfisher' || dialect === 'zhenzhen',
+              model.videoProfile,
+            )
           : kind === 'image'
-            ? (builder as typeof imageEntry)(name, channel.label, dialect)
+            ? (builder as typeof imageEntry)(name, channel.label, dialect, model.imageProfile)
             : builder(name, channel.label);
       result[kind].push({
         ...entry,

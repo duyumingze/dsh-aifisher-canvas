@@ -2321,3 +2321,30 @@ export {
 } from './canvas/camera';
 export { queryCanvas } from './canvas/query';
 export { PHASE_LABELS, PHASES, formatProgressForPrompt, nextPhase } from './canvas/progress';
+// v1.100：视频超分（ZZAI 的 Topaz-Upscale-LowPirce）纯函数出口 ——
+// 回归直接 import 产物验「只收一段源视频」的请求体，不必起假端点。
+export {
+  buildChannelRequest,
+  isVideoUpscaler,
+  upscaleQuality,
+  upscaleTargetResolution,
+  zzaiVideoProfile,
+} from './generation/cloudChannels';
+// v1.101：图层拆分（ZZAI 的 Seedream *-layer-decomposition）纯函数出口 ——
+// 回归直接 import 产物验「只收一张图 / 档位 auto/1k/1.5k/2k」的请求体，不必起假端点。
+export {
+  isLayerDecompositionModel,
+  layerResultUrls,
+  layerStackOf,
+  zzaiImageProfile,
+  zzaiLayerResolution,
+} from './generation/cloudChannels';
+// v1.105：GPT Image 2.6 低价版（ZZAI 的 zhenzhen-image-g-v2.6-lowprice）纯函数出口 ——
+// 回归直接 import 产物验「顶层 size/resolution/quality/output_format + n=1」的请求体。
+export {
+  isZzaiGptImageModel,
+  ZZAI_GPT_IMAGE_PROFILE,
+  zzaiGptImageResolution,
+  zzaiImageOutputFormat,
+  zzaiImageQuality,
+} from './generation/cloudChannels';

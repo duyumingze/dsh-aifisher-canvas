@@ -6,6 +6,223 @@
 > 对不上的（v1.70–v1.76 调色面板迭代、v1.82–v1.83 整页扩图）按批次合并并保留日期，
 > 不再写「未发布」这种既不是版本也不是日期的标题。
 
+## v1.105.0 — 2026-11-22
+
+### 新：接入 ZZAI 的 GPT Image 2.6 低价版（`zhenzhen-image-g-v2.6-lowprice`）
+
+用户原话（2026-11-21）：**「在画布接入这个模型 zhenzhen-image-g-v2.6-lowprice」**，
+定价页 `https://www.zzai.app/pricing/zhenzhen-image-g-v2.6-lowprice?kind=image`。
+
+- **一条通道模型**：文生图 / 参考图编辑（最多 16 张参考图），档位 `1K` / `2K` / `4K`，
+  节点上多出「画质」（`auto`/`low`/`medium`/`high`/`xhigh`/`max`）与「输出格式」
+  （`png`/`jpeg`/`webp`）两个下拉，默认 1K + auto + png。
+- **没有「生成数量」**：这个端点的 `n` 固定 1（实测传 2 直接 400
+  `supports 1K, 2K, 4K and n=1`），所以界面上不给那个控件；host 侧也把这条模型
+  归进「一次请求只提交一次」的集合，老节点上残留的「生成数量 3」不会变成 3 次付费提交。
+- **请求体与同通道其它图像模型不同**：`size` / `resolution` / `quality` / `output_format`
+  都在**顶层**（Seedream 那套在 `metadata` 里）。照 Seedream 的写法发过去不会报错，
+  只会把这些参数全忽略 —— 所以单独一条分支，并钉了逐字段断言。
+- **提交与轮询是两种包装**（真机踩到）：提交回的是**顶层 TaskDto**
+  `{id, task_id, status:'queued'}`，轮询才是 `{code:'success',data:{status:'SUCCESS',result_url}}`。
+  host 的两个解析函数本来就两边都认，这里补了注释与回归，免得下次照 `data.task_id` 去读。
+- **价格**：1K 固定 ¥0.044/张（estimate `basis=fixed`）；2K / 4K 按实际用量结算
+  （estimate 实测 ¥0.236 / ¥0.315）。画布条目里按档位写进 `cost`，批次确认卡能显示估算。
+- 预设：设置 → 闭源服务 →「+ ZZAI 真真AI」一键预设里多一条
+  「GPT Image 2.6 低价版」；本机 `cloud-channels.json` 的 zzai 通道已直接补上这条模型
+  （第 10 条，备份 `.bak-v1105`）。
+- **真机付费验证**（本次 ¥0.132，钱包 15.013388 → 14.881388）：
+  ① 文生图 1K/high/png → 1254×1254 PNG 1.58MB，扣 ¥0.044；
+  ② 参考图编辑（先 `/v1/files/upload` 换公网直链，白杯改祖母绿）→ 1254×1254 PNG 1.83MB，扣 ¥0.044；
+  ③ 2K/4K 只跑 estimate（¥0.23625 / ¥0.315），另有一次早期提交也成功（¥0.044）。
+  请求体全部由**产线同一个构造器** `buildChannelRequest` 生成，不是手写 curl。
+- 落点：`cloudChannels.ts`（`isZzaiGptImageModel` / `ZZAI_GPT_IMAGE_PROFILE` /
+  `zzaiGptImageResolution` / `zzaiImageQuality` / `zzaiImageOutputFormat` + 图像分支）、
+  `cloudGenerationRouter.ts`（singleShot 集合）、`CloudChannelModels.ts`（条目：
+  档位/画质/格式/16 张参考图/无生成数量/cost）、`CloudChannelPanel.ts`（预设）、
+  `src/host/index.ts`（纯函数出口）。
+- **验证**：typecheck src 0；`test-cloud-channels` **232 项**（新增 21 项，含画布条目断言）；
+  全量 jsdom 见下方收口记录；真浏览器 `BROWSER_ONLY=channels` 的预设个数不变（仍是 5 个）。
+  host 改动**需重启 DSH**；client 产物刷新画布页即生效。
+
+## v1.104.0 — 2026-11-22
+
+### 新：ZZAI 图层拆分组再添 Seedream 5.0 Pro（`dola-seedream-5.0-pro-layer-decomposition`）
+
+用户原话（2026-11-21 深夜）：**「dola-seedream-5.0-pro-layer-decomposition 再接一个这个图像拆分模型」**
+（价格页 `https://www.zzai.app/pricing/dola-seedream-5.0-pro-layer-decomposition?kind=image&capability=layer-decomposition`）。
+
+- **不用改请求代码**：这一族六条（pro / flash / 5.5 × 国内站 / 海外站）v1.101 起就按 `-layer-decomposition` 后缀识别，
+  Pro 的请求体与 Flash 逐字段相同（恰好 1 张图、`auto/1k/1.5k/2k`、`output_format:png`、prompt 可选 0~2000 字），
+  不同的只有拆分粒度与单价（参考价 ≤236 万像素 ¥0.27/张、以上 ¥0.54/张）。
+- **本机 ZZAI 通道加第 9 条模型**，显示名「图层拆分 · Seedream 5.0 Pro」，`imageProfile` 随 `/cloud-channels` 下发
+  （图层拆分模式 + 四档 + 只吃一张图），画布下拉选它即可。
+- **一键预设**：`CloudChannelPanel` 的「+ ZZAI 真真AI」预设补上 Pro 条目，新装/重建通道时两条图层拆分都能直接勾。
+- **真机付费验证**（同一张 1424×800 源图）：Pro 62 秒出结果，回执 3 张（底图 + 2 个图层：`Underwater Tyndall beams`、
+  `Water surface glints`），扣 **¥0.9567**；`layerStack` 文档尺寸 / 每层 bbox 齐全，按 bbox 缩放拼回的像素复核
+  平均通道差 **15.84**（反证：不缩放、原尺寸贴在 bbox 左上 = 18.99），与 Flash 同一套几何语义。
+  同一张图 Flash 会拆成 11 张（¥1.232）—— Pro 更粗更语义化、Flash 更碎，按需求选。
+- 验证：typecheck src 0 错；`test-cloud-channels` 新增 2 条 Pro 断言（请求体与 Flash 同形、通道表带同一份 `imageProfile`），
+  族识别断言本就含 Pro；jsdom 全量 **61 套 3439 项**通过（唯一红是 `test-media-editing` 的「本机找到 ffmpeg」前置，
+  这台机没装 ffmpeg，属既有例外）；真浏览器 `BROWSER_ONLY=channels` fail=0。
+
+## v1.103.0 — 2026-11-21
+
+### 新：复制并移动（`Shift+D` / `Alt+D`），主画布与调色合成器同一套手感
+
+用户原话（2026-11-21）：**「做一个画布功能，节点复制并移动。按alt或者shift+d。调色节点也要」**。
+
+- **主画布**：选中节点按 `Shift+D`（或 `Alt+D`，同义键）→ 整批复制、原地偏移 40px、被复制出来的
+  这批复刻直接进入抓取：移动鼠标副本跟着走，再按 `X` / `Y` 锁轴，左键 / `Enter` 落下，
+  `Esc` 连这批副本一起取消（Blender 的 duplicate 手感，和既有的 `G` / `X` / `A` 同一套规则）。
+  复制本身进撤销栈：`Ctrl+Z` 一步回到复制之前（落下时补提交，复制完没移动也算一步）。
+  为什么是 40px 而不是「跳到鼠标处」：复制出来的东西往往要在旁边接着排，落在指针上会盖住原节点、
+  也看不清到底复制成功了没有。
+- **连线语义 = 链接式复制**（和 `Ctrl+C / V` 一致）：选中集合内部的线整段复制到副本上；
+  副本连到**没被选中**的上游时继续指着原上游 —— 复制一张参考图 / 一个调色节点立刻能接着用，
+  不用重新接线。`Ctrl+C/V` 本身没动。
+- **调色节点同样能复制**：节点数据是整份克隆，`resultUrl`（卡上显示的那张调色结果）与
+  `compositorGraph`（合成器的节点/参数）一起带过去 —— 副本打开合成器看到的就是复制那一刻那张图，
+  不是一个空节点。
+- **调色合成器里也能用**：`Shift+D` / `Alt+D` 复制合成器里的效果节点（同一个偏移 40px + 立刻抓取 +
+  `Esc` 连副本取消 + 一步撤销）。连线同样按「副本为落点」复制，所以复制一个色彩平衡 / 混合节点
+  会顺手把它的输入接好；**输入 / 输出 / 预览是固定节点，不参与复制**（一张图只有一份）。
+  左下角快捷键条补了 `Shift+D=复制并移动`。
+- 快捷键说明面板补上 `A / Alt+A`、`G → X/Y`、`Shift+D / Alt+D`、`X` 删除四行（此前这几条只有代码里有）。
+- 落点：vendor 补丁 3.16（`canvasCommands.ts` 9 处锚点；`deleteCanvasNodes` 导入、复制出口、
+  抓取对象加「这是复制出来的」标记与「取消时还原哪个选区」、`Shift+D` 键位、依赖数组）；
+  合成器侧在 `src/client/canvas/compositor/editor.ts` 的 `duplicateSelection` / `startGrab` / `finishGrab`。
+  上限与红线不变：生成中（`loading/queued`）的节点仍不能复制（和 `Ctrl+C` 同一条提示）。
+- **验证**：`test-canvas-blender-keys` 补了复制链（Shift+D 偏移 40 / 跟手 / 落下 / `Ctrl+Z` 撤回 /
+  `Alt+D` / `Esc` 整批取消 / 调色节点副本带 `resultUrl`）；`test-canvas-compositor` 补了
+  （复制效果节点、固定节点不复制、一步撤销、Esc 不留空撤销步）。全量 jsdom **61 套 3422 项**
+  （唯一的 `test-media-editing` 仍是本机没装 ffmpeg 的既有例外）。真机新增 `?xduplicate=1` 场景
+  （`BROWSER_ONLY=duplicate`）只验与指针无关的三件事（复制出一张 + 选中 + 内容整份带过去 + Esc 撤干净）、
+  `BROWSER_ONLY=canvas,node-search,knife,reroute,compositor,duplicate` 全 fail=0 ——
+  真浏览器里**合成的 PointerEvent 驱动不了 vendor 的指针抓取**（既有 `G` 抓取同样不动），
+  位移口径（+40px / 跟手 / 落点）由 jsdom 两套守着，不拿真机合成事件去量。
+
+## v1.102.0 — 2026-11-21
+
+### 改：图层拆分结果做成「一个 PSD 节点 + 上叠链 + 可下载 .psd」
+
+用户原话（2026-11-21，附截图）：**「现在出现一个问题，接入调色节点后它的图层混合方式不对，顺序也不对，
+我想要走的是通过混合节点的方式来混合，并且保留正确的位置；还有这样拆分出来的图堆叠的形式不好看，
+就做成一个psd节点，接入调色节点」**，随后补一句 **「psd节点可以下载导入ps里」**。
+
+三处都是 v1.101 的「摊开成 N 个节点」做不到的，这版整个换掉：
+
+- **主画布上只留一个节点**：图层拆分的结果挂在节点的 `layerStack` 上（每层 URL + `boundingBox` 矩形 +
+  zindex），卡片显示「N 层」徽标、**不再画那一叠卡片**。点「转成 PSD」把各层按位置扁平合成一张图写回
+  **同一个节点**（标题是默认的「图片生成」时顺手改成「图层文档 · N 层」），画布上不会多出 11 个节点。
+- **调色合成器里一层一个输入口**：上游是图层文档时，输入节点按 zindex（底图在最下）展开成 N 个输出口，
+  口上带层名（`图层 1 · 绿块`）。默认图自动铺「**放置 → Alpha 上叠**」链：
+  `输入(底图) → [放置(层1) → 上叠(层1)] → [放置(层2) → 上叠(层2)] → 输出/预览`。
+  每层都能在 `输入口 → 放置` 之间插效果节点，逐层调色后仍按原位叠加（这正是用户说的「通过混合节点来混合」）。
+- **位置真的按 bbox 贴**：新增合成器节点「放置」（4 个参数：X / Y / 宽 / 高，归一化到文档）。
+  图层拆分的每层 PNG 是「元素区域等比放大的裁片」（实测 bbox 588×220 的图是 1062×397，两向都是 1.806 倍），
+  所以正确的贴法是**按 bbox 矩形缩放贴**、矩形外透明。这条结论是用 PIL 对真机回执做四种假设的像素对比
+  定下来的（这种假设与原图平均通道差 17.6，其余 26.7 / 27.2）。
+- **下载 .psd**：新增 `psdWriter.ts`（RGB/8bit/每层一个普通像素图层的极简 8BPS 编码器，非预乘 alpha，
+  图层矩形 = bbox）。节点上的「下载 PSD」直接下载一层一个图层的 `.psd`，Photoshop 打开即可继续编辑。
+  真机验证：Pillow 能读出 `64×48 RGBA / 2 层 / 矩形 (0,0,64,48) 与 (10,8,34,28) / 图层名`。
+- **验证**：jsdom 全量 61 套 3393 项（新增图层端口/上叠链/PSD 字节解析、PSD 回写、vendor 补丁断言）；
+  真浏览器新增 `compositor-layers` 场景读预览像素：绿块中心 `[30,200,60]`、红块（50% 透明）中心
+  `[120,50,80]`（红蓝各半）、两处空白 `[20,60,120]`（底图），9 条断言全绿。
+
+## v1.101.0 — 2026-11-21
+
+### 新：图层拆分（ZZAI 的 Seedream `*-layer-decomposition`）
+
+用户原话（2026-11-21）：**「帮我接这个模型 dola-seedream-5.0-flash-layer-decomposition，我要测试图层拆分功能。
+并接入调色节点测试。」**（定价页
+`https://www.zzai.app/pricing?sort=hottest&kind=image&capability=layer-decomposition`）
+
+- **模型**：设置 → 闭源服务 → OpenAI 通道 → ZZAI 真真AI 里勾「图层拆分 · Seedream 5.0 Flash」
+  （`dola-seedream-5.0-flash-layer-decomposition`）。识别按 `-layer-decomposition` 后缀，
+  所以同族的 pro / 5.5（国内站 `seedream-v5-*` 与海外站别名 `dola-*`）都认，换一条不必改代码。
+- **一次产出底图 + N 个透明图层**：画布节点上就是「历史 N」里的一串结果（第一格是底图、后面是透明 PNG 图层）。
+  提示词**可留空**（空着 = 上游自动识别主要元素），档位是 `自动 / 1K / 1.5K / 2K`（端点不认 4K），
+  底图固定要 `png`（图层是透明 PNG，底图有损会让后续合成对不上）。
+- **一次生成只提交一次**：图层拆分按**实际输出张数**计费（实测 11 张 ¥1.232），
+  所以「生成数量」在这条路上被强制成 1 —— 叫 3 次就是把同一张图拆三遍、付三次钱。
+- **「摊开 N」接调色节点**：图片节点头部的历史指示器旁边多一颗「摊开 N」。
+  点它会把这次的多张结果摊成画布上独立的图片节点（标题按 zindex 命名：底图 / 图层 1 / 图层 2 …），
+  并在右边新建一个 `Color Grade` 调色节点把这些图**全部接上** —— 调色合成器的输入节点按上游图片数出端口，
+  所以打开就是「一层一个输入口」，可以逐层调色再合成。落位复用截帧那套「贴右缘 + 避开已有节点」算法。
+- **踩到的坑（结果顺序）**：真实回执里同一个底图会出现**两次且域名不同**
+  （`data.result_url` 走 `rh-hk-images.xiaoyaoyou.com`、`data.data.content.image_url` 走 COS 域名，
+  指向同一份对象）。通用结果收集按完整 URL 去重 → 画布上多出一张底图、后面每一格都错位。
+  所以图层拆分这条链只认 `data.data.content.image_urls`（上游按 zindex 排好的顺序表）并按**文件名**去重。
+- **上游拉图超时**（实测踩到）：素材先换成端点图床的签名直链、再由上游模型去下载，图太大（那次 8.8MB）
+  就会失败，报错只有一句「File processing failed due to a timeout while downloading the image」。
+  现在这种失败会补一句人话 hint（换张小图 / 稍后重试 / 这次不扣费），别的失败文案不变。
+
+## v1.100.0 — 2026-11-21
+
+### 新：视频超分节点（ZZAI 的 `Topaz-Upscale-LowPirce`）
+
+用户原话（2026-11-21）：**「现在想要做视频超分节点，接入模型 Topaz-Upscale-LowPirce
+地址：https://www.zzai.app/pricing?kind=video&capability=video-upscale」**。
+
+- **节点形态**：右键「添加节点 → 视频超分」/ Shift+A 搜「超分」建出来的是**预置好的 `Video` 节点**
+  （标题「视频超分」、模型「视频超分（Topaz）」、模式只有「视频超分」、目标 1080p）。
+  不是新的 `node.type` —— vendor 的生成链路、批次审批、历史/截帧、agent 契约全都按 `type === 'Video'`
+  分流，另开类型等于把这十几处门禁逐个复制一遍。实现上 `createCanvasNode` 收到预设类型
+  `Video Upscale` 就先换成 `Video` 再预置（`scripts/vendor-aifisher.mjs` 3.12 段，16 处锚点）。
+- **只收一段源视频**：`metadata.video_url` 恰好 1 条；`resolution` ∈ `720p` / `1080p` / `2K` / `4K`
+  （**2K/4K 是大写 K**，与 H3 那套全小写档位词不兼容）；`quality` ∈ `Ultra` / `Max` / `High` /
+  `Medium` / `Low`（默认 `Max`）。提示词、秒数、宽高比都不参与上游提交，所以节点上
+  **没有提示词框**、**不显示假的「4 秒」**（时长由上游读源视频，计费按输出秒数含小数）。
+- **请求体单独一条分支**（`buildChannelPayload` 的 zhenzhen 超分分支）：只回
+  `{model, metadata:{video_url, resolution, quality}}`；漏了源视频时先给可读的 422
+  `CHANNEL_SOURCE_VIDEO_REQUIRED`，而不是让上游「提交成功、跑完没结果」。
+  生成数量对超分**强制 1**（同一段源视频重跑没有意义，还会重复扣费）。
+- **画布侧**：`CloudChannelModels.videoEntry` 对 `profile.upscaler` 只出一个「视频超分」模式
+  （`video-edit`，1 段视频）、`promptOptional: true`（composer 放行空提示词、收起提示词框）、
+  高级设置里出「超分模型」下拉（默认 Max）。`canvasGeneration` 的「必须写提示词」守卫同步放行。
+- **出厂配置**：设置页「+ ZZAI 真真AI」预设从 6 条变 **7 条**（多出「视频超分（Topaz）」）；
+  本机 `cloud-channels.json` 里已有的 zzai 通道也补了这一条（label「视频超分（Topaz）」）。
+- **计费**（人民币 / 输出秒）：Ultra 0.08、Max 0.06、High 0.05、Medium 0.04、Low 0.03；
+  再乘档位倍率 720p ×1 / 1080p ×2 / 2K ×3 / 4K ×4。
+- **真机付费验证**：5.17 秒源视频 → 720p + Low，`POST /v1/video/generations` 提交 → 轮询
+  `SUCCESS` → 落盘 5 秒 1272×720 MP4（4.18MB），`usage.amount = ¥0.15501`，与
+  「秒数 × 0.03 × 1」一分不差；钱包 19.933064 → 19.778054。结果直链是对象存储的 TOS 地址，
+  host 下载时不带通道 Authorization（带了会被 TOS 拒成 `Unsupported Authorization Type`）。
+- 回归：`test-cloud-channels` 171 项（新增超分请求体/档位大小写/缺源视频/vendor 补丁 8 项）、
+  `test-canvas-node-search` 68 项（候选 9 → 10 种、搜「超分」第一名、预设落成 Video + 1080p）、
+  `test-canvas-video-references` 36 项（注册表 4 项 + 真 DOM composer：单模式 / 收起提示词 / 1080p）。
+
+## v1.99.0 — 2026-11-21
+
+### 新：接上 ZZAI 真真AI（`api.seedance.nz`）的 MiniMax H3 ComfyUI 系列
+
+用户原话（2026-11-21，附 `https://www.zzai.app/pricing?tag=comfyui` 截图）：
+**「我想要接右侧网站的 minimax h3 模型」**，随后一句 **「把它接到我的画布插件里」**。
+
+- **新请求方言 `zhenzhen`**：`detectChannelDialect` 认 `*.seedance.nz` / `*.zzai.app` /
+  `*.openzhenzhen.com`；设置页方言下拉多一项「ZZAI 真真AI（api.seedance.nz）」。
+  提交走**旧版异步任务端点** `POST /v1/video/generations`（单数 video）→ 轮询
+  `GET /v1/video/generations/{id}`；回执 `{code:'success', data:{task_id}}`、终态
+  `data.status='SUCCESS'`、结果 `data.result_url`（`data.data.content.video_url` 也认）。
+  baseUrl 填不填 `/v1` 都能用（host 自己补前缀，照抄写死会拼成 `/v1/v1/…`）。
+- **每个工作流一套参数表**（`ZZAI_H3_PROFILES`，照官方 `llms.txt` 逐条抄）：通用 3–15s、480p–1440p、
+  **只有 16:9 / 9:16**；WF漫剧与 JY特调只到 768p；武戏 / 文戏 5–15s、到 2160p（武戏收 21:9）；
+  角色替换必须带一条源视频。**提交前按表夹参数**（720p→768p、1:1→16:9、2s→3s、不收的
+  `video_url` 不塞），参数表还随 `/cloud-channels` 下发，画布的档位 / 宽高比 / 时长下拉只出真收的那些。
+- **参考素材**：走端点自己的 `POST /v1/files/upload`（multipart 的 `file` → `{url}`，24 小时有效），
+  画布本机素材同样先上传再提交；直链按「通道 + 字节 sha1」缓存 12 小时。
+- **入口**：设置 → 闭源服务 → 「+ ZZAI 真真AI（MiniMax H3）」一键预设六条工作流（通用 / WF漫剧 15 步 /
+  JY特调 12 步 / 武戏 / 文戏 / 角色替换），填 `sk-…` 令牌、保存通道即用。
+  数字人（`-digital-human`）没预置：它要「一张图 + 一段驱动音频」，画布视频节点还没有音频入口。
+- **User-Agent**：这一家的入口有 Cloudflare 防护（文档明说默认 UA 会被 403 + 非 JSON 的
+  `error code: 1010`），所以只有 zhenzhen 方言显式带 `user-agent: dsh-aifisher-canvas/1.99`，
+  别的方言维持原样不动。
+- 顺带：`guessChannelModelKind` 认 `minimax-h3-comfyui-*` 是视频模型（名字里没有 t2v/video 词根，
+  以前会被默认判成图像，勾进来挂到视频节点上是 422）。
+- 回归：`scripts/test-cloud-channels.mjs` 新增「视频通道：ZZAI 真真AI」一节
+  （方言存得住 / 参数表 / 路径不叠 `/v1/v1` / UA / 720p→768p / 1:1→16:9 / 2s→3s /
+  参考图与音频上传 / `data.task_id` 轮询 / 结果落盘 / 换工作流换区间），共 158 项全绿。
+
 ## v1.98.0 — 2026-11-13
 
 ### 新：设置页「高级与关于」能检查更新，确认后把更新指令填进一条新对话

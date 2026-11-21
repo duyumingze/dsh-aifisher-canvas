@@ -93,6 +93,8 @@ import { installNodeFramework } from '../../../vendor/aifisher/src/stable/nodes/
 import { installCanvasUiScale } from './uiScale';
 import { installCanvasGenerationDots } from './genDots';
 import { installCompositorBridge } from './compositor/bridge';
+// v1.101：图层文档（图层拆分的结果）—— 扁平合成图桥 + 图层几何工具。
+import { installLayerStackBridge } from './layerStack';
 // v1.87：拖入 .md / .txt 直接生成文本节点（Markdown 在本机翻成富文档）。
 import { installCanvasTextFileDrop } from './textDrop';
 import { installCanvasTextPreview } from './textPreview';
@@ -824,9 +826,19 @@ function installCanvasVideoFrameSupport(): { dispose: () => void } {
  * v1.70：调色节点（Color Grade）→ 全屏合成器。
  * 编辑器/引擎在 src/client/canvas/compositor/；vendor 节点卡只认 window.__FISHERAI_COMPOSITOR__，
  * 写回走节点自己的 onUpdate（resultUrl + compositorGraph），不需要新协议。
+ *
+ * v1.101 追加：图层文档（图层拆分的结果）的「扁平合成图」桥 `__FISHERAI_LAYER_STACK__`
+ * —— 节点卡的「转成 PSD」按钮只调它（按位置合成各层 → 落素材库 → 写回 resultUrl）。
  */
 function installCanvasCompositorSupport(): { dispose: () => void } {
-  return installCompositorBridge();
+  const compositor = installCompositorBridge();
+  const layers = installLayerStackBridge();
+  return {
+    dispose() {
+      layers.dispose();
+      compositor.dispose();
+    },
+  };
 }
 
 /** 顺序按上游 main.ts 的先后关系保留（外观/会话要早于画布组件读取它们）。 */

@@ -266,7 +266,168 @@ check(
   );
 }
 
-// ---------------------------------------------------------------- 7) 运行时无错误
+// ---------------------------------------------------------------- 7) Shift+D / Alt+D 复制并移动
+//
+// 用户 2026-11-21：「做一个画布功能，节点复制并移动。按alt或者shift+d。调色节点也要」。
+// 语义照 Blender 的 duplicate：整批复制、原地偏移 40px、复制完直接进抓取跟着鼠标走，
+// 左键/Enter 落下，Esc 连这批副本一起撤掉；复制本身进撤销栈（Ctrl+Z 能撤回）。
+{
+  const domNodes = () =>
+    [...doc.querySelectorAll('#canvas-viewport-content [data-node-id]')].map((element) => {
+      const match = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(element.style.transform || '');
+      return {
+        id: element.dataset.nodeId,
+        x: match ? Math.round(Number(match[1])) : 0,
+        y: match ? Math.round(Number(match[2])) : 0,
+        selected: element.dataset.nodeSelected === 'true',
+      };
+    });
+  const cardOf = (id) => doc.querySelector(`#canvas-viewport-content [data-node-id="${id}"]`);
+  const clickCard = async (id) => {
+    const card = cardOf(id);
+    if (!card) return;
+    pointer('pointerdown', card, { button: 0, buttons: 1, clientX: 200, clientY: 200 });
+    pointer('pointerup', window, { button: 0, buttons: 0, clientX: 200, clientY: 200 });
+    await settle(60);
+  };
+
+  const baseline = domNodes();
+  check('复制前画布上有两张卡（第 6 段留下的）', baseline.length === 2, `cards=${baseline.length}`);
+  const source = baseline[0];
+  await clickCard(source.id);
+  check('点中卡片就选中它（复制的前提）', domNodes().find((n) => n.id === source.id)?.selected === true);
+
+  pointer('pointermove', window, { clientX: 300, clientY: 300, buttons: 0 });
+  key({ key: 'd', shiftKey: true });
+  await settle(160);
+  let now = domNodes();
+  const copy = now.find((node) => node.selected);
+  check('Shift+D：多出一张卡（2 → 3）', now.length === 3, `cards=${now.length}`);
+  check(
+    '副本原地偏移 40px（不是跳到鼠标处），并且被选中',
+    copy && copy.id !== source.id && copy.x === source.x + 40 && copy.y === source.y + 40,
+    JSON.stringify({ source, copy }),
+  );
+
+  pointer('pointermove', window, { clientX: 420, clientY: 380, buttons: 0 });
+  await settle(140);
+  now = domNodes();
+  check(
+    '复制完直接进入抓取：副本跟着鼠标走（+120 / +80），原节点不动',
+    now.find((n) => n.id === copy?.id)?.x === source.x + 160 &&
+      now.find((n) => n.id === copy?.id)?.y === source.y + 120 &&
+      now.find((n) => n.id === source.id)?.x === source.x &&
+      now.find((n) => n.id === source.id)?.y === source.y,
+    JSON.stringify(now),
+  );
+
+  pointer('pointerdown', canvasBackground, { button: 0, buttons: 1, clientX: 420, clientY: 380 });
+  pointer('pointerup', window, { button: 0, buttons: 0, clientX: 420, clientY: 380 });
+  await settle(200);
+  pointer('pointermove', window, { clientX: 700, clientY: 640, buttons: 0 });
+  await settle(120);
+  now = domNodes();
+  check(
+    '左键落下：副本停在落点，不再跟随鼠标',
+    now.length === 3 &&
+      now.find((n) => n.id === copy?.id)?.x === source.x + 160 &&
+      now.find((n) => n.id === copy?.id)?.y === source.y + 120,
+    JSON.stringify(now),
+  );
+
+  key({ key: 'z', ctrlKey: true });
+  await settle(300);
+  now = domNodes();
+  check(
+    'Ctrl+Z：这次复制整步撤回（3 → 2）',
+    now.length === 2 && !now.some((node) => node.id === copy?.id),
+    JSON.stringify(now.map((node) => node.id)),
+  );
+
+  // Alt+D 是同义键；Esc 取消要把副本一起撤掉（Ctrl+V 粘错了只能再删一次）
+  const again = domNodes();
+  const second = again[0];
+  await clickCard(second.id);
+  pointer('pointermove', window, { clientX: 500, clientY: 500, buttons: 0 });
+  key({ key: 'd', altKey: true });
+  await settle(160);
+  now = domNodes();
+  check('Alt+D 同样能复制（2 → 3）', now.length === 3, `cards=${now.length}`);
+  key({ key: 'Escape' });
+  await settle(160);
+  now = domNodes();
+  check(
+    'Esc 取消复制：副本整批撤掉，原节点留在原地',
+    now.length === 2 && now.some((node) => node.id === second.id),
+    JSON.stringify(now),
+  );
+}
+
+// ---------------------------------------------------------------- 8) 调色节点也要能复制
+//
+// 用户那句话的后半句。调色节点比普通图多两样东西：节点自己显示 `resultUrl`、
+// 合成器图存在 `compositorGraph` 里。复制必须是「整份数据克隆」—— 副本打开合成器
+// 看到的就是复制那一刻那张图，而不是一张空节点。
+{
+  window.dispatchEvent(
+    new window.CustomEvent('fisherai:add-canvas-node', {
+      detail: { type: 'Color Grade', point: { x: 900, y: 320 } },
+    }),
+  );
+  await settle(400);
+  const gradeCards = () =>
+    [...doc.querySelectorAll('#canvas-viewport-content [data-node-id]')].filter((element) =>
+      element.querySelector('[data-fisherai-open-compositor]'),
+    );
+  check('建出一个调色节点（卡上有「合成器」按钮）', gradeCards().length === 1);
+  const gradeId = gradeCards()[0]?.dataset.nodeId;
+
+  // 走主画布自己的落位桥给它写上 resultUrl + compositorGraph（等同「应用」过一次调色）
+  const bridge = window.__FISHERAI_CANVAS_GRADE_RESULT__;
+  check('调色结果落位桥在（拿它给节点写回结果）', typeof bridge?.place === 'function');
+  const placed = bridge?.place({
+    sourceId: gradeId,
+    url: '/api/aifisher/canvas/media/blender-keys-proj/images/graded.png',
+    graph: { version: 1, nodes: [], edges: [] },
+    title: '调色结果',
+  });
+  await settle(250);
+  check(
+    '调色节点显示调色结果（resultUrl 已写回）',
+    !!placed?.ok &&
+      !!doc.querySelector(`[data-node-id="${gradeId}"] img[src*="graded.png"]`),
+    JSON.stringify(placed),
+  );
+
+  const gradeSource = gradeCards().find((element) => element.dataset.nodeId === gradeId);
+  pointer('pointerdown', gradeSource, { button: 0, buttons: 1, clientX: 200, clientY: 200 });
+  pointer('pointerup', window, { button: 0, buttons: 0, clientX: 200, clientY: 200 });
+  await settle(80);
+  pointer('pointermove', window, { clientX: 400, clientY: 400, buttons: 0 });
+  key({ key: 'd', shiftKey: true });
+  await settle(160);
+  const gradeCopies = gradeCards();
+  check('Shift+D 复制调色节点：多出一个调色节点', gradeCopies.length === 2, `grades=${gradeCopies.length}`);
+  const copyCard = gradeCopies.find((element) => element.dataset.nodeId !== gradeId);
+  check(
+    '副本带着 resultUrl（两张调色节点都显示那张调色结果）',
+    !!copyCard?.querySelector('img[src*="graded.png"]'),
+    copyCard?.querySelector('img')?.getAttribute('src') ?? '(no img)',
+  );
+  check(
+    '副本也是调色节点（有合成器按钮，能接着打开）',
+    !!copyCard?.querySelector('[data-fisherai-open-compositor]'),
+  );
+  key({ key: 'Escape' });
+  await settle(160);
+  check(
+    'Esc 取消：调色节点只剩原来那一个',
+    gradeCards().length === 1 && gradeCards()[0].dataset.nodeId === gradeId,
+    `grades=${gradeCards().length}`,
+  );
+}
+
+// ---------------------------------------------------------------- 9) 运行时无错误
 {
   const diag = (await host.hostApi('GET', '/diagnostics?limit=100')).json();
   const errors = (diag.entries ?? []).filter((entry) => entry.level === 'error');

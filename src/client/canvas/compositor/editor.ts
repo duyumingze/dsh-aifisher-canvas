@@ -73,6 +73,7 @@ import {
   inputPortLabel,
   inputPortsFor,
   insertNodeIntoEdge,
+  inputSlots,
   newCompositorId,
   normalizeGraph,
   outputPortCount,
@@ -378,6 +379,15 @@ interface GrabDrag {
   before: GraphSnapshot;
   /** 已经真的移动过（没动过就不进撤销栈，也不改 `edited`）。 */
   moved: boolean;
+  /**
+   * 复制并移动（`Shift+D` / `Alt+D`）：这次抓取抓的是**刚复制出来的副本**。
+   *
+   * 有这个标记时语义变三条：Esc 要连副本一起撤掉；没移动过也要落一步撤销
+   * （复制本身是一次编辑）；`before` 记的是**复制之前**那张图（撤销一步就回到复制前）。
+   */
+  duplicateIds?: string[];
+  /** 取消复制时把选区还给复制前那些节点。 */
+  selectionBefore?: string[];
 }
 
 /** 示波器面板的当前状态。 */
@@ -495,7 +505,12 @@ function ensureStyle(): void {
 export function openCompositorEditor(options: OpenCompositorOptions): void {
   if (session) closeCompositorEditor();
   ensureStyle();
-  const graph = normalizeGraph(options.graph, options.images.length);
+  /**
+   * 上游端口（v1.101）：图层文档会展开成「一层一个口」，所以默认图、端口数、缩略图
+   * 一律按 `slots` 算，而不是按「几张图」算。
+   */
+  const slots = inputSlots(options.images);
+  const graph = normalizeGraph(options.graph, slots.length, slots);
   const root = document.createElement('div');
   root.className = 'cg-root';
   root.setAttribute('data-fisherai-compositor', 'true');
@@ -673,7 +688,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   const hintbar = document.createElement('div');
   hintbar.className = 'cg-hintbar';
   hintbar.textContent =
-    '空白拖=框选 · 中键/空格=平移 · 滚轮=缩放 · A=全选(Alt+A 取消) · Shift+A=添加节点 · 拖节点压线=插入连线 · 双击连线=断开 · Ctrl+右键划过=断开 · Shift+右键划过=合线 · G=移动(X/Y锁轴) · X/Delete=删除 · Ctrl+Z=撤销';
+    '空白拖=框选 · 中键/空格=平移 · 滚轮=缩放 · A=全选(Alt+A 取消) · Shift+A=添加节点 · 拖节点压线=插入连线 · 双击连线=断开 · Ctrl+右键划过=断开 · Shift+右键划过=合线 · G=移动(X/Y锁轴) · Shift+D=复制并移动 · X/Delete=删除 · Ctrl+Z=撤销';
   // 锁轴辅助线：G 之后按 X / Y，画一条贯穿画布的线，锁没锁一眼看得见（Blender 同款）
   const axisGuide = document.createElement('div');
   axisGuide.className = 'cg-axis-guide';
@@ -813,8 +828,16 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     }
   };
 
-  // 尺寸取第一张输入图；加载失败就退回 1024。
+  // 尺寸优先取图层文档的画布尺寸（图层拆分的结果是「文档」而不是单张图），
+  // 没有文档就取第一张输入图；加载失败就退回 1024。
   const resolveSize = (): void => {
+    const document = slots.find((slot) => slot.document)?.document;
+    if (document) {
+      session_.size = { width: document.width, height: document.height };
+      meta.textContent = `${session_.size.width} × ${session_.size.height} · ${slots.length} 层`;
+      schedule();
+      return;
+    }
     const first = options.images[0];
     if (!first) return;
     const probe = new Image();
@@ -1144,7 +1167,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     kindLabel.className = 'cg-node-kind';
     kindLabel.textContent =
       node.kind === 'input'
-        ? `${options.images.length}`
+        ? `${slots.length}`
         : node.kind === 'output' || node.kind === 'viewer' || node.kind === 'reroute'
           ? ''
           : spec.category;
@@ -1159,17 +1182,19 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       const body = document.createElement('div');
       body.className = 'cg-node-body';
       if (node.kind === 'input') {
-        if (!options.images.length) {
+        if (!slots.length) {
           const empty = document.createElement('div');
           empty.className = 'cg-empty';
           empty.textContent = '主画布上没有接图像';
           body.append(empty);
         } else {
-          for (const image of options.images) {
+          // 一个端口一张缩略图：图层文档就是一层一张（顺序 = 端口序号 = zindex 从下往上）
+          for (const slot of slots) {
             const thumb = document.createElement('img');
             thumb.className = 'cg-thumb';
-            thumb.src = image.url;
-            thumb.alt = image.title || '输入图像';
+            thumb.src = slot.url;
+            thumb.alt = slot.name || '输入图像';
+            thumb.title = slot.name || '输入图像';
             thumb.draggable = false;
             body.append(thumb);
           }
@@ -1202,14 +1227,19 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       }
       element.append(port);
     }
-    const outputs = outputPortCount(node.kind, options.images.length);
+    const outputs = outputPortCount(node.kind, slots.length);
     for (let index = 0; index < outputs; index += 1) {
       const port = document.createElement('div');
       port.className = 'cg-port cg-out';
       port.dataset.port = String(index);
       port.dataset.side = 'out';
       port.style.top = `${portTopFallback(node.kind, 'out', index)}px`;
-      port.title = node.kind === 'input' ? `图像 ${index + 1}` : '输出';
+      port.title =
+        node.kind === 'input'
+          ? slots[index]?.name
+            ? `${index === 0 ? '底图' : `图层 ${index}`} · ${slots[index].name}`
+            : `图像 ${index + 1}`
+          : '输出';
       element.append(port);
     }
     return element;
@@ -3763,7 +3793,12 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     renderEdges();
   };
 
-  const startGrab = (): void => {
+  const startGrab = (forced?: {
+    ids?: readonly string[];
+    before?: GraphSnapshot;
+    duplicateIds?: string[];
+    selectionBefore?: string[];
+  }): void => {
     if (
       session_.grab ||
       session_.nodeDrag ||
@@ -3776,7 +3811,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     }
     // 全选之后要整体移动：输入 / 输出 / 预览也能跟着走（Blender 里这几个节点本来就能拖），
     // 只是不许删（删除那边仍按 FIXED_NODES 过滤）。
-    const ids = session_.selection.filter((id) =>
+    const ids = (forced?.ids ?? session_.selection).filter((id) =>
       session_.graph.nodes.some((item) => item.id === id),
     );
     if (!ids.length) {
@@ -3801,12 +3836,19 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       originScreenX: start.x - rect.left,
       originScreenY: start.y - rect.top,
       axis: null,
-      before: cloneHistorySnapshot(),
+      // 复制的 `before` 由调用方给（要的是**复制前**那张图）；普通抓取现抓一份。
+      before: forced?.before ?? cloneHistorySnapshot(),
       moved: false,
+      duplicateIds: forced?.duplicateIds ?? [],
+      selectionBefore: forced?.selectionBefore ?? ids,
     };
     stage.classList.add('cg-grabbing');
     paintAxisGuide();
-    session_.toast(`抓取移动 · ${GRAB_KEYS_HINT}`);
+    session_.toast(
+      forced?.duplicateIds?.length
+        ? `复制并移动 · ${GRAB_KEYS_HINT}`
+        : `抓取移动 · ${GRAB_KEYS_HINT}`,
+    );
   };
 
   /** 锁轴：再按同一个键解锁（Blender 里 X 连按两次就是回到自由移动）。 */
@@ -3834,6 +3876,19 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     stage.classList.remove('cg-grabbing');
     paintAxisGuide();
     if (!commit) {
+      // 复制并移动：Esc = 连刚复制出来的副本一起取消（Blender 同款）。
+      // 位置不用回正 —— 副本整批删掉，画布回到复制之前那张图。
+      if (grab.duplicateIds?.length) {
+        for (const id of grab.duplicateIds) session_.graph = removeNode(session_.graph, id);
+        renderNodes();
+        setSelection(grab.selectionBefore ?? []);
+        renderEdges();
+        schedule();
+        // 副本撤掉之后画布等于没改过：`edited` 按基线重算，否则 Esc 会白落一张没变的图。
+        session_.edited = !sameHistory(session_.history.baseline, cloneHistorySnapshot());
+        session_.toast('已取消复制');
+        return;
+      }
       for (const [id, start] of grab.positions) {
         const node = session_.graph.nodes.find((item) => item.id === id);
         if (!node) continue;
@@ -3849,10 +3904,91 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       session_.toast('已取消移动');
       return;
     }
+    // 复制这一下本身也算一步：复制完没移动过也要能 Ctrl+Z 撤回去。
+    if (grab.duplicateIds?.length) {
+      session_.edited = true;
+      commitHistory(grab.before);
+      session_.toast(grab.moved ? '已复制并移动 · Ctrl+Z 撤销' : '已复制 · Ctrl+Z 撤销');
+      return;
+    }
     if (!grab.moved) return;
     session_.edited = true;
     commitHistory(grab.before);
     session_.toast('已移动 · Ctrl+Z 撤销');
+  };
+
+  /** 复制并移动时副本相对原节点的偏移（和主画布 canvasCommands 的 DUPLICATE_OFFSET 同一个数）。 */
+  const DUPLICATE_OFFSET = 40;
+
+  /**
+   * 复制并移动（`Shift+D` / `Alt+D`，用户 2026-11-21：「节点复制并移动。按alt或者shift+d」）。
+   *
+   * 和主画布的 Shift+D 同一套手感：选中的效果节点整批复制、偏移 40px 落位，然后直接进入
+   * 抓取（跟着鼠标走、X/Y 锁轴、左键落下、Esc 连副本一起取消）。
+   *
+   * 连线取「链接式复制」：**所有以副本为落点的连线都复制过去**，上游若是没被选中的节点
+   * 就继续指着它（Blender 的 Shift+D 会把副本断成孤点，这里刻意不同 —— 复制一个混合 /
+   * 色彩平衡节点多半就是想拿同一条输入再调一遍，省一次接线）。
+   *
+   * 输入 / 输出 / 预览是固定节点（一张图只有一份），不参与复制；只选了它们时给一句提示。
+   */
+  const duplicateSelection = (): void => {
+    if (
+      session_.grab ||
+      session_.nodeDrag ||
+      session_.linkDrag ||
+      session_.marquee ||
+      session_.placement ||
+      session_.strokeDrag
+    ) {
+      return;
+    }
+    const ids = session_.selection.filter((id) => {
+      const node = session_.graph.nodes.find((item) => item.id === id);
+      return node ? !FIXED_NODES.has(node.kind) : false;
+    });
+    if (!ids.length) {
+      session_.toast('先选中要复制的节点再按 Shift+D（A = 全选）');
+      return;
+    }
+    const before = cloneHistorySnapshot();
+    const selectionBefore = [...session_.selection];
+    const originals = session_.graph.nodes.filter((node) => ids.includes(node.id));
+    const idMap = new Map<string, string>();
+    for (const node of originals) idMap.set(node.id, newCompositorId(node.kind));
+    const cloned: CompositorNode[] = originals.map((node) => ({
+      ...node,
+      id: idMap.get(node.id)!,
+      x: node.x + DUPLICATE_OFFSET,
+      y: node.y + DUPLICATE_OFFSET,
+      // 参数深拷贝：曲线控制点这类数组跟原节点共用一份，改副本会顺手改原件。
+      params: JSON.parse(JSON.stringify(node.params)) as CompositorNode['params'],
+    }));
+    const clonedEdges: CompositorEdge[] = session_.graph.edges
+      .filter((edge) => idMap.has(edge.toNode))
+      .map((edge) => {
+        const fromNode = idMap.get(edge.fromNode) ?? edge.fromNode;
+        const toNode = idMap.get(edge.toNode)!;
+        return {
+          id: edgeId(fromNode, edge.fromPort, toNode, edge.toPort),
+          fromNode,
+          fromPort: edge.fromPort,
+          toNode,
+          toPort: edge.toPort,
+        };
+      });
+    session_.graph = {
+      ...session_.graph,
+      nodes: [...session_.graph.nodes, ...cloned],
+      edges: [...session_.graph.edges, ...clonedEdges],
+    };
+    session_.edited = true;
+    renderNodes();
+    renderEdges();
+    const clonedIds = cloned.map((node) => node.id);
+    setSelection(clonedIds);
+    schedule();
+    startGrab({ ids: clonedIds, before, duplicateIds: clonedIds, selectionBefore });
   };
 
   /** 抓取中按左键 = 落下（这一下不能再开始框选/拖节点，所以 capture 阶段就吞掉）。 */
@@ -4001,6 +4137,17 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     ) {
       event.preventDefault();
       startGrab();
+      return;
+    }
+    // Shift+D / Alt+D = 复制选中节点并跟着鼠标移动（Blender 的 duplicate；Alt 是同义键）
+    if (
+      (event.shiftKey || event.altKey) &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      hotkeyLetter(event) === 'd'
+    ) {
+      event.preventDefault();
+      duplicateSelection();
       return;
     }
     // X 与 Delete 同义删除选中节点（Blender 里 X 就是删；这里只认不带修饰键的 X，
@@ -4363,7 +4510,13 @@ export function compositorReport(): Record<string, unknown> {
     })),
     /** 进行中的 G 抓取：锁了哪个轴、有没有真的动过（回归用）。 */
     grab: session.grab
-      ? { ids: session.grab.ids, axis: session.grab.axis, moved: session.grab.moved }
+      ? {
+          ids: session.grab.ids,
+          axis: session.grab.axis,
+          moved: session.grab.moved,
+          /** 这次抓的是不是「复制并移动」出来的副本（回归用）。 */
+          duplicated: (session.grab.duplicateIds ?? []).length,
+        }
       : null,
     /** 进行中的右键划选：merge / cut / null（回归用）。 */
     stroke: session.strokeDrag ? session.strokeDrag.mode : null,

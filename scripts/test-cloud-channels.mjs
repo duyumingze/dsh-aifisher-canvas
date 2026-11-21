@@ -22,6 +22,7 @@
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   createCanvasDom,
   mountCanvasApp,
@@ -95,6 +96,19 @@ let wfTaskSeq = 0;
  */
 let quotaGate = false;
 const wfPolls = new Map();
+/**
+ * v1.101 图层拆分（`dola-seedream-5.0-flash-layer-decomposition`）：
+ * 一次任务回「1 张底图 + 2 个图层」三张，用来验「多张结果怎么进画布」。
+ */
+let layerSeq = 0;
+const layerPolls = new Map();
+/**
+ * v1.105 GPT Image 2.6 低价版（`zhenzhen-image-g-v2.6-lowprice`）：
+ * 提交回 `{code:'success', data:{task_id}}` → 轮询 → `data.status='SUCCESS'`、`data.result_url`。
+ */
+const GPT_IMAGE_MODEL_ID = 'zhenzhen-image-g-v2.6-lowprice';
+let gptImageSeq = 0;
+const gptImagePolls = new Map();
 
 // ---------------------------------------------------------------- 假 OpenAI 兼容端点
 
@@ -147,6 +161,11 @@ const upstream = createServer((req, res) => {
     //      （data.status 大写 IN_PROGRESS/SUCCESS，收尾地址在 data.result_url 与
     //      data.data.content.video_url —— 2026-10-20 用真 key 实测的原始形状）----
     if (req.method === 'POST' && req.url === '/v1/video/generations') {
+      // ZZAI（api.seedance.nz）那套：提交回 `{code:'success', data:{task_id}}`（任务号在 data 里）
+      if (String(body?.model ?? '').startsWith('minimax-h3-comfyui-')) {
+        const taskId = `vid-${++wfVideoSeq}`;
+        return json(200, { code: 'success', message: '', data: { task_id: taskId, status: 'SUBMITTED' } });
+      }
       if (String(body?.model ?? '').startsWith('minimax-h3-')) {
         const taskId = `vid-${++wfVideoSeq}`;
         return json(200, {
@@ -269,9 +288,118 @@ const upstream = createServer((req, res) => {
         },
       });
     }
+    // ---- v1.101 ZZAI 图层拆分：真实形状（2026-11-21 实测）----
+    //   POST /v1/image/generations → { code:'success', data:{ task_id } }
+    //   GET  /v1/image/generations/{id}
+    //     → data.status='SUCCESS'、data.data.content.image_urls=[底图, 图层1, 图层2]
+    if (
+      req.method === 'POST' &&
+      req.url === '/v1/image/generations' &&
+      /-layer-decomposition$/.test(String(body?.model ?? ''))
+    ) {
+      const taskId = `ly-${++layerSeq}`;
+      return json(200, { code: 'success', message: '', data: { task_id: taskId, status: 'SUBMITTED' } });
+    }
+    if (req.method === 'GET' && /^\/v1\/image\/generations\/ly-\d+$/.test(req.url)) {
+      const taskId = req.url.split('/').pop();
+      const polls = (layerPolls.get(taskId) ?? 0) + 1;
+      layerPolls.set(taskId, polls);
+      // 第一次故意 IN_PROGRESS：证明等到了终态，而不是把提交回执当结果
+      if (polls === 1) {
+        return json(200, {
+          code: 'success',
+          message: '',
+          data: { task_id: taskId, status: 'IN_PROGRESS', progress: '40%' },
+        });
+      }
+      const urls = [`${base}/result-${taskId}-0.png`, `${base}/result-${taskId}-1.png`, `${base}/result-${taskId}-2.png`];
+      return json(200, {
+        code: 'success',
+        message: '',
+        data: {
+          task_id: taskId,
+          status: 'SUCCESS',
+          progress: '100%',
+          usage: { amount: 0.336, currency: '¥' },
+          // ★ 真实回执里底图会出现两次且**域名不同**（同一个对象两个 CDN 域名）：
+          //   这里故意让 result_url / content.image_url 指向一个下载不了的域名，
+          //   只有 image_urls 里的三个地址是真的 —— 收尾必须只认 image_urls，
+          //   否则画布上会多出一张底图、后面每一格都错位（2026-11-21 真机踩到）。
+          result_url: `https://aliased-cdn.invalid/result-${taskId}-0.png`,
+          fail_reason: '',
+          data: {
+            content: {
+              image_url: `https://aliased-cdn.invalid/result-${taskId}-0.png`,
+              image_urls: urls,
+              // 真实回执的几何：底图没有 boundingBox（整幅），图层各带自己的框。
+              // host 要把它们换算成 layerStack 交给画布（合成器按框缩放贴回原位）。
+              layers: urls.map((url, index) => ({
+                url,
+                zindex: index,
+                outputType: 'png',
+                size: '1000x500',
+                ...(index === 0
+                  ? {}
+                  : {
+                      name: index === 1 ? '人物' : '气泡',
+                      boundingBox: {
+                        absolute: index === 1 ? [100, 50, 400, 250] : [700, 20, 900, 170],
+                        normalized: index === 1 ? [100, 100, 400, 500] : [700, 40, 900, 340],
+                      },
+                    }),
+              })),
+            },
+            id: taskId,
+            status: 'succeeded',
+          },
+        },
+      });
+    }
+    // ---- v1.105 ZZAI GPT Image 2.6 低价版：真实形状（2026-11-21 实测）----
+    //   POST /v1/image/generations {model,prompt,size,resolution,quality,output_format,n:1,images}
+    //     → **顶层 TaskDto**：{ id, task_id, model, status:'queued', created_at }
+    //       （与 H3 / 图层拆分的 {code:'success',data:{task_id}} 不是同一种包装）
+    //   GET  /v1/image/generations/{id} → {code,data:{status:'SUCCESS', result_url, data.data.content.image_urls}}
+    if (
+      req.method === 'POST' &&
+      req.url === '/v1/image/generations' &&
+      body?.model === GPT_IMAGE_MODEL_ID
+    ) {
+      const taskId = `gi-${++gptImageSeq}`;
+      return json(200, {
+        created_at: Math.floor(Date.now() / 1000),
+        id: taskId,
+        task_id: taskId,
+        model: GPT_IMAGE_MODEL_ID,
+        status: 'queued',
+      });
+    }
+    if (req.method === 'GET' && /^\/v1\/image\/generations\/gi-\d+$/.test(req.url)) {
+      const taskId = req.url.split('/').pop();
+      const polls = (gptImagePolls.get(taskId) ?? 0) + 1;
+      gptImagePolls.set(taskId, polls);
+      // 第一次故意 IN_PROGRESS：证明等到了终态，而不是拿提交回执当结果
+      if (polls === 1) {
+        return json(200, {
+          code: 'success',
+          message: '',
+          data: { task_id: taskId, status: 'IN_PROGRESS', progress: '30%' },
+        });
+      }
+      return json(200, {
+        code: 'success',
+        message: '',
+        data: {
+          task_id: taskId,
+          status: 'SUCCESS',
+          progress: '100%',
+          usage: { amount: 0.044, currency: '¥' },
+          result_url: `${base}/result-${taskId}.png`,
+        },
+      });
+    }
     // ---- 额度不足（403）：上游原话照传，另外补一句人话 ----
-    if (req.url === '/v1/images/generations' && body?.model === 'quota/Exhausted') {
-      return json(403, { code: 'insufficient_user_quota', message: '用户额度不足，无法预扣 ¥0.048752' });
+    if (req.url === '/v1/images/generations' && body?.model === 'quota/Exhausted') {      return json(403, { code: 'insufficient_user_quota', message: '用户额度不足，无法预扣 ¥0.048752' });
     }
     if (req.url === '/v1/images/generations') {
       if (quotaGate) {
@@ -1180,6 +1308,472 @@ console.log('\n=== 通道表：读取 / 探测 / 保存 ===');
     await channelsApi('POST', '', { action: 'delete', id: videoChannel.id });
   }
 
+  // ---- 3d-quater. 视频通道：ZZAI 真真AI（api.seedance.nz，MiniMax H3 ComfyUI 系列）------
+  //
+  // 依据：2026-11-21 用户原话「我想要接右侧网站的 minimax h3 模型」+ 价格页
+  // https://www.zzai.app/pricing?tag=comfyui；接口照 https://api.seedance.nz/docs/llms.txt：
+  //   POST {base}/v1/video/generations
+  //        { model, prompt, images:[公网直链], seconds:"5",
+  //          metadata:{ resolution, ratio, audio_urls, video_url } }
+  //   → { code:'success', data:{ task_id } }
+  //   GET  {base}/v1/video/generations/{id}
+  //   → { code:'success', data:{ status:'SUCCESS', result_url, data:{content:{video_url}} } }
+  //
+  // 与 FisherAI 视频那条的差别正是这里要钉住的四件事（配错全是 400，报错只写 invalid request）：
+  //   ① 档位是**按短边**的词表（480p/608p/…/1440p），画布的 720p 要折算成 768p 而不是原样发；
+  //   ② 通用档（-max）只收 16:9 / 9:16，画布的 1:1 要折算成 16:9；
+  //   ③ 秒数区间按工作流不同（-max 3–15、武戏/文戏 5–15），低于下限要抬到下限；
+  //   ④ 参考视频 / 参考音频按模型能力给（-max 不收视频但收音频；武戏收 21:9）。
+  console.log('\n=== 视频通道：ZZAI 真真AI /v1/video/generations（MiniMax H3） ===');
+  {
+    const savedZz = await channelsApi('POST', '', {
+      action: 'save',
+      channel: {
+        label: 'ZZAI 真真AI',
+        baseUrl: CHANNEL_BASE_URL,
+        apiKey: 'sk-zhenzhen',
+        dialect: 'zhenzhen',
+        models: [
+          { id: 'minimax-h3-comfyui-max', kind: 'video' },
+          { id: 'minimax-h3-comfyui-wuxi', kind: 'video' },
+        ],
+      },
+    });
+    const zzChannel =
+      (savedZz.json().channels ?? []).find((item) => item.label === 'ZZAI 真真AI') ?? {};
+    check(
+      'ZZAI：zhenzhen 方言 + 视频模型存得住',
+      savedZz.status === 200 && zzChannel.dialectDetected === 'zhenzhen' && Boolean(zzChannel.id),
+      `${savedZz.status} ${savedZz.text.slice(0, 120)}`,
+    );
+
+    // 参数表随 /cloud-channels 下发：界面靠它出档位 / 宽高比 / 时长下拉
+    const zzMax = (zzChannel.models ?? []).find((model) => model.id === 'minimax-h3-comfyui-max') ?? {};
+    const zzWuxi = (zzChannel.models ?? []).find((model) => model.id === 'minimax-h3-comfyui-wuxi') ?? {};
+    check(
+      'ZZAI：视频模型带参数表（-max 到 1440p / 只有 16:9、9:16 / 3 秒起）',
+      Array.isArray(zzMax.videoProfile?.resolutions) &&
+        zzMax.videoProfile.resolutions.includes('1440p') &&
+        !zzMax.videoProfile.resolutions.includes('720p') &&
+        zzMax.videoProfile.aspectRatios.join(',') === '16:9,9:16' &&
+        zzMax.videoProfile.minSeconds === 3 &&
+        zzMax.videoProfile.maxSeconds === 15,
+      JSON.stringify(zzMax.videoProfile ?? null).slice(0, 200),
+    );
+    check(
+      'ZZAI：不同工作流各有各的参数表（武戏 5 秒起、到 2160p、收 21:9）',
+      zzWuxi.videoProfile?.minSeconds === 5 &&
+        zzWuxi.videoProfile.resolutions.includes('2160p') &&
+        zzWuxi.videoProfile.aspectRatios.includes('21:9'),
+      JSON.stringify(zzWuxi.videoProfile ?? null).slice(0, 200),
+    );
+
+    const zzRefImage = seedLibraryImage('zz-ref.png');
+    const zzRefVideo = seedLibraryFile(
+      'videos',
+      'zz-ref.mp4',
+      Buffer.concat([MP4_BYTES, Buffer.from('-zz')]),
+    );
+    const zzRefAudio = seedLibraryFile(
+      'audios',
+      'zz-ref.wav',
+      Buffer.from('RIFF....WAVEfmt ', 'utf8'),
+    );
+
+    const beforeZz = received.length;
+    const zzGen = await host.dispatch('POST', '/api/aifisher/canvas/generate-video', {
+      projectId: PROJECT_ID,
+      nodeId: 'node-zz-video',
+      prompt: '山谷晨雾，镜头缓慢推进',
+      videoModel: 'ZZAI 真真AI · minimax-h3-comfyui-max',
+      videoMode: 'first-frame',
+      // 画布默认档 + 中间方图：都**不在**该模型词表里，必须被折算
+      resolution: '720p',
+      aspectRatio: '1:1',
+      duration: 2,
+      images: [zzRefImage],
+      videos: [zzRefVideo],
+      audios: [zzRefAudio],
+      generateCount: 1,
+    });
+    const zzBody = JSON.parse(zzGen.body);
+    const zzCalls = received.slice(beforeZz);
+    const zzPost = zzCalls.find((item) => item.method === 'POST' && item.url === '/v1/video/generations');
+    check(
+      'ZZAI：提交打到 /v1/video/generations（baseUrl 已带 /v1，不能再拼成 /v1/v1/…）',
+      Boolean(zzPost) && !zzCalls.some((item) => item.url.includes('/v1/v1/')),
+      JSON.stringify(zzCalls.map((item) => [item.method, item.url])),
+    );
+    check(
+      'ZZAI：请求带自定义 User-Agent（端点前置 Cloudflare 会拦默认 UA）',
+      /dsh-aifisher-canvas/.test(String(zzPost?.headers?.['user-agent'] ?? '')),
+      String(zzPost?.headers?.['user-agent'] ?? ''),
+    );
+    check(
+      'ZZAI：档位按模型词表折算（720p → 768p）',
+      zzPost?.body?.metadata?.resolution === '768p',
+      JSON.stringify(zzPost?.body?.metadata),
+    );
+    check(
+      'ZZAI：宽高比按模型收窄（1:1 → 16:9）',
+      zzPost?.body?.metadata?.ratio === '16:9',
+      JSON.stringify(zzPost?.body?.metadata),
+    );
+    check(
+      'ZZAI：秒数夹到该工作流的区间（2 → 3）',
+      zzPost?.body?.seconds === '3',
+      JSON.stringify(zzPost?.body?.seconds),
+    );
+    check(
+      'ZZAI：参考图走顶层 images，且已换成端点上传回来的公网直链',
+      Array.isArray(zzPost?.body?.images) &&
+        zzPost.body.images.length === 1 &&
+        /^https?:\/\/.+uploaded-\d+\.png$/.test(String(zzPost.body.images[0])),
+      JSON.stringify(zzPost?.body?.images).slice(0, 160),
+    );
+    check(
+      'ZZAI：参考音频进 metadata.audio_urls；该工作流不收视频就不带 video_url',
+      Array.isArray(zzPost?.body?.metadata?.audio_urls) &&
+        /^https?:\/\/.+uploaded-\d+/.test(String(zzPost.body.metadata.audio_urls[0])) &&
+        zzPost?.body?.metadata?.video_url === undefined,
+      JSON.stringify(zzPost?.body?.metadata).slice(0, 240),
+    );
+    const zzPolls = zzCalls.filter(
+      (item) => item.method === 'GET' && /^\/v1\/video\/generations\/vid-\d+$/.test(item.url),
+    );
+    check(
+      'ZZAI：任务号在 data.task_id → 轮询「提交地址 + /{id}」并等到终态',
+      zzPolls.length >= 2 && zzGen.status === 200,
+      `status=${zzGen.status} polls=${JSON.stringify(zzPolls.map((item) => item.url))}`,
+    );
+    check(
+      'ZZAI：收尾从 data.result_url 认出来并落成 .mp4 素材',
+      zzGen.status === 200 &&
+        /\/videos\/.+\.mp4$/.test(String(zzBody.resultUrl)) &&
+        zzBody.resultUrls?.length === 1,
+      `${zzGen.status} ${String(zzBody.resultUrl).slice(0, 120)}`,
+    );
+    check(
+      'ZZAI：回执带 channelDialect=zhenzhen',
+      zzBody.channelDialect === 'zhenzhen' && zzBody.channelLabel === 'ZZAI 真真AI',
+      JSON.stringify({ dialect: zzBody.channelDialect, label: zzBody.channelLabel }),
+    );
+
+    // 换一条工作流：武戏 5 秒起、收 21:9、参考视频能带
+    const beforeWuxi = received.length;
+    const wuxiGen = await host.dispatch('POST', '/api/aifisher/canvas/generate-video', {
+      projectId: PROJECT_ID,
+      nodeId: 'node-zz-wuxi',
+      prompt: '竹林屋顶的追逐打斗',
+      videoModel: 'ZZAI 真真AI · minimax-h3-comfyui-wuxi',
+      videoMode: 'video-edit',
+      resolution: '1080p',
+      aspectRatio: '21:9',
+      duration: 3,
+      videos: [zzRefVideo],
+    });
+    const wuxiPost = received
+      .slice(beforeWuxi)
+      .find((item) => item.method === 'POST' && item.url === '/v1/video/generations');
+    check(
+      'ZZAI：换工作流就换一套区间（武戏 3 → 5 秒、1080p → 1088p、21:9 原样收）',
+      wuxiGen.status === 200 &&
+        wuxiPost?.body?.seconds === '5' &&
+        wuxiPost?.body?.metadata?.resolution === '1088p' &&
+        wuxiPost?.body?.metadata?.ratio === '21:9',
+      `${wuxiGen.status} ${JSON.stringify(wuxiPost?.body?.metadata)} seconds=${wuxiPost?.body?.seconds}`,
+    );
+    check(
+      'ZZAI：该工作流收参考视频时才带 video_url',
+      Array.isArray(wuxiPost?.body?.metadata?.video_url) &&
+        /^https?:\/\/.+uploaded-\d+/.test(String(wuxiPost.body.metadata.video_url[0])),
+      JSON.stringify(wuxiPost?.body?.metadata?.video_url ?? null).slice(0, 160),
+    );
+
+    await channelsApi('POST', '', { action: 'delete', id: zzChannel.id });
+  }
+
+  // ---- 3d-quinquies. 图像通道：ZZAI 图层拆分（2026-11-21 实测）----------------
+  //
+  // 用户原话：「帮我接这个模型 dola-seedream-5.0-flash-layer-decomposition，我要测试图层拆分功能。
+  // 并接入调色节点测试。」定价页 https://www.zzai.app/pricing?kind=image&capability=layer-decomposition
+  //
+  // 真机实测（2026-11-21，722KB 的图）：
+  //   POST {base}/v1/image/generations
+  //        { model, images:[一张公网直链], metadata:{ resolution:'auto', output_format:'png' } }
+  //   → { code:'success', data:{ task_id } }
+  //   GET  {base}/v1/image/generations/{id}
+  //   → data.status='SUCCESS'、data.data.content.image_urls=[底图, 图层1, … 图层N]（按 zindex）
+  //   一次 11 张扣 ¥1.232（按实际输出张数计费）。
+  //
+  // 这里钉住四件配错就白花钱的事：恰好一张输入图、档位折算、png 底图、以及「一次生成只提交一次」。
+  console.log('\n=== 图像通道：ZZAI 图层拆分（dola-seedream-5.0-flash-layer-decomposition） ===');
+  {
+    const LAYER_MODEL_ID = 'dola-seedream-5.0-flash-layer-decomposition';
+    const savedLayer = await channelsApi('POST', '', {
+      action: 'save',
+      channel: {
+        label: 'ZZAI 图层',
+        baseUrl: CHANNEL_BASE_URL,
+        apiKey: 'sk-layer',
+        dialect: 'zhenzhen',
+        models: [{ id: LAYER_MODEL_ID, kind: 'image' }],
+      },
+    });
+    const layerChannel =
+      (savedLayer.json().channels ?? []).find((item) => item.label === 'ZZAI 图层') ?? {};
+    const layerModel = (layerChannel.models ?? []).find((model) => model.id === LAYER_MODEL_ID) ?? {};
+    check(
+      '图层拆分：通道表里带 imageProfile（只认一张图 + auto/1K/1.5K/2K 四档）',
+      layerModel.imageProfile?.layerDecomposition === true &&
+        layerModel.imageProfile?.resolutions?.join(',') === '自动,1K,1.5K,2K',
+      JSON.stringify(layerModel.imageProfile ?? null),
+    );
+
+    const refImage = seedLibraryImage('layer-src.png');
+    const beforeLayer = received.length;
+    const layerGen = await host.dispatch('POST', '/api/aifisher/canvas/generate-image', {
+      projectId: PROJECT_ID,
+      nodeId: 'node-layer',
+      // 空提示词：图层拆分的 prompt 是可选的（空着 = 上游自动识别主要元素）
+      prompt: '',
+      imageModel: `ZZAI 图层 · ${LAYER_MODEL_ID}`,
+      imageMode: 'layer-decomposition',
+      // 4K 不在该端点词表里（只有 auto/1k/1.5k/2k），必须被夹到 2k
+      resolution: '4K',
+      aspectRatio: '1:1',
+      // 生成数量对图层拆分没有意义：一次请求就是一遍拆分，按输出张数计费
+      generateCount: 3,
+      imageBase64: [refImage],
+    });
+    const layerBody = JSON.parse(layerGen.body);
+    const layerCalls = received.slice(beforeLayer);
+    const layerPosts = layerCalls.filter(
+      (item) => item.method === 'POST' && item.url === '/v1/image/generations',
+    );
+    const layerPost = layerPosts[0];
+    check(
+      '图层拆分：打到 /v1/image/generations（singular，baseUrl 带 /v1 不叠层）',
+      layerPosts.length === 1 && !layerCalls.some((item) => item.url.includes('/v1/v1/')),
+      JSON.stringify(layerCalls.map((item) => [item.method, item.url])),
+    );
+    check(
+      '图层拆分：请求体只有 model + images(1) + metadata，不带 prompt / ratio / seconds',
+      layerPost?.body?.images?.length === 1 &&
+        !('prompt' in (layerPost?.body ?? {})) &&
+        !('ratio' in (layerPost?.body?.metadata ?? {})) &&
+        !('n' in (layerPost?.body ?? {})),
+      JSON.stringify(layerPost?.body ?? null).slice(0, 220),
+    );
+    check(
+      '图层拆分：参考图已换成端点上传回来的公网直链（不是本机素材 URL）',
+      /^https?:\/\/.+uploaded-\d+/.test(String(layerPost?.body?.images?.[0] ?? '')),
+      String(layerPost?.body?.images?.[0] ?? ''),
+    );
+    check(
+      '图层拆分：档位夹到端点词表（4K → 2k），底图要 png（图层是透明 PNG，底图有损会错位）',
+      layerPost?.body?.metadata?.resolution === '2k' &&
+        layerPost?.body?.metadata?.output_format === 'png',
+      JSON.stringify(layerPost?.body?.metadata ?? null),
+    );
+    check(
+      '图层拆分：生成数量 3 也只提交一次（按输出张数计费，重复提交就是翻倍的钱）',
+      layerPosts.length === 1,
+      `POST 次数=${layerPosts.length}`,
+    );
+    check(
+      '图层拆分：任务号在 data.task_id → 轮询「提交地址 + /{id}」并等到终态',
+      layerCalls.some(
+        (item) => item.method === 'GET' && /^\/v1\/image\/generations\/ly-\d+$/.test(item.url),
+      ),
+      JSON.stringify(layerCalls.filter((item) => item.method === 'GET').map((item) => item.url)),
+    );
+    check(
+      '图层拆分：底图 + N 个图层全部落盘成 resultUrls（第一张是底图）',
+      layerGen.status === 200 &&
+        Array.isArray(layerBody.resultUrls) &&
+        layerBody.resultUrls.length === 3 &&
+        layerBody.resultUrl === layerBody.resultUrls[0] &&
+        layerBody.resultUrls.every((url) => /\/media\/.+\/images\/.+\.png$/.test(url)),
+      `${layerGen.status} ${JSON.stringify(layerBody.resultUrls ?? null).slice(0, 260)}`,
+    );
+    check(
+      '图层拆分：回执带 channelDialect=zhenzhen',
+      layerBody.channelDialect === 'zhenzhen' && layerBody.channelLabel === 'ZZAI 图层',
+      `${layerBody.channelDialect} ${layerBody.model}`,
+    );
+    check(
+      '图层拆分：回执带 layerStack（文档尺寸 + 每层 URL/矩形，URL 已换成素材库地址）',
+      layerBody.layerStack?.width === 1000 &&
+        layerBody.layerStack?.height === 500 &&
+        (layerBody.layerStack?.layers ?? []).length === 3 &&
+        layerBody.layerStack.layers[1].x === 100 &&
+        layerBody.layerStack.layers[1].y === 50 &&
+        layerBody.layerStack.layers[1].width === 300 &&
+        layerBody.layerStack.layers[1].height === 200 &&
+        layerBody.layerStack.layers[1].name === '人物' &&
+        layerBody.layerStack.layers[1].url === layerBody.resultUrls[1] &&
+        layerBody.layerStack.layers[2].x === 700,
+      JSON.stringify(layerBody.layerStack ?? null).slice(0, 320),
+    );
+
+    // 没连图：说清「这个模型不会凭空画图」，而不是发一个空 images 的请求上去
+    const noInput = await host.dispatch('POST', '/api/aifisher/canvas/generate-image', {
+      projectId: PROJECT_ID,
+      nodeId: 'node-layer-empty',
+      prompt: '拆成图层',
+      imageModel: `ZZAI 图层 · ${LAYER_MODEL_ID}`,
+      imageMode: 'layer-decomposition',
+      resolution: '自动',
+      aspectRatio: '1:1',
+    });
+    const noInputBody = JSON.parse(noInput.body);
+    check(
+      '图层拆分：没有输入图时 422 CHANNEL_LAYER_INPUT_REQUIRED（带可操作 hint）',
+      noInput.status === 422 &&
+        noInputBody.code === 'CHANNEL_LAYER_INPUT_REQUIRED' &&
+        /连到图层拆分节点/.test(String(noInputBody.hint)),
+      `${noInput.status} ${noInput.body.slice(0, 160)}`,
+    );
+
+    await channelsApi('POST', '', { action: 'delete', id: layerChannel.id });
+  }
+
+  // ---- 3d-sexies. 图像通道：ZZAI GPT Image 2.6 低价版（v1.105）----------------
+  //
+  // 用户原话（2026-11-21）：「在画布接入这个模型 zhenzhen-image-g-v2.6-lowprice」，
+  // 定价页 https://www.zzai.app/pricing/zhenzhen-image-g-v2.6-lowprice?kind=image
+  //
+  // 官方 llms.txt「GPT Image 2.6 低价版」+ 真机 estimate 实测（2026-11-21）：
+  //   POST /v1/image/generations
+  //        { model, prompt, size:'1:1', resolution:'1k|2k|4k',
+  //          quality:'auto|low|medium|high|xhigh|max', output_format:'png|jpeg|webp',
+  //          n:1, images:[≤16] }
+  //   n=2 → 400「GPT Image 2.6 lowprice supports 1K, 2K, 4K and n=1」；
+  //   1K 固定 ¥0.044/张（estimate basis=fixed），4K 预估 ¥0.315（按用量结算）。
+  //
+  // 这里钉住四件配错就白花钱的事：字段在**顶层**（不是 metadata）、n 恒 1、
+  // 生成数量再大也只提交一次、缺省档位走 1k / 缺省格式走 png。
+  console.log('\n=== 图像通道：ZZAI GPT Image 2.6 低价版（zhenzhen-image-g-v2.6-lowprice） ===');
+  {
+    const savedGpt = await channelsApi('POST', '', {
+      action: 'save',
+      channel: {
+        label: 'ZZAI 图像',
+        baseUrl: CHANNEL_BASE_URL,
+        apiKey: 'sk-gpt-image',
+        dialect: 'zhenzhen',
+        models: [{ id: GPT_IMAGE_MODEL_ID, kind: 'image' }],
+      },
+    });
+    const gptChannel =
+      (savedGpt.json().channels ?? []).find((item) => item.label === 'ZZAI 图像') ?? {};
+    const gptModel =
+      (gptChannel.models ?? []).find((model) => model.id === GPT_IMAGE_MODEL_ID) ?? {};
+    check(
+      'GPT Image 2.6：通道表带 imageProfile（1K/2K/4K + 画质/格式词表 + n 固定 1）',
+      gptModel.imageProfile?.resolutions?.join(',') === '1K,2K,4K' &&
+        gptModel.imageProfile?.qualities?.join(',') === 'auto,low,medium,high,xhigh,max' &&
+        gptModel.imageProfile?.outputFormats?.join(',') === 'png,jpeg,webp' &&
+        gptModel.imageProfile?.fixedCount === true,
+      JSON.stringify(gptModel.imageProfile ?? null),
+    );
+
+    const refImage = seedLibraryImage('gpt-image-src.png');
+    const beforeGpt = received.length;
+    const gptGen = await host.dispatch('POST', '/api/aifisher/canvas/generate-image', {
+      projectId: PROJECT_ID,
+      nodeId: 'node-gpt-image',
+      prompt: '白色陶瓷杯产品图',
+      imageModel: `ZZAI 图像 · ${GPT_IMAGE_MODEL_ID}`,
+      imageMode: 'image-to-image',
+      resolution: '4K',
+      aspectRatio: '16:9',
+      quality: 'xhigh',
+      output_format: 'webp',
+      // n 固定 1：生成数量 3 也不能变成 3 次付费提交
+      generateCount: 3,
+      imageBase64: [refImage],
+    });
+    const gptBody = JSON.parse(gptGen.body);
+    const gptCalls = received.slice(beforeGpt);
+    const gptPosts = gptCalls.filter(
+      (item) => item.method === 'POST' && item.url === '/v1/image/generations',
+    );
+    const gptPost = gptPosts[0];
+    check(
+      'GPT Image 2.6：打到 /v1/image/generations（baseUrl 带 /v1 不叠层）',
+      gptPosts.length === 1 && !gptCalls.some((item) => item.url.includes('/v1/v1/')),
+      JSON.stringify(gptCalls.map((item) => [item.method, item.url])),
+    );
+    check(
+      'GPT Image 2.6：档位/画质/格式/张数都在顶层（不是 metadata），n 恒 1',
+      gptPost?.body?.size === '16:9' &&
+        gptPost?.body?.resolution === '4k' &&
+        gptPost?.body?.quality === 'xhigh' &&
+        gptPost?.body?.output_format === 'webp' &&
+        gptPost?.body?.n === 1 &&
+        !('metadata' in (gptPost?.body ?? {})),
+      JSON.stringify(gptPost?.body ?? null).slice(0, 260),
+    );
+    check(
+      'GPT Image 2.6：参考图走顶层 images（已换成端点上传回来的公网直链）',
+      gptPost?.body?.images?.length === 1 &&
+        /^https?:\/\/.+uploaded-\d+/.test(String(gptPost?.body?.images?.[0] ?? '')),
+      String(gptPost?.body?.images?.[0] ?? ''),
+    );
+    check(
+      'GPT Image 2.6：生成数量 3 也只提交一次（端点 n 固定 1，重复提交就是重复付费）',
+      gptPosts.length === 1,
+      `POST 次数=${gptPosts.length}`,
+    );
+    check(
+      'GPT Image 2.6：提交回执是顶层 TaskDto（task_id 在根上）也能认出任务号并轮询到终态',
+      gptCalls.some(
+        (item) => item.method === 'GET' && /^\/v1\/image\/generations\/gi-\d+$/.test(item.url),
+      ),
+      JSON.stringify(gptCalls.filter((item) => item.method === 'GET').map((item) => item.url)),
+    );
+    check(
+      'GPT Image 2.6：结果落盘成素材（resultUrl/resultUrls 都指向本站图片）',
+      gptGen.status === 200 &&
+        Array.isArray(gptBody.resultUrls) &&
+        gptBody.resultUrls.length === 1 &&
+        gptBody.resultUrl === gptBody.resultUrls[0] &&
+        /\/media\/.+\/images\/.+\.png$/.test(gptBody.resultUrl),
+      `${gptGen.status} ${JSON.stringify(gptBody.resultUrls ?? null).slice(0, 200)}`,
+    );
+    check(
+      'GPT Image 2.6：回执带 channelDialect=zhenzhen',
+      gptBody.channelDialect === 'zhenzhen' && gptBody.channelLabel === 'ZZAI 图像',
+      `${gptBody.channelDialect} ${gptBody.model}`,
+    );
+
+    // 缺省参数：画布不传 quality / output_format 时按 auto / png，档位认不出来按 1k（1K 是固定价）
+    const beforeDefault = received.length;
+    await host.dispatch('POST', '/api/aifisher/canvas/generate-image', {
+      projectId: PROJECT_ID,
+      nodeId: 'node-gpt-default',
+      prompt: '一只橘猫',
+      imageModel: `ZZAI 图像 · ${GPT_IMAGE_MODEL_ID}`,
+      resolution: '自动',
+      aspectRatio: '1:1',
+    });
+    const defaultPost = received
+      .slice(beforeDefault)
+      .find((item) => item.method === 'POST' && item.url === '/v1/image/generations');
+    check(
+      'GPT Image 2.6：缺省 quality/output_format 按 auto/png，档位认不出来按 1k（不让没填档位的请求按 2K 计费）',
+      defaultPost?.body?.quality === 'auto' &&
+        defaultPost?.body?.output_format === 'png' &&
+        defaultPost?.body?.resolution === '1k' &&
+        defaultPost?.body?.size === '1:1',
+      JSON.stringify(defaultPost?.body ?? null).slice(0, 200),
+    );
+
+    await channelsApi('POST', '', { action: 'delete', id: gptChannel.id });
+  }
+
   // ---- 3e. 端点额度不足（403）：原话照传 + 补一句人话 -------------------------
   //
   // 2026-10-17 实测 FisherAI 真的会回 `403 insufficient_user_quota`（「用户额度不足，无法预扣 ¥0.048752」）。
@@ -1444,7 +2038,7 @@ console.log('\n=== 通道表：读取 / 探测 / 保存 ===');
     JSON.stringify(gone.map((g) => g.canonicalModel)).slice(0, 160),
   );
 
-  // 收尾：只留一条干净通道（两条模型）给画布用例用 —— 否则上面导入/新建留下的通道标签重复，
+  // 收尾：只留一条干净通道给画布用例用 —— 否则上面导入/新建留下的通道标签重复，
   // 画布上的「通道名 · 模型 ID」会撞名。图片那条**带别名**：画布那一段要验「别名就是画布模型名」。
   const leftovers = (await channelsApi('GET')).json().channels ?? [];
   for (const item of leftovers) await channelsApi('POST', '', { action: 'delete', id: item.id });
@@ -1467,6 +2061,27 @@ console.log('\n=== 通道表：读取 / 探测 / 保存 ===');
       fresh.json().channels[0].models?.length === 2 &&
       fresh.json().channels[0].models?.[0]?.label === IMAGE_MODEL_ALIAS,
     `${fresh.status} ${fresh.text.slice(0, 160)}`,
+  );
+  // v1.105：**第二条通道**挂 GPT Image 2.6 低价版（zzai 真实方言）——
+  // 画布侧那一段顺手验它的条目：1K/2K/4K + 画质/格式下拉 + 没有「生成数量」。
+  // 放在第二条是为了不动「默认模型=第一条通道第一个模型」那条断言。
+  const gptEntryChannel = await channelsApi('POST', '', {
+    action: 'save',
+    channel: {
+      label: 'ZZAI 图像',
+      baseUrl: CHANNEL_BASE_URL,
+      apiKey: 'sk-gpt-entry',
+      dialect: 'zhenzhen',
+      models: [{ id: GPT_IMAGE_MODEL_ID, kind: 'image', label: 'GPT Image 2.6 低价版' }],
+    },
+  });
+  const savedGptChannel =
+    (gptEntryChannel.json().channels ?? []).find((item) => item.label === 'ZZAI 图像') ?? {};
+  check(
+    '第二条通道（zzai 方言）里 GPT Image 2.6 带 imageProfile（画布条目靠它出档位/画质/格式）',
+    savedGptChannel.models?.[0]?.imageProfile?.fixedCount === true &&
+      savedGptChannel.models?.[0]?.imageProfile?.resolutions?.join(',') === '1K,2K,4K',
+    JSON.stringify(savedGptChannel.models?.[0]?.imageProfile ?? null),
   );
 }
 
@@ -1495,11 +2110,67 @@ console.log('\n=== 画布：模型目录 + 真发一次生成 ===');
     height: 209,
     generateCount: 1,
   };
+  /**
+   * v1.101：一张「图层文档」节点（图层拆分的结果）。三层几何都是真形状：
+   * 底图整幅、两个图层各占一块（第二个贴近右缘，验证贴回原位）。
+   * 用 Upload Image 而不是 Image，免得撞上下面「新建 Image 节点的默认模型」那条断言。
+   */
+  const LAYER_SRC_NODE = {
+    id: 'node-layer-src',
+    type: 'Upload Image',
+    x: 320,
+    y: 0,
+    title: '图层拆分结果',
+    status: 'success',
+    resultUrl: `/api/aifisher/canvas/media/${PROJECT_ID}/images/layer-0.png`,
+    resultUrls: [
+      `/api/aifisher/canvas/media/${PROJECT_ID}/images/layer-0.png`,
+      `/api/aifisher/canvas/media/${PROJECT_ID}/images/layer-1.png`,
+      `/api/aifisher/canvas/media/${PROJECT_ID}/images/layer-2.png`,
+    ],
+    layerStack: {
+      width: 1000,
+      height: 500,
+      layers: [
+        {
+          url: `/api/aifisher/canvas/media/${PROJECT_ID}/images/layer-0.png`,
+          zindex: 0,
+          x: 0,
+          y: 0,
+          width: 1000,
+          height: 500,
+        },
+        {
+          url: `/api/aifisher/canvas/media/${PROJECT_ID}/images/layer-1.png`,
+          name: '人物',
+          zindex: 1,
+          x: 100,
+          y: 50,
+          width: 300,
+          height: 200,
+        },
+        {
+          url: `/api/aifisher/canvas/media/${PROJECT_ID}/images/layer-2.png`,
+          name: '气泡',
+          zindex: 2,
+          x: 700,
+          y: 20,
+          width: 200,
+          height: 150,
+        },
+      ],
+    },
+    aspectRatio: '2:1',
+    parentIds: [],
+    projectId: PROJECT_ID,
+    width: 224,
+    height: 112,
+  };
   const save = await host.hostApi('POST', '/workflows', {
     id: PROJECT_ID,
     revision: 0,
     title: '自配通道验证',
-    nodes: [IMAGE_NODE],
+    nodes: [IMAGE_NODE, LAYER_SRC_NODE],
     groups: [],
     viewport: { x: 0, y: 0, zoom: 1 },
   });
@@ -1578,6 +2249,33 @@ console.log('\n=== 画布：模型目录 + 真发一次生成 ===');
     '画布下拉白名单里有别名（否则它一个选项都露出不来）',
     Boolean(whitelist) && typeof whitelist.has === 'function' && whitelist.has(IMAGE_MODEL_ALIAS),
     '(no whitelist)',
+  );
+  const gptEntry = registry?.image?.find((entry) => entry?.name === 'GPT Image 2.6 低价版');
+  const gptParams = (gptEntry?.advancedParams ?? []).map((item) => item?.key);
+  check(
+    'GPT Image 2.6：画布条目带 1K/2K/4K 三档 + 画质/输出格式两个下拉',
+    Boolean(gptEntry) &&
+      JSON.stringify(gptEntry.resolutions) === '["1K","2K","4K"]' &&
+      gptParams.join(',') === 'quality,output_format' &&
+      (gptEntry.advancedParams ?? []).every((item) => item?.type === 'select'),
+    `${JSON.stringify(gptEntry?.resolutions ?? null)} ${JSON.stringify(gptParams)}`,
+  );
+  check(
+    'GPT Image 2.6：条目里没有「生成数量」（端点 n 固定 1，那个控件只会让人以为能一次出多张）',
+    Boolean(gptEntry) && !gptParams.includes('generateCount') && gptEntry.cost?.['1K'] === 0.044,
+    JSON.stringify({ params: gptParams, cost: gptEntry?.cost ?? null }),
+  );
+  check(
+    'GPT Image 2.6：图生图能接 16 张参考图（与官方上限一致）',
+    Boolean(gptEntry) &&
+      (gptEntry.imageModes ?? []).some(
+        (mode) => mode?.value === 'image-to-image' && mode?.allowedInputs?.image === 16,
+      ) &&
+      gptEntry.maxInputs === 16,
+    JSON.stringify({
+      maxInputs: gptEntry?.maxInputs,
+      modes: (gptEntry?.imageModes ?? []).map((mode) => [mode?.value, mode?.allowedInputs]),
+    }),
   );
   const modelShown = await waitFor(
     async () => ((nodeElement()?.textContent ?? '').includes(IMAGE_MODEL_ALIAS) ? true : null),
@@ -1697,6 +2395,84 @@ console.log('\n=== 画布：模型目录 + 真发一次生成 ===');
     String(freshNode?.model),
   );
 
+  // ---- v1.101：图层拆分的「转成 PSD」出口 ----
+  //
+  // 用户原话（2026-11-21）：「还有这样拆分出来的图堆叠的形式不好看，就做成一个psd节点，接入调色节点」
+  // + 「psd节点可以下载导入ps里」。所以这里验三件事：
+  //   ① 节点上出现「N 层」徽标与「转成 PSD」「下载 PSD」两个按钮，且**不再画那一叠卡片**；
+  //   ② 点「转成 PSD」把各层按位置合成一张扁平图、写回**同一个节点**（不新建节点）；
+  //   ③ layerStack 保留在节点上（调色合成器靠它一层一个口按原位叠）。
+  const layerBridge = window.__FISHERAI_CANVAS_LAYERS__;
+  check(
+    '画布装了图层文档桥（__FISHERAI_CANVAS_LAYERS__.toPsd）',
+    typeof layerBridge?.toPsd === 'function',
+  );
+  const layerNodeElement = () => container.querySelector(`[data-node-id="${LAYER_SRC_NODE.id}"]`);
+  const psdButton = layerNodeElement()?.querySelector('[data-fisherai-image-psd]');
+  check(
+    '图层文档节点的头部出现「转成 PSD」按钮',
+    Boolean(psdButton),
+    layerNodeElement()?.outerHTML?.slice(0, 200) ?? '(节点没渲染出来)',
+  );
+  check(
+    '转成 PSD 按钮上写着层数（3 层）',
+    /3 层/.test(String(psdButton?.textContent ?? '')),
+    String(psdButton?.textContent ?? ''),
+  );
+  check(
+    '节点上有「N 层」徽标（data-fisherai-image-layers=3）',
+    layerNodeElement()?.querySelector('[data-fisherai-image-layers="3"]') != null,
+    String(layerNodeElement()?.querySelector('[data-fisherai-image-layers]')?.outerHTML ?? ''),
+  );
+  check(
+    '节点上有「下载 PSD」按钮（用户：psd节点可以下载导入ps里）',
+    layerNodeElement()?.querySelector('[data-fisherai-image-psd-download]') != null,
+  );
+  // jsdom 没有 2D 画布：把扁平合成桥换成桩，验「点按钮 → 写回同一节点」这条链路本身
+  const flatUrl = `/api/aifisher/canvas/media/${PROJECT_ID}/images/psd-flat.png`;
+  window.__FISHERAI_LAYER_STACK__ = {
+    flatten: async () => ({ ok: true, url: flatUrl }),
+    downloadPsd: async () => ({ ok: true, bytes: 4242 }),
+  };
+  const nodeCountBefore = ((await savedDocument(host))?.nodes ?? []).length;
+  psdButton?.click();
+  const psdDoc = await waitFor(async () => {
+    const doc = await savedDocument(host);
+    const node = (doc?.nodes ?? []).find((item) => item.id === LAYER_SRC_NODE.id);
+    return node && node.resultUrl === flatUrl ? doc : null;
+  }, 20000);
+  const psdNode = (psdDoc?.nodes ?? []).find((item) => item.id === LAYER_SRC_NODE.id);
+  check(
+    '转成 PSD：扁平合成图写回同一个节点（resultUrl = 合成图）',
+    psdNode?.resultUrl === flatUrl,
+    `${psdNode?.resultUrl ?? '(none)'}`,
+  );
+  check(
+    '转成 PSD：只剩一张结果（不再是一叠 11 张）',
+    Array.isArray(psdNode?.resultUrls) &&
+      psdNode.resultUrls.length === 1 &&
+      psdNode.resultUrls[0] === flatUrl,
+    JSON.stringify(psdNode?.resultUrls ?? null),
+  );
+  check(
+    '转成 PSD：layerStack 仍留在节点上（合成器还要按层递进去）',
+    (psdNode?.layerStack?.layers ?? []).length === 3 &&
+      psdNode?.layerStack?.width === 1000 &&
+      psdNode?.layerStack?.height === 500,
+    JSON.stringify(psdNode?.layerStack ?? null).slice(0, 200),
+  );
+  check(
+    '转成 PSD：画布上没有多出节点（没有调色节点、没有 11 张拆开的图）',
+    (psdDoc?.nodes ?? []).length === nodeCountBefore,
+    `before=${nodeCountBefore} after=${(psdDoc?.nodes ?? []).length}`,
+  );
+  const rejected = await layerBridge?.toPsd?.({ sourceId: NODE_ID });
+  check(
+    '没有图层几何的节点调用 toPsd 会被拒绝（并说清原因）',
+    rejected?.ok === false,
+    JSON.stringify(rejected ?? null),
+  );
+
   try {
     handle.dispose();
   } catch {
@@ -1732,7 +2508,536 @@ async function waitFor(probe, timeoutMs = 20000) {
   return last;
 }
 
+// ---------------------------------------------------------------- 视频超分（Topaz-Upscale，v1.100）
+
+/**
+ * 用户 2026-11-21：「现在想要做视频超分节点，接入模型 Topaz-Upscale-LowPirce」。
+ *
+ * 这家超分模型的请求形状与 H3 那批**完全不同**：只收 `metadata.video_url`（恰好 1 条）、
+ * `metadata.resolution`（720p / 1080p / 2K / 4K，后两档是大写 K）与 `metadata.quality`
+ * （Ultra/Max/High/Medium/Low）。照 H3 的 prompt/seconds/images 发过去端点不报错，
+ * 只当没收到视频、最后回一句「没有结果」—— 所以这里把请求体逐字段钉住。
+ */
+console.log('\n=== 视频超分（Topaz-Upscale-LowPirce） ===');
+{
+  const hostMod = await import(pathToFileURL(join(process.cwd(), 'lib/index.js')).href);
+  const upscaleProfile = hostMod.zzaiVideoProfile('Topaz-Upscale-LowPirce');
+  check(
+    '超分模型有参数表：只收 1 段视频 + 5 档质量',
+    upscaleProfile?.upscaler === true &&
+      upscaleProfile?.maxVideos === 1 &&
+      upscaleProfile?.maxImages === 0 &&
+      upscaleProfile?.qualities?.length === 5,
+    JSON.stringify(upscaleProfile),
+  );
+  check(
+    '旧别名 RH-Upscale 也认（站点内部会重定向到新 ID）',
+    hostMod.isVideoUpscaler('RH-Upscale') && hostMod.isVideoUpscaler('Topaz-Upscale-LowPirce'),
+  );
+  check(
+    '档位按官方写法归一：2k → 2K、4k → 4K、720p/1080p 保持小写',
+    hostMod.upscaleTargetResolution('2k') === '2K' &&
+      hostMod.upscaleTargetResolution('4k') === '4K' &&
+      hostMod.upscaleTargetResolution('720p') === '720p' &&
+      hostMod.upscaleTargetResolution('1080p') === '1080p',
+    JSON.stringify([
+      hostMod.upscaleTargetResolution('2k'),
+      hostMod.upscaleTargetResolution('4k'),
+    ]),
+  );
+  check(
+    '质量词大小写按官方：ultra → Ultra、缺省 → Max',
+    hostMod.upscaleQuality('ultra') === 'Ultra' && hostMod.upscaleQuality('') === 'Max',
+    JSON.stringify([hostMod.upscaleQuality('ultra'), hostMod.upscaleQuality('')]),
+  );
+
+  const upscaleChannel = {
+    id: 'zzai-upscale',
+    label: 'ZZAI 真真AI',
+    baseUrl: 'https://api.seedance.nz/v1',
+    apiKey: 'sk-upscale-test',
+    paths: {},
+    dialect: 'zhenzhen',
+    timeoutMs: 900000,
+    models: [],
+  };
+  const upscalePlan = hostMod.buildChannelRequest({
+    channel: upscaleChannel,
+    model: { id: 'Topaz-Upscale-LowPirce', kind: 'video' },
+    kind: 'video',
+    // 画布视频节点会顺手带 duration/prompt，超分必须**丢掉**它们
+    body: { prompt: '不该出现在请求体里', duration: 4, resolution: '2k', quality: 'Ultra' },
+    videos: ['https://cdn.example.com/source.mp4'],
+  });
+  check(
+    '超分：路径仍是 /v1/video/generations（baseUrl 带 /v1 不叠层）',
+    upscalePlan.url === 'https://api.seedance.nz/v1/video/generations',
+    upscalePlan.url,
+  );
+  check(
+    '超分：请求体只有 model + metadata（没有 prompt / seconds / images）',
+    upscalePlan.payload.model === 'Topaz-Upscale-LowPirce' &&
+      !('prompt' in upscalePlan.payload) &&
+      !('seconds' in upscalePlan.payload) &&
+      !('images' in upscalePlan.payload),
+    JSON.stringify(upscalePlan.payload),
+  );
+  check(
+    '超分：video_url 是数组且恰好 1 条源视频',
+    Array.isArray(upscalePlan.payload.metadata?.video_url) &&
+      upscalePlan.payload.metadata.video_url.length === 1 &&
+      upscalePlan.payload.metadata.video_url[0] === 'https://cdn.example.com/source.mp4',
+    JSON.stringify(upscalePlan.payload.metadata),
+  );
+  check(
+    '超分：档位 2K + 质量 Ultra 原样进 metadata',
+    upscalePlan.payload.metadata?.resolution === '2K' &&
+      upscalePlan.payload.metadata?.quality === 'Ultra',
+    JSON.stringify(upscalePlan.payload.metadata),
+  );
+
+  // baseUrl 不带 /v1 时由 host 自己补（官方文档让人填裸域名）
+  const barePlan = hostMod.buildChannelRequest({
+    channel: { ...upscaleChannel, baseUrl: 'https://api.seedance.nz' },
+    model: { id: 'Topaz-Upscale-LowPirce', kind: 'video' },
+    kind: 'video',
+    body: { resolution: '1080p' },
+    videos: ['https://cdn.example.com/source.mp4'],
+  });
+  check(
+    '超分：baseUrl 不带 /v1 时补成 /v1/video/generations',
+    barePlan.url === 'https://api.seedance.nz/v1/video/generations',
+    barePlan.url,
+  );
+
+  let missingSource = null;
+  try {
+    hostMod.buildChannelRequest({
+      channel: upscaleChannel,
+      model: { id: 'Topaz-Upscale-LowPirce', kind: 'video' },
+      kind: 'video',
+      body: { resolution: '1080p' },
+      videos: [],
+    });
+  } catch (error) {
+    missingSource = error;
+  }
+  check(
+    '超分：没有源视频时明确报 CHANNEL_SOURCE_VIDEO_REQUIRED（422）',
+    missingSource?.code === 'CHANNEL_SOURCE_VIDEO_REQUIRED' && missingSource?.status === 422,
+    missingSource ? `${missingSource.code}/${missingSource.status}` : '没抛错',
+  );
+
+  // 别把 H3 那批带偏：它们仍要 prompt + seconds
+  const h3Plan = hostMod.buildChannelRequest({
+    channel: upscaleChannel,
+    model: { id: 'minimax-h3-comfyui-max', kind: 'video' },
+    kind: 'video',
+    body: { prompt: '一只猫', duration: 5, resolution: '480p' },
+    videos: [],
+  });
+  check(
+    '普通 H3 模型仍然带 prompt / seconds（没被超分分支带偏）',
+    h3Plan.payload.prompt === '一只猫' &&
+      h3Plan.payload.seconds === '5' &&
+      h3Plan.payload.metadata?.resolution === '480p',
+    JSON.stringify(h3Plan.payload),
+  );
+
+  // vendor 补丁必须真在源码里（否则上面的行为断言会以别的方式悄悄绿掉）
+  const composerSource = readFileSync(
+    join(process.cwd(), 'vendor/aifisher/src/stable/nodes/canvasVideoComposer.tsx'),
+    'utf8',
+  );
+  check(
+    'vendor 补丁 3.12：超分模型不要求提示词（promptOptional）',
+    composerSource.includes('const promptOptional') &&
+      composerSource.includes('const hasInput = promptOptional ||'),
+    composerSource.includes('promptOptional') ? 'ok' : '补丁缺失',
+  );
+  const createSource = readFileSync(
+    join(process.cwd(), 'vendor/aifisher/src/stable/nodes/canvasNodeOperations.ts'),
+    'utf8',
+  );
+  check(
+    'vendor 补丁 3.12：「视频超分」预设落成普通 Video 节点',
+    createSource.includes("type === 'Video Upscale'") &&
+      createSource.includes("upscaleRequested ? 'video-edit'") &&
+      createSource.includes("upscaleRequested ? '1080p'"),
+    createSource.includes('upscaleRequested') ? 'ok' : '补丁缺失',
+  );
+}
+
+// ---------------------------------------------------------------- 图层拆分（v1.101）
+
+/**
+ * 用户 2026-11-21：「帮我接这个模型 dola-seedream-5.0-flash-layer-decomposition，我要测试图层拆分功能。
+ * 并接入调色节点测试。」定价页：
+ * https://www.zzai.app/pricing?sort=hottest&kind=image&capability=layer-decomposition
+ *
+ * 请求/收尾形状已经在上面那段真跑过一次（假端点按实测形状回），这一段钉**纯函数与源码**：
+ * 模型识别（6 条同后缀的都认）、档位折算、请求体逐字段、以及 vendor 补丁真的在源码里。
+ */
+console.log('\n=== 图层拆分（纯函数 + vendor 补丁） ===');
+{
+  const hostMod = await import(pathToFileURL(join(process.cwd(), 'lib/index.js')).href);
+  const layerIds = [
+    'dola-seedream-5.0-flash-layer-decomposition',
+    'seedream-v5-flash-layer-decomposition',
+    'dola-seedream-5.0-pro-layer-decomposition',
+    'seedream-v5-pro-layer-decomposition',
+    'dola-seedream-5.5-layer-decomposition',
+    'seedream-v5.5-layer-decomposition',
+  ];
+  check(
+    '图层拆分：一族 6 条（pro / flash / 5.5 × 国内站与海外站别名）全都认',
+    layerIds.every((id) => hostMod.isLayerDecompositionModel(id)),
+    JSON.stringify(layerIds.filter((id) => !hostMod.isLayerDecompositionModel(id))),
+  );
+  check(
+    '图层拆分：不误伤 t2i/i2i 与别的模型',
+    !hostMod.isLayerDecompositionModel('dola-seedream-5.0-flash-i2i') &&
+      !hostMod.isLayerDecompositionModel('seedream-v5-flash-t2i') &&
+      !hostMod.isLayerDecompositionModel('minimax-h3-comfyui-max') &&
+      !hostMod.isLayerDecompositionModel(''),
+  );
+  check(
+    '图层拆分：档位折算 auto/1k/1.5k/2k（4K、视频档一律夹到能跑的档）',
+    hostMod.zzaiLayerResolution({ resolution: '自动' }) === 'auto' &&
+      hostMod.zzaiLayerResolution({ resolution: '1K' }) === '1k' &&
+      hostMod.zzaiLayerResolution({ resolution: '1.5K' }) === '1.5k' &&
+      hostMod.zzaiLayerResolution({ resolution: '2K' }) === '2k' &&
+      hostMod.zzaiLayerResolution({ resolution: '4K' }) === '2k' &&
+      hostMod.zzaiLayerResolution({ resolution: '1080p' }) === '2k' &&
+      hostMod.zzaiLayerResolution({}) === 'auto',
+    JSON.stringify(
+      ['自动', '1K', '1.5K', '2K', '4K', '1080p', ''].map((value) => [
+        value,
+        hostMod.zzaiLayerResolution({ resolution: value }),
+      ]),
+    ),
+  );
+
+  const layerChannel = {
+    id: 'zzai-layer',
+    label: 'ZZAI 图层',
+    baseUrl: 'https://api.seedance.nz/v1',
+    apiKey: 'sk-layer-test',
+    paths: {},
+    dialect: 'zhenzhen',
+    timeoutMs: 900000,
+    models: [],
+  };
+  const layerPlan = hostMod.buildChannelRequest({
+    channel: layerChannel,
+    model: { id: 'dola-seedream-5.0-flash-layer-decomposition', kind: 'image' },
+    kind: 'image',
+    // 画布节点会顺手带这些；图层拆分必须只发 model + images(1) + metadata
+    body: { prompt: '', resolution: '自动', aspectRatio: '21:9', generateCount: 4, web_search: true },
+    images: ['https://cdn.example.com/a.png', 'https://cdn.example.com/b.png'],
+  });
+  check(
+    '图层拆分：路径是 /v1/image/generations（singular，baseUrl 带 /v1 不叠层）',
+    layerPlan.url === 'https://api.seedance.nz/v1/image/generations',
+    layerPlan.url,
+  );
+  check(
+    '图层拆分：多给了参考图也只发第一张（端点只收恰好 1 张）',
+    Array.isArray(layerPlan.payload.images) &&
+      layerPlan.payload.images.length === 1 &&
+      layerPlan.payload.images[0] === 'https://cdn.example.com/a.png',
+    JSON.stringify(layerPlan.payload.images ?? null),
+  );
+  check(
+    '图层拆分：空提示词就不发 prompt 字段（上游按「自动识别主要元素」跑）',
+    !('prompt' in layerPlan.payload),
+    JSON.stringify(layerPlan.payload),
+  );
+  check(
+    '图层拆分：metadata 只有 resolution + output_format，不带 ratio / 宽高像素',
+    JSON.stringify(layerPlan.payload.metadata) === '{"resolution":"auto","output_format":"png"}',
+    JSON.stringify(layerPlan.payload.metadata),
+  );
+  const withPrompt = hostMod.buildChannelRequest({
+    channel: layerChannel,
+    model: { id: 'dola-seedream-5.0-flash-layer-decomposition', kind: 'image' },
+    kind: 'image',
+    body: { prompt: '把人物和背景拆开，文字单独一层', resolution: '2K' },
+    images: ['https://cdn.example.com/a.png'],
+  });
+  check(
+    '图层拆分：给了提示词就带上（档位 2K → 2k）',
+    withPrompt.payload.prompt === '把人物和背景拆开，文字单独一层' &&
+      withPrompt.payload.metadata.resolution === '2k',
+    JSON.stringify(withPrompt.payload).slice(0, 200),
+  );
+  // v1.104：同族的 Pro 与 Flash **请求形状完全一致**（2026-11-21 用户「再接一个
+  // dola-seedream-5.0-pro-layer-decomposition」）—— 接新模型不再改代码，这里钉住「换 pro 后照旧」。
+  const proPlan = hostMod.buildChannelRequest({
+    channel: layerChannel,
+    model: { id: 'dola-seedream-5.0-pro-layer-decomposition', kind: 'image' },
+    kind: 'image',
+    body: { prompt: '', resolution: '自动', generateCount: 2 },
+    images: ['https://cdn.example.com/a.png'],
+  });
+  check(
+    '图层拆分 Pro：与 Flash 同一套请求体（model / 恰好 1 张图 / metadata 两字段）',
+    proPlan.url === 'https://api.seedance.nz/v1/image/generations' &&
+      proPlan.payload.model === 'dola-seedream-5.0-pro-layer-decomposition' &&
+      proPlan.payload.images?.length === 1 &&
+      !('prompt' in proPlan.payload) &&
+      JSON.stringify(proPlan.payload.metadata) === '{"resolution":"auto","output_format":"png"}',
+    JSON.stringify(proPlan.payload).slice(0, 240),
+  );
+  const proProfile = hostMod.zzaiImageProfile('dola-seedream-5.0-pro-layer-decomposition');
+  check(
+    '图层拆分 Pro：通道表带同一份 imageProfile（四档 + 只吃一张图的语义）',
+    proProfile?.layerDecomposition === true &&
+      JSON.stringify(proProfile?.resolutions) === '["自动","1K","1.5K","2K"]',
+    JSON.stringify(proProfile ?? null),
+  );
+
+  // 收尾只认 image_urls，并按文件名去重（真机回执里底图会在 result_url / image_url 各出现一次、
+  // 域名不同但指向同一份对象；不按文件名去重就会多一张底图、后面每一格都错位）
+  const layerUrls = hostMod.layerResultUrls({
+    data: {
+      result_url: 'https://cdn-a.example.com/base.png',
+      data: {
+        content: {
+          image_url: 'https://cdn-b.example.com/base.png',
+          image_urls: [
+            'https://cdn-a.example.com/base.png',
+            'https://cdn-b.example.com/base.png?sign=2',
+            'https://cdn-a.example.com/layer-1.png',
+            'https://cdn-a.example.com/layer-2.png',
+          ],
+        },
+      },
+    },
+  });
+  check(
+    '图层拆分：收尾按 image_urls 顺序 + 文件名去重（底图只留一张，图层顺序不错位）',
+    layerUrls.length === 3 &&
+      layerUrls[0].includes('base.png') &&
+      layerUrls[1].includes('layer-1.png') &&
+      layerUrls[2].includes('layer-2.png'),
+    JSON.stringify(layerUrls),
+  );
+  check(
+    '图层拆分：没有 image_urls 时回空数组（调用方退回通用收集）',
+    hostMod.layerResultUrls({ data: { result_url: 'https://cdn-a.example.com/base.png' } }).length === 0,
+    JSON.stringify(hostMod.layerResultUrls({ data: { result_url: 'x' } })),
+  );
+
+  const noReference = [];  try {
+    hostMod.buildChannelRequest({
+      channel: layerChannel,
+      model: { id: 'dola-seedream-5.0-flash-layer-decomposition', kind: 'image' },
+      kind: 'image',
+      body: { resolution: '自动' },
+      images: [],
+    });
+  } catch (error) {
+    noReference.push(error?.code, error?.status);
+  }
+  check(
+    '图层拆分：没有输入图时抛 CHANNEL_LAYER_INPUT_REQUIRED（422）',
+    noReference[0] === 'CHANNEL_LAYER_INPUT_REQUIRED' && noReference[1] === 422,
+    JSON.stringify(noReference),
+  );
+
+  // 别把普通图像分支带偏：同通道的 t2i/i2i 仍要 prompt + images + ratio
+  const normalImage = hostMod.buildChannelRequest({
+    channel: layerChannel,
+    model: { id: 'dola-seedream-5.0-flash-i2i', kind: 'image' },
+    kind: 'image',
+    body: { prompt: '改成雨夜', resolution: '1K', aspectRatio: '16:9' },
+    images: ['https://cdn.example.com/a.png'],
+  });
+  check(
+    '普通图像（i2i）仍走原分支（prompt + images + metadata.ratio）',
+    normalImage.payload.prompt === '改成雨夜' &&
+      normalImage.payload.images?.length === 1 &&
+      normalImage.payload.metadata?.ratio === '16:9' &&
+      normalImage.payload.metadata?.resolution === '1k',
+    JSON.stringify(normalImage.payload).slice(0, 240),
+  );
+
+  // vendor 补丁必须真在源码里（否则「转成 PSD / 下载 PSD」与图层几何链会在真机上悄悄没有）
+  const previewSource = readFileSync(
+    join(process.cwd(), 'vendor/aifisher/src/stable/media/canvasImagePreview.tsx'),
+    'utf8',
+  );
+  check(
+    'vendor 补丁 3.13：图片节点头部有「转成 PSD」/「下载 PSD」按钮 + 层数徽标',
+    previewSource.includes('data-fisherai-image-psd') &&
+      previewSource.includes('data-fisherai-image-psd-download') &&
+      previewSource.includes('data-fisherai-image-layers') &&
+      previewSource.includes('__FISHERAI_CANVAS_LAYERS__') &&
+      previewSource.includes('__FISHERAI_LAYER_STACK__'),
+    previewSource.includes('data-fisherai-image-psd') ? 'ok' : '补丁缺失',
+  );
+  check(
+    'vendor 补丁 3.13：图层文档不再画「一叠卡片」',
+    previewSource.includes('!hasLayers &&'),
+    previewSource.includes('!hasLayers &&') ? 'ok' : '补丁缺失',
+  );
+  const appSource = readFileSync(
+    join(process.cwd(), 'vendor/aifisher/src/stable/canvas/canvasApplication.tsx'),
+    'utf8',
+  );
+  check(
+    'vendor 补丁 3.13：toPsd 把扁平合成图写回同一节点（不新建节点）',
+    appSource.includes('async toPsd(') &&
+      appSource.includes('resultUrls: [flattened.url]') &&
+      !appSource.includes("createAgentNode('Color Grade'"),
+    appSource.includes('async toPsd(') ? 'ok' : '补丁缺失',
+  );
+  const generationClientSource = readFileSync(
+    join(process.cwd(), 'vendor/aifisher/src/stable/generation/generationClient.ts'),
+    'utf8',
+  );
+  check(
+    'vendor 补丁 3.13b：回执里的 layerStack 按 nodeId 暂存',
+    generationClientSource.includes('__FISHERAI_LAYER_RESULTS__'),
+    generationClientSource.includes('__FISHERAI_LAYER_RESULTS__') ? 'ok' : '补丁缺失',
+  );
+  const generationSource = readFileSync(
+    join(process.cwd(), 'vendor/aifisher/src/stable/generation/canvasGeneration.ts'),
+    'utf8',
+  );
+  check(
+    'vendor 补丁 3.13b：canvasGeneration 把 layerStack 写进节点 patch',
+    generationSource.includes('__FISHERAI_LAYER_RESULTS__') &&
+      generationSource.includes('...(layerStack ? { layerStack } : {})'),
+    generationSource.includes('...(layerStack ? { layerStack } : {})') ? 'ok' : '补丁缺失',
+  );
+  const nodesSource = readFileSync(
+    join(process.cwd(), 'vendor/aifisher/src/stable/nodes/canvasImageNodes.tsx'),
+    'utf8',
+  );
+  check(
+    'vendor 补丁 3.13b：调色节点把 layerStack 递给合成器',
+    nodesSource.includes('layerStack: (node as unknown as { layerStack?: unknown }).layerStack'),
+    nodesSource.includes('layerStack') ? 'ok' : '补丁缺失',
+  );
+  const imageComposerSource = readFileSync(
+    join(process.cwd(), 'vendor/aifisher/src/stable/nodes/canvasImageComposer.tsx'),
+    'utf8',
+  );
+  check(
+    'vendor 补丁 3.13：图片 composer 认 promptOptional（空提示词可生成）',
+    imageComposerSource.includes('const promptOptional') &&
+      imageComposerSource.includes('const hasInput =\n    promptOptional ||'),
+    imageComposerSource.includes('const promptOptional') ? 'ok' : '补丁缺失',
+  );
+}
+
 // ---------------------------------------------------------------- 产物断言
+
+console.log('\n=== GPT Image 2.6 低价版（纯函数） ===');
+{
+  const hostMod = await import(pathToFileURL(join(process.cwd(), 'lib/index.js')).href);
+  check(
+    'GPT Image 2.6：只认 zhenzhen-image-g-v2.6-lowprice（大小写/首尾空格都收，不误伤同通道别的模型）',
+    hostMod.isZzaiGptImageModel('zhenzhen-image-g-v2.6-lowprice') &&
+      hostMod.isZzaiGptImageModel('  ZHENZHEN-IMAGE-G-V2.6-LOWPRICE  ') &&
+      !hostMod.isZzaiGptImageModel('zhenzhen-image-g-v2.5-lowprice') &&
+      !hostMod.isZzaiGptImageModel('dola-seedream-5.0-flash-layer-decomposition') &&
+      !hostMod.isZzaiGptImageModel(''),
+  );
+  check(
+    'GPT Image 2.6：档位只有 1k/2k/4k，认不出来按 1k（1K 是固定价，别让空档位按 2K 计费）',
+    hostMod.zzaiGptImageResolution({ resolution: '1K' }) === '1k' &&
+      hostMod.zzaiGptImageResolution({ resolution: '2K' }) === '2k' &&
+      hostMod.zzaiGptImageResolution({ resolution: '4K' }) === '4k' &&
+      hostMod.zzaiGptImageResolution({ resolution: '自动' }) === '1k' &&
+      hostMod.zzaiGptImageResolution({ resolution: '1080p' }) === '2k' &&
+      hostMod.zzaiGptImageResolution({}) === '1k',
+    JSON.stringify(
+      ['1K', '2K', '4K', '自动', '1080p', ''].map((value) => [
+        value,
+        hostMod.zzaiGptImageResolution({ resolution: value }),
+      ]),
+    ),
+  );
+  check(
+    'GPT Image 2.6：画质只放行官方六档（xhigh 保留，端点不认识的词夹回 auto）',
+    hostMod.zzaiImageQuality({ quality: 'xhigh' }) === 'xhigh' &&
+      hostMod.zzaiImageQuality({ quality: 'MAX' }) === 'max' &&
+      hostMod.zzaiImageQuality({ quality: 'ultra' }) === 'auto' &&
+      hostMod.zzaiImageQuality({}) === 'auto',
+    JSON.stringify(
+      ['xhigh', 'MAX', 'ultra', ''].map((value) => [value, hostMod.zzaiImageQuality({ quality: value })]),
+    ),
+  );
+  check(
+    'GPT Image 2.6：输出格式只放行 png/jpeg/webp（jpg 统一成 jpeg，缺省 png）',
+    hostMod.zzaiImageOutputFormat({ output_format: 'jpg' }) === 'jpeg' &&
+      hostMod.zzaiImageOutputFormat({ output_format: 'webp' }) === 'webp' &&
+      hostMod.zzaiImageOutputFormat({}) === 'png',
+    JSON.stringify(
+      ['jpg', 'jpeg', 'webp', 'gif', ''].map((value) => [
+        value,
+        hostMod.zzaiImageOutputFormat({ output_format: value }),
+      ]),
+    ),
+  );
+  const gptChannel = {
+    id: 'zzai-gpt-image',
+    label: 'ZZAI 图像',
+    baseUrl: 'https://api.seedance.nz/v1',
+    apiKey: 'sk-gpt-image-test',
+    paths: {},
+    dialect: 'zhenzhen',
+    timeoutMs: 900000,
+    models: [],
+  };
+  const gptPlan = hostMod.buildChannelRequest({
+    channel: gptChannel,
+    model: { id: 'zhenzhen-image-g-v2.6-lowprice', kind: 'image' },
+    kind: 'image',
+    body: {
+      prompt: '白色陶瓷杯产品图',
+      resolution: '2K',
+      aspectRatio: '9:16',
+      quality: 'high',
+      output_format: 'webp',
+      generateCount: 4,
+    },
+    images: ['https://cdn.example.com/a.png'],
+  });
+  check(
+    'GPT Image 2.6：请求体顶层四件套 + n=1 + images（没有 metadata，生成数量不变成 n）',
+    gptPlan.url === 'https://api.seedance.nz/v1/image/generations' &&
+      gptPlan.payload.model === 'zhenzhen-image-g-v2.6-lowprice' &&
+      gptPlan.payload.prompt === '白色陶瓷杯产品图' &&
+      gptPlan.payload.size === '9:16' &&
+      gptPlan.payload.resolution === '2k' &&
+      gptPlan.payload.quality === 'high' &&
+      gptPlan.payload.output_format === 'webp' &&
+      gptPlan.payload.n === 1 &&
+      JSON.stringify(gptPlan.payload.images) === '["https://cdn.example.com/a.png"]' &&
+      !('metadata' in gptPlan.payload),
+    JSON.stringify(gptPlan.payload).slice(0, 280),
+  );
+  const gptNoRatio = hostMod.buildChannelRequest({
+    channel: gptChannel,
+    model: { id: 'zhenzhen-image-g-v2.6-lowprice', kind: 'image' },
+    kind: 'image',
+    body: { prompt: '一只橘猫', resolution: '自动', aspectRatio: 'Auto', generateCount: 9 },
+    images: [],
+  });
+  check(
+    'GPT Image 2.6：没有画幅时 size 落 1:1、缺省 quality/png、无参考图就不带 images',
+    gptNoRatio.payload.size === '1:1' &&
+      gptNoRatio.payload.quality === 'auto' &&
+      gptNoRatio.payload.output_format === 'png' &&
+      gptNoRatio.payload.n === 1 &&
+      !('images' in gptNoRatio.payload),
+    JSON.stringify(gptNoRatio.payload).slice(0, 220),
+  );
+}
 
 console.log('\n=== 产物 ===');
 {

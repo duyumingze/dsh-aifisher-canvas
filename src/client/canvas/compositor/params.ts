@@ -53,6 +53,12 @@ export const PARAM_META: Record<string, ParamMeta> = {
   offset: { label: '偏移', min: -50, max: 50, step: 1, scale: 100, unit: '%', digits: 0 },
   translateX: { label: 'X', min: -50, max: 50, step: 1, scale: 100, unit: '%', digits: 0 },
   translateY: { label: 'Y', min: -50, max: 50, step: 1, scale: 100, unit: '%', digits: 0 },
+  // 放置节点（v1.101）：存储值是**归一化**的文档坐标（0..1），界面按百分比显示。
+  // 与 width/height（那是遮罩尺寸）分开命名，免得滑块的 min/max 互相牵制。
+  placeX: { label: 'X', min: 0, max: 100, step: 0.5, scale: 100, unit: '%', digits: 1 },
+  placeY: { label: 'Y', min: -100, max: 100, step: 0.5, scale: 100, unit: '%', digits: 1 },
+  placeWidth: { label: '宽', min: 1, max: 100, step: 0.5, scale: 100, unit: '%', digits: 1 },
+  placeHeight: { label: '高', min: 1, max: 100, step: 0.5, scale: 100, unit: '%', digits: 1 },
   scale: { label: '缩放', min: 10, max: 300, step: 1, scale: 100, unit: '%', digits: 0 },
   rotation: { label: '旋转', min: -180, max: 180, step: 1, unit: '°', digits: 0 },
   temperature: { label: '色温', min: 2000, max: 12000, step: 50, unit: 'K', digits: 0 },

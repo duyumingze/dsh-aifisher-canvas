@@ -6,10 +6,10 @@
 一块专业级 AI 创作无限画布 —— 你说一句话，DSH 原生 Agent 在画布上替你搭好整条流水线；<br>
 而按下「生成」的那一下（费用授权），永远由你自己按。</p>
 
-**Version**: v1.98.0 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
+**Version**: v1.105.0 | **Node**: ≥22.19 | **React**: 19 | **TypeScript**: 5.8 | **License**: AIFISHER Noncommercial
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-v1.98.0-5eead4?style=flat-square" alt="version">
+  <img src="https://img.shields.io/badge/version-v1.105.0-5eead4?style=flat-square" alt="version">
   <img src="https://img.shields.io/badge/Node-%E2%89%A522.19-3c873a?style=flat-square" alt="node">
   <img src="https://img.shields.io/badge/React-19-61dafb?style=flat-square" alt="react">
   <img src="https://img.shields.io/badge/TypeScript-5.8-3178c6?style=flat-square" alt="typescript">
@@ -124,6 +124,9 @@
 | FisherAI | 异步任务轮询，自动上传参考图公网直链 |
 | 阿里云百炼（DashScope） | 一键预设，可灵 v3 / v3-omni 图像；`X-DashScope-Async` 异步任务 + `output.task_id` 轮询 |
 | Midjourney | 一键预设（`/v1/midjourney/*`）：`midjourney-imagine` 文生图 / 垫图，一个任务 4 张候选，版本与 relax/fast/turbo 速度可选 |
+| ZZAI 真真AI | 一键预设（`api.seedance.nz`）：MiniMax H3 ComfyUI 系列 —— 通用 / WF漫剧 15 步 / JY特调 12 步 / 武戏 / 文戏 / 角色替换；异步任务轮询，档位·宽高比·时长按每个工作流真收的范围出下拉 |
+| ZZAI 图层拆分 | 两条一键预设：`dola-seedream-5.0-flash-layer-decomposition`（拆得更细）与 `dola-seedream-5.0-pro-layer-decomposition`（v1.104，更粗更语义化；及 5.5 同族）：一张图拆成 **1 张底图 + 最多 16 个透明 PNG 图层**，提示词可留空（自动识别主要元素），档位 `自动/1K/1.5K/2K`，按实际输出张数计费。结果落成**一个图层文档节点**（`N 层` 徽标，不堆卡片）：点「转成 PSD」合成扁平预览、点「下载 PSD」导出真 `.psd`（一层一个图层、位置/顺序/透明度原样，可直接进 Photoshop）；接调色节点时输入口**一层一个**，合成器自动铺「放置 → Alpha 上叠」链按原位叠加 |
+| ZZAI GPT Image 2.6 | 一键预置（v1.105）：`zhenzhen-image-g-v2.6-lowprice` 文生图 / 参考图编辑（最多 16 张参考图）；档位 `1K/2K/4K` + 画质（`auto`…`max`）+ 输出格式（`png/jpeg/webp`）；1K 固定 ¥0.044/张、2K/4K 按用量结算；端点 `n` 固定 1（节点上没有「生成数量」），`size/quality/output_format` 走请求体顶层 |
 
 - 新建节点自动沿用上一次你选过的模型，不用每次重新下拉
 - 视频节点的参考图按模式给：**多图参考最多 9 张参考图**（与 MiniMax H3 参考模式同口径），首帧 1 张、首尾帧 2 张
@@ -137,10 +140,12 @@
   暗部只动黑位、中灰只动中间调、亮部只动高光、偏移才动整幅；数字按显示域解释（0.10 = 十分之一），不再是线性域的 ASC CDL
 - **达芬奇同款示波器**：波形图 / 分量图 / 矢量图，10-bit 0–1023 刻度、75% 彩条靶位按 BT.601 反算
 - 手势按主画布对齐：左键框选、中键平移、双击断线、`Ctrl+右键` 划线断开、`Shift+右键` 同源线收进转接点、拖节点压线即串进链路、`Ctrl+Z / Ctrl+Shift+Z` 撤销重做
+- **复制并移动**：选中效果节点按 `Shift+D` / `Alt+D`，副本原地偏移 40px 后直接跟着鼠标走（`X/Y` 锁轴、左键落下、`Esc` 连副本一起取消）；输入 / 输出 / 预览是固定节点，不参与复制
 - 「保存并退出」把结果落成节点右侧的一张「调色结果」图，下游生成节点直接拿来当参考
 
 ### 无限画布原生体验
 - 节点连线、编组、框选复制粘贴、历史回退全套基础能力完整保留
+- **复制并移动（Shift+D / Alt+D）**：选中的节点整批复制、原地偏移 40px，复制完直接进入抓取 —— 副本跟着鼠标走，`X/Y` 锁轴、左键落下、`Esc` 连这批副本一起取消；复制本身进撤销栈（`Ctrl+Z` 一步撤回）。连线是「链接式复制」：选中集合内部的线整段复制，连到没被选中的上游时继续指着原上游，复制一张参考图 / 一个调色节点立刻能接着用。**调色节点同样适用**：`resultUrl` 与合成器图（`compositorGraph`）整份带过去，副本打开合成器看到的就是复制那一刻那张图
 - **Blender 式切刀**：按住 `Ctrl` + 鼠标右键拖拽，划过的连线当场变红、松手即断开（`Esc` 取消，只断划过的那条）
 - **划选合并 / 转接口**：按住 `Shift` + 鼠标右键拖拽，划过的连线当场变绿；同一个上游分出去的几条线会并成一条主干，并在划过处插入一个 **34×34 的「转接」小圆点**（圆里直接显示上游缩略图；一路进、多路出，只整理走向、不改参考图，下游照旧拿到上游那张图）。不同上游各得一个转接点。`Esc` 取消
 - 多选图片自动折叠成叠图，不展开也能在卡片上翻页查看
@@ -237,6 +242,10 @@ pnpm build
 | 操作 | 方式 |
 |---|---|
 | 唤起节点搜索 | `Shift + A` / 双击空白处 |
+| 全选 / 取消选择 | `A` / `Alt + A` |
+| 抓取移动 / 锁轴 | `G`，再按 `X` / `Y` 锁轴 |
+| 复制节点并移动 | `Shift + D` / `Alt + D` |
+| 删除节点 | `Delete` / `Backspace` / `X` |
 | 自定义工作流 | 左侧栏导入 ComfyUI 导出的 API JSON |
 | 配置云端通道 | 设置 → 服务与通道，填 Base URL + API Key |
 | 切刀 / 合线 | `Ctrl + 右键` 划断 / `Shift + 右键` 划合 |

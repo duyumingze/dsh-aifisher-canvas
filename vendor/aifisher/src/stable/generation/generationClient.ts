@@ -15,6 +15,24 @@ async function submit(
     ),
   });
   const result = await responseBody(response);
+  /**
+   * dsh-aifisher-canvas v1.101：图层拆分的**几何**别丢。
+   *
+   * host 在 /generate-image 的回执里带了 `layerStack`（每层 URL + bbox + 文档尺寸），
+   * 而 generateMedia 只把 resultUrls 交出去 —— 这里先按 nodeId 存一份，
+   * 由 canvasGeneration 在写节点 patch 时取走（取完即删）。
+   */
+  {
+    const layerStack = result.layerStack;
+    const nodeId = typeof request.nodeId === 'string' ? request.nodeId : '';
+    if (layerStack && nodeId) {
+      const holder = window as unknown as {
+        __FISHERAI_LAYER_RESULTS__?: Map<string, unknown>;
+      };
+      if (!holder.__FISHERAI_LAYER_RESULTS__) holder.__FISHERAI_LAYER_RESULTS__ = new Map();
+      holder.__FISHERAI_LAYER_RESULTS__.set(nodeId, layerStack);
+    }
+  }
   if (!response.ok) {
     // dsh-aifisher-canvas：把 host 半的可操作提示（hint）一起抛出去 —— 否则它永远到不了画布
     const failureMessage = typeof result.error === 'string' ? result.error : '生成请求未能完成。';

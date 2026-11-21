@@ -5255,6 +5255,885 @@ function canvasHotkeyLetter(event: KeyboardEvent): string {
   console.log(`[vendor] Blender 手感（G 抓取 / X 删除）：${BLENDER_KEYS_PATCHES.length} 处`);
 }
 
+// ---------------------------------------------------------------- 3.12) 视频超分节点（Video Upscale，v1.100）
+
+/**
+ * 用户 2026-11-21：「现在想要做视频超分节点，接入模型 Topaz-Upscale-LowPirce」。
+ *
+ * 形态：**预设类型**，不是新的 node.type。vendor 的生成链路、批次审批、历史/截帧、
+ * agent 契约全都按 `node.type === 'Video'` 分流；另开一个 'Video Upscale' 类型意味着
+ * 在十几处分流里逐个补分支，漏一处就是「点了生成、什么都没发生」。
+ *
+ * 所以「视频超分」= 建节点时下发的 `Video Upscale`：createCanvasNode 先换成 `Video`，
+ * 再预置超分模型（按 cloudModelId 找）+ `video-edit` 模式 + 1080p，标题写「视频超分」。
+ * 节点底下就是一条正常的 Video 节点，右键菜单和 Shift+A 都能直接建。
+ *
+ * 补丁四处：
+ *   ① canvasVideoComposer：模型带 `promptOptional` 时不要求提示词（超分没有提示词），
+ *      提示词框收起；控制条上的「N 秒」不再显示 composer 的 4 秒兜底值。
+ *   ② canvasNodeControls：时长为 0 时不画「生成时长」那一行。
+ *   ③ canvasNodeOperations：识别预设类型并预置。
+ *   ④ canvasContextMenu：「添加节点」里加一项「视频超分」。
+ */
+const UPSCALE_COMPOSER_PATCHES = [
+  {
+    file: 'src/stable/nodes/canvasVideoComposer.tsx',
+    from: `  const model = models.find((candidate) => candidate.name === node.videoModel) ||
+    models[0] || { name: '' };`,
+    to: `  const model = models.find((candidate) => candidate.name === node.videoModel) ||
+    models[0] || { name: '' };
+  // dsh-aifisher-canvas v1.100：超分模型不收提示词，生成按钮不该被空提示词锁住
+  const promptOptional = (model as { promptOptional?: boolean }).promptOptional === true;`,
+    why: '识别「不需要提示词」的超分模型',
+  },
+  {
+    file: 'src/stable/nodes/canvasVideoComposer.tsx',
+    from: `  const modeWarning = !modeKnown
+    ? inputs.images === 0
+      ? '当前模型不支持文生视频'
+      : '当前模型不支持选定的生成模式'`,
+    to: `  const modeWarning = !modeKnown
+    ? promptOptional
+      ? '先连接一段源视频（这个模型只做视频超分）'
+      : inputs.images === 0
+        ? '当前模型不支持文生视频'
+        : '当前模型不支持选定的生成模式'`,
+    why: '超分节点没连视频时的提示说人话',
+  },
+  {
+    file: 'src/stable/nodes/canvasVideoComposer.tsx',
+    from: `  const hasInput = !!(boundText ? boundText.value : node.prompt || '').trim();`,
+    to: `  const hasInput = promptOptional || !!(boundText ? boundText.value : node.prompt || '').trim();`,
+    why: '超分模型允许空提示词生成',
+  },
+  {
+    file: 'src/stable/nodes/canvasVideoComposer.tsx',
+    from: `            videoSettings={{
+              duration,
+              parameter: durationParam,
+              fixed: fixedDuration !== null || !durationParam,
+              // Preserve the existing composer audio toggle and its default.
+              audio: node.generate_audio !== false,
+            }}`,
+    to: `            videoSettings={{
+              // 超分：上游按源视频计时，这里的 4 秒是 composer 的兜底默认值，别显示成真实参数
+              duration: promptOptional ? 0 : duration,
+              parameter: durationParam,
+              fixed: fixedDuration !== null || !durationParam,
+              // Preserve the existing composer audio toggle and its default.
+              audio: promptOptional ? undefined : node.generate_audio !== false,
+            }}`,
+    why: '超分节点不显示假的「4 秒」与音频开关',
+  },
+  {
+    file: 'src/stable/nodes/canvasVideoComposer.tsx',
+    from: `        data-fisherai-bound-text-node-id={boundText?.nodeId}`,
+    to: `        style={promptOptional ? { display: 'none' } : undefined}
+        data-fisherai-bound-text-node-id={boundText?.nodeId}`,
+    why: '超分节点收起提示词输入框',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeControls.tsx',
+    from: '{videoSettings && ` · ${videoSettings.duration}秒`}',
+    to: '{videoSettings && videoSettings.duration > 0 && ` · ${videoSettings.duration}秒`}',
+    why: '时长为 0（超分）时控制条不显示秒数',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeControls.tsx',
+    from: `          {videoSettings && (
+            <div className="mb-3 space-y-2 px-1">`,
+    to: `          {videoSettings && videoSettings.duration > 0 && (
+            <div className="mb-3 space-y-2 px-1">`,
+    why: '时长为 0（超分）时参数弹层里不画「生成时长」',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeOperations.ts',
+    from: `  const image = freshModel(runtime.imageModels, 'image'),
+    video = freshModel(runtime.videoModels, 'video');`,
+    to: `  const image = freshModel(runtime.imageModels, 'image'),
+    video = freshModel(runtime.videoModels, 'video');
+  // dsh-aifisher-canvas v1.100：「视频超分」是**预设类型**，落成普通 Video 节点
+  // （生成链路 / 批次审批 / 历史与截帧都按 Video 分流，另开类型要把这些门禁全部复制一遍）。
+  const upscaleRequested = type === 'Video Upscale';
+  if (upscaleRequested) type = 'Video';
+  const upscaleModel = upscaleRequested
+    ? runtime.videoModels.find((entry) => {
+        const extra = entry as unknown as { cloudModelId?: string };
+        return extra.cloudModelId === 'Topaz-Upscale-LowPirce'
+          || /topaz[-_ ]?upscale/i.test(entry.name);
+      })
+    : undefined;`,
+    why: '建节点时识别「视频超分」预设',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeOperations.ts',
+    from: `  const model =
+    type === 'Image'
+      ? image
+      : type === 'Video'
+        ? video`,
+    to: `  const model =
+    type === 'Image'
+      ? image
+      : type === 'Video'
+        ? (upscaleModel ?? video)`,
+    why: '超分预设用超分模型',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeOperations.ts',
+    from: `    prompt: '',
+    status: upload ? 'success' : 'idle',`,
+    to: `    prompt: '',
+    ...(upscaleRequested ? { title: '视频超分' } : {}),
+    status: upload ? 'success' : 'idle',`,
+    why: '超分节点标题',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeOperations.ts',
+    from: `    videoModel: type === 'Video' ? video?.name : undefined,`,
+    to: `    videoModel: type === 'Video' ? (upscaleModel ?? video)?.name : undefined,`,
+    why: '超分预设写 videoModel',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeOperations.ts',
+    from: `    videoMode: type === 'Video' ? (video?.videoModes?.[0]?.value ?? 'text-to-video') : undefined,`,
+    to: `    videoMode: type === 'Video'
+      ? (upscaleRequested ? 'video-edit' : (video?.videoModes?.[0]?.value ?? 'text-to-video'))
+      : undefined,`,
+    why: '超分预设用「视频编辑」模式（只收一段源视频）',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeOperations.ts',
+    from: `    resolution: type === 'Video' ? '720p' : '1K',`,
+    to: `    resolution: type === 'Video' ? (upscaleRequested ? '1080p' : '720p') : '1K',`,
+    why: '超分预设默认目标 1080p',
+  },
+  {
+    file: 'src/stable/generation/canvasGeneration.ts',
+    from: `        const klingFrames =
+          node.type === 'Video' &&
+          text(node.videoModel).startsWith('kling-') &&
+          (node.parentIds?.length ?? 0) >= 2;
+        if (
+          (!prompt && !lyrics && !stems && !klingFrames) ||`,
+    to: `        const klingFrames =
+          node.type === 'Video' &&
+          text(node.videoModel).startsWith('kling-') &&
+          (node.parentIds?.length ?? 0) >= 2;
+        // dsh-aifisher-canvas v1.100：视频超分模型只处理源视频，空提示词不是错误
+        const promptOptional =
+          node.type === 'Video' &&
+          (model as unknown as { promptOptional?: boolean } | undefined)?.promptOptional === true;
+        if (
+          (!prompt && !promptOptional && !lyrics && !stems && !klingFrames) ||`,
+    why: '超分模型空提示词不再被当成「没写提示词」拒掉',
+  },
+  {
+    file: 'src/stable/nodes/canvasNodeOperations.ts',
+    from: `  if (type === 'Image' || type === 'Video') {
+    const models = type === 'Image' ? runtime.imageModels : runtime.videoModels;
+    const selectedModel = models.find((entry) => entry.name === node.model);
+    Object.assign(node, newNodeDimensions(type, projectId, selectedModel));
+  }`,
+    to: `  if (type === 'Image' || type === 'Video') {
+    const models = type === 'Image' ? runtime.imageModels : runtime.videoModels;
+    const selectedModel = models.find((entry) => entry.name === node.model);
+    Object.assign(node, newNodeDimensions(type, projectId, selectedModel));
+    // 超分预设的「1080p」是用户点「视频超分」那一瞬的意图，不能被「上一次用过的视频档位」
+    // 覆盖（上一次可能只是 480p 草稿）。
+    if (upscaleRequested) Object.assign(node, { resolution: '1080p' });
+  }`,
+    why: '超分预设的 1080p 不被「上次用过的尺寸」覆盖',
+  },
+  {
+    file: 'src/stable/dialogs/canvasContextMenu.tsx',
+    from: `            {item(
+              {
+                label: '调色',
+                icon: 'composite',
+                action: () => props.onSelectType('Color Grade'),
+              },
+              true,
+            )}`,
+    to: `            {item(
+              {
+                label: '调色',
+                icon: 'composite',
+                action: () => props.onSelectType('Color Grade'),
+              },
+              true,
+            )}
+            {item(
+              {
+                label: '视频超分',
+                icon: 'video',
+                action: () => props.onSelectType('Video Upscale'),
+              },
+              true,
+            )}`,
+    why: '右键「添加节点」里的视频超分入口',
+  },
+];
+
+{
+  const problems = [];
+  for (const patch of UPSCALE_COMPOSER_PATCHES) {
+    const target = path.join(VENDOR, patch.file);
+    if (!fs.existsSync(target)) {
+      problems.push(`${patch.file}（文件不存在）`);
+      continue;
+    }
+    const original = fs.readFileSync(target, 'utf8');
+    const hits = original.split(patch.from).length - 1;
+    if (hits !== 1) {
+      problems.push(`${patch.file}: ${patch.why} —— 锚点命中 ${hits} 次（预期 1 次）`);
+      continue;
+    }
+    fs.writeFileSync(target, original.split(patch.from).join(patch.to));
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `[vendor] 视频超分节点补丁没对齐（上游可能改了写法，请核对）：\n  - ${problems.join('\n  - ')}`,
+    );
+  }
+  console.log(`[vendor] 视频超分节点：${UPSCALE_COMPOSER_PATCHES.length} 处（Video Upscale 预设 + 空提示词放行）`);
+}
+
+// ---------------------------------------------------------------- 3.13) 图层拆分（Layer Decomposition，v1.101）
+
+/**
+ * 用户 2026-11-21：「帮我接这个模型 dola-seedream-5.0-flash-layer-decomposition，我要测试图层拆分功能。
+ * 并接入调色节点测试。」
+ *
+ * host 侧（请求翻译 / 档位 / 结果归一）在 src/host/generation/cloudChannels.ts 与
+ * cloudGenerationRouter.ts；vendor 这半边只有两件事：
+ *
+ *   ① **空提示词放行**：图层拆分的 `prompt` 是可选的（空着 = 上游自动识别主要元素），
+ *      而 composer 的「没提示词不让生成」与 canvasGeneration 的那道门都只认视频超分的
+ *      `promptOptional`。这里把同一套语义扩到图片（模型条目挂 `promptOptional: true` 才生效）。
+ *   ② **「摊开」出口**：一次结果给了多张图（底图 + N 个图层），图片节点头部的「历史 N」里
+ *      多一颗「摊开 N」按钮：把每张摊成画布上独立的图片节点，并在右边建一个调色节点把所有
+ *      摊开的图接起来（调色节点的输入节点按上游图片数出端口 = 一层一个输入口），
+ *      这样「图层拆分 → 调色」一键就能接上。落位/建节点在 canvasApplication 的桥里做
+ *      （只有那里够得着 createAgentNode / setNodes）。
+ */
+const LAYER_DECOMPOSITION_PATCHES = [
+  {
+    file: 'src/stable/nodes/canvasImageComposer.tsx',
+    from: `  const hasInput =
+    !!node.imageAngle ||`,
+    to: `  // dsh-aifisher-canvas v1.101：图层拆分这类单一用途模型不收提示词（空着 = 自动识别主要元素），
+  // 生成按钮不该被空提示词锁住（与视频超分的 promptOptional 同一套语义）。
+  const promptOptional = (model as { promptOptional?: boolean }).promptOptional === true;
+  const hasInput =
+    promptOptional ||
+    !!node.imageAngle ||`,
+    why: '图层拆分模型允许空提示词生成',
+  },
+  {
+    file: 'src/stable/generation/canvasGeneration.ts',
+    from: `        const promptOptional =
+          node.type === 'Video' &&
+          (model as unknown as { promptOptional?: boolean } | undefined)?.promptOptional === true;`,
+    to: `        const promptOptional =
+          (node.type === 'Video' || node.type === 'Image') &&
+          (model as unknown as { promptOptional?: boolean } | undefined)?.promptOptional === true;`,
+    why: '图片的 promptOptional（图层拆分）空提示词不被拒',
+  },
+  {
+    file: 'src/stable/media/canvasImagePreview.tsx',
+    from: `  ) : null;
+  return (
+    <div className={'w-full h-full relative'} data-fisherai-image-preview="true">`,
+    to: `  ) : null;
+  /**
+   * dsh-aifisher-canvas v1.101「转成 PSD」：一次生成回了多张（图层拆分的底图 + N 个图层
+   * 就是这种）时，把各层**按位置**扁平合成一张图并写回同一个节点 —— 画布上只留这一个节点
+   * （用户原话：「这样拆分出来的图堆叠的形式不好看，就做成一个psd节点，接入调色节点」）。
+   *
+   * 节点上同时留着 \`layerStack\`（每一层的 URL + bbox）：调色合成器靠它把图层**一层一个口**
+   * 递进去、并按原位叠起来；扁平图只是「卡片上看得见的预览 + 下游当普通参考图用」。
+   * 合成在 src/client/canvas/layerStack.ts（按 bbox 缩放贴），由
+   * \`__FISHERAI_CANVAS_LAYERS__.toPsd\` 调起来写回节点。
+   */
+  const layerStack = (node as unknown as {
+    layerStack?: { width: number; height: number; layers: unknown[] };
+  }).layerStack;
+  const layerCount = Array.isArray(layerStack?.layers) ? layerStack!.layers.length : 0;
+  const hasLayers = layerCount > 0;
+  const [flattening, setFlattening] = React.useState(false);
+  const psdControl =
+    hasLayers && hasResult && !busy ? (
+      <button
+        type="button"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          event.currentTarget.blur();
+          const bridge = (
+            window as unknown as {
+              __FISHERAI_CANVAS_LAYERS__?: {
+                toPsd(input: { sourceId: string }): Promise<{
+                  ok: boolean;
+                  url?: string;
+                  error?: string;
+                }>;
+              };
+            }
+          ).__FISHERAI_CANVAS_LAYERS__;
+          if (!bridge?.toPsd || flattening) return;
+          setFlattening(true);
+          void bridge
+            .toPsd({ sourceId: node.id })
+            .catch((error: unknown) => ({
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            }))
+            .then((placed) => {
+              setFlattening(false);
+              if (!placed.ok)
+                console.warn(
+                  \`[dsh-aifisher-canvas] 转成 PSD 失败：\${placed.error ?? '未知原因'}\`,
+                );
+            });
+        }}
+        disabled={flattening}
+        data-fisherai-image-psd="true"
+        aria-label={\`把 \${layerCount} 层合成一张扁平图\`}
+        title="按每层的原始位置合成一张扁平图写回这个节点（图层几何保留，接调色节点时一层一个输入口）"
+        className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-[var(--af-surface)] text-[var(--af-text-secondary)] hover:bg-[var(--af-hover)] hover:text-[var(--af-text)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--af-focus)] transition-colors disabled:opacity-60"
+      >
+        {flattening ? '合成中…' : multiple ? \`转成 PSD · \${layerCount} 层\` : '重合成'}
+      </button>
+    ) : null;
+  const layerBadge = hasLayers ? (
+    <span
+      data-fisherai-image-layers={String(layerCount)}
+      title={\`这个节点是一个 \${layerCount} 层的图层文档（底图 + \${Math.max(0, layerCount - 1)} 个图层）\`}
+      className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-[var(--af-surface)] text-[var(--af-info)]"
+    >
+      {layerCount} 层
+    </span>
+  ) : null;
+  const headerControls = (
+    <>
+      {layerBadge}
+      {psdControl}
+      {historyControl}
+    </>
+  );
+  return (
+    <div className={'w-full h-full relative'} data-fisherai-image-preview="true">`,
+    why: '图片节点头部的「转成 PSD」按钮 + 层数徽标',
+  },
+  {
+    file: 'src/stable/media/canvasImagePreview.tsx',
+    from: `      {multiple &&
+        !expanded &&
+        urls.slice(1, 4).map((_, S) => {`,
+    to: `      {/* 图层文档不叠卡片：用户 2026-11-21「这样拆分出来的图堆叠的形式不好看」 */}
+      {multiple &&
+        !expanded &&
+        !hasLayers &&
+        urls.slice(1, 4).map((_, S) => {`,
+    why: '图层文档不再画「一叠卡片」',
+  },
+  {
+    file: 'src/stable/media/canvasImagePreview.tsx',
+    from: `        renderHeader(historyControl)`,
+    to: `        renderHeader(headerControls)`,
+    why: '头部渲染带上摊开按钮',
+  },
+  {
+    file: 'src/stable/media/canvasImagePreview.tsx',
+    from: `          {historyControl}
+        </div>`,
+    to: `          {headerControls}
+        </div>`,
+    why: '无头部渲染时的兜底位置也带摊开按钮',
+  },
+  {
+    file: 'src/stable/canvas/canvasApplication.tsx',
+    from: `  React.useEffect(() => {
+    window.__FISHERAI_FOCUS_NODES__ = focusNodes;`,
+    to: `  // ---------------------------------------------------------------- dsh-aifisher-canvas v1.101
+  // 「转成 PSD」落位：把图层文档按位置扁平合成一张图，写回**同一个节点**。
+  // 用户原话（2026-11-21）：「这样拆分出来的图堆叠的形式不好看，就做成一个psd节点，接入调色节点」。
+  // 卡片的按钮只认 window.__FISHERAI_CANVAS_LAYERS__.toPsd；真正的合成（按 bbox 缩放贴）
+  // 在 src/client/canvas/layerStack.ts，通过 __FISHERAI_LAYER_STACK__ 桥调进来。
+  React.useEffect(() => {
+    const holder = window as unknown as {
+      __FISHERAI_CANVAS_LAYERS__?: {
+        toPsd(input: { sourceId: string }): Promise<{
+          ok: boolean;
+          url?: string;
+          error?: string;
+          layers?: number;
+        }>;
+      };
+    };
+    const bridge = {
+      async toPsd(input: { sourceId: string }) {
+        if (!workflowId || view !== 'canvas') return { ok: false, error: '请先打开项目。' };
+        const current: any[] = getNodes() as any[];
+        const source = current.find((node) => node.id === input.sourceId);
+        if (!source) return { ok: false, error: '找不到这个节点，请刷新后重试。' };
+        const stack = source.layerStack;
+        const layerCount = Array.isArray(stack?.layers) ? stack.layers.length : 0;
+        if (!layerCount) return { ok: false, error: '这个节点上没有图层几何（不是图层拆分的结果）。' };
+        const flatten = (
+          window as unknown as {
+            __FISHERAI_LAYER_STACK__?: {
+              flatten(
+                stack: unknown,
+                projectId: string,
+                fallbackUrl?: string,
+              ): Promise<{ ok: boolean; url?: string; reason?: string }>;
+            };
+          }
+        ).__FISHERAI_LAYER_STACK__;
+        if (!flatten?.flatten)
+          return { ok: false, error: '图层合成桥不在（页面还是旧版），刷新一下再试。' };
+        const flattened = await flatten.flatten(stack, workflowId, source.resultUrl);
+        if (!flattened.url)
+          return { ok: false, error: flattened.reason || '图层合成失败。' };
+        // 写回同一个节点：一张扁平图 + 保留 layerStack（合成器还要按层递进去）。
+        // 标题还是默认的「图片生成」时顺手改成「图层文档 · N 层」—— 用户要的就是「一个 psd 节点」。
+        const currentTitle = typeof source.title === 'string' ? source.title.trim() : '';
+        const title =
+          !currentTitle || currentTitle === '图片生成'
+            ? \`图层文档 · \${layerCount} 层\`
+            : currentTitle;
+        const next = configureAgentNode(getNodes() as any[], source.id, {
+          resultUrl: flattened.url,
+          resultUrls: [flattened.url],
+          title,
+          status: 'success',
+          resultAspectRatio:
+            stack?.width && stack?.height ? \`\${stack.width}/\${stack.height}\` : source.resultAspectRatio,
+          layerStack: stack,
+        } as never);
+        flushSync(() => {
+          setNodes(next);
+          setSelectedNodeIds([source.id]);
+        });
+        return { ok: true, url: flattened.url, layers: layerCount };
+      },
+    };
+    holder.__FISHERAI_CANVAS_LAYERS__ = bridge;
+    return () => {
+      if (holder.__FISHERAI_CANVAS_LAYERS__ === bridge)
+        holder.__FISHERAI_CANVAS_LAYERS__ = undefined;
+    };
+  }, [
+    configureAgentNode,
+    getNodes,
+    setNodes,
+    setSelectedNodeIds,
+    workflowId,
+    view,
+  ]);
+  React.useEffect(() => {
+    window.__FISHERAI_FOCUS_NODES__ = focusNodes;`,
+    why: '图片节点「转成 PSD」落位桥（合成一张扁平图写回同一节点）',
+  },
+  // ---- 3.13b：把图层几何从 host 回执一路送进节点 / 合成器 / 下载 ----
+  {
+    file: 'src/stable/generation/generationClient.ts',
+    from: `  const result = await responseBody(response);
+  if (!response.ok) {`,
+    to: `  const result = await responseBody(response);
+  /**
+   * dsh-aifisher-canvas v1.101：图层拆分的**几何**别丢。
+   *
+   * host 在 /generate-image 的回执里带了 \`layerStack\`（每层 URL + bbox + 文档尺寸），
+   * 而 generateMedia 只把 resultUrls 交出去 —— 这里先按 nodeId 存一份，
+   * 由 canvasGeneration 在写节点 patch 时取走（取完即删）。
+   */
+  {
+    const layerStack = result.layerStack;
+    const nodeId = typeof request.nodeId === 'string' ? request.nodeId : '';
+    if (layerStack && nodeId) {
+      const holder = window as unknown as {
+        __FISHERAI_LAYER_RESULTS__?: Map<string, unknown>;
+      };
+      if (!holder.__FISHERAI_LAYER_RESULTS__) holder.__FISHERAI_LAYER_RESULTS__ = new Map();
+      holder.__FISHERAI_LAYER_RESULTS__.set(nodeId, layerStack);
+    }
+  }
+  if (!response.ok) {`,
+    why: 'generationClient：按 nodeId 暂存回执里的 layerStack',
+  },
+  {
+    file: 'src/stable/generation/canvasGeneration.ts',
+    from: `            const current = binding.getNodes().find((candidate) => candidate.id === id)!;
+            const history = mergeImageResultHistory({ resultUrl: current.resultUrl, resultUrls: current.resultUrls }, urls);
+            patch = {
+              ...history,
+              ...('resultAspectRatio' in metadata
+                ? { resultAspectRatio: metadata.resultAspectRatio }
+                : {}),
+            };`,
+    to: `            const current = binding.getNodes().find((candidate) => candidate.id === id)!;
+            const history = mergeImageResultHistory({ resultUrl: current.resultUrl, resultUrls: current.resultUrls }, urls);
+            // dsh-aifisher-canvas v1.101：图层拆分的几何（generationClient 暂存的那份）
+            const layerResults = (
+              window as unknown as { __FISHERAI_LAYER_RESULTS__?: Map<string, unknown> }
+            ).__FISHERAI_LAYER_RESULTS__;
+            const layerStack = layerResults?.get(id);
+            if (layerStack) layerResults!.delete(id);
+            patch = {
+              ...history,
+              ...(layerStack ? { layerStack } : {}),
+              ...('resultAspectRatio' in metadata
+                ? { resultAspectRatio: metadata.resultAspectRatio }
+                : {}),
+            };`,
+    why: 'canvasGeneration：把 layerStack 写进节点 patch',
+  },
+  {
+    file: 'src/stable/nodes/canvasImageNodes.tsx',
+    from: `      images: images.map((node) => ({ nodeId: node.id, url: node.url, title: node.title })),`,
+    to: `      // dsh-aifisher-canvas v1.101：图层文档把几何一起递进合成器
+      // （输入节点会一层一个口展开，并按 bbox 贴回原位）
+      images: images.map((node) => ({
+        nodeId: node.id,
+        url: node.url,
+        title: node.title,
+        ...((node as unknown as { layerStack?: unknown }).layerStack
+          ? { layerStack: (node as unknown as { layerStack?: unknown }).layerStack }
+          : {}),
+      })),`,
+    why: '调色节点：把上游的 layerStack 递给合成器',
+  },
+  {
+    file: 'src/stable/media/canvasImagePreview.tsx',
+    from: `  const headerControls = (
+    <>
+      {layerBadge}
+      {psdControl}
+      {historyControl}
+    </>
+  );`,
+    to: `  /**
+   * 「下载 PSD」：把图层文档写成真的 .psd（一层一个图层、位置/顺序/透明度都按原样），
+   * 用户直接丢进 Photoshop 就能继续改（用户 2026-11-21：「psd节点可以下载导入ps里」）。
+   * 编码器在 src/client/canvas/psdWriter.ts，由 __FISHERAI_LAYER_STACK__.downloadPsd 调起来。
+   */
+  const psdDownload =
+    hasLayers && hasResult && !busy ? (
+      <button
+        type="button"
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          event.currentTarget.blur();
+          const bridge = (
+            window as unknown as {
+              __FISHERAI_LAYER_STACK__?: {
+                downloadPsd(
+                  stack: unknown,
+                  name: string,
+                ): Promise<{ ok: boolean; bytes?: number; error?: string }>;
+              };
+            }
+          ).__FISHERAI_LAYER_STACK__;
+          if (!bridge?.downloadPsd) {
+            console.warn('[dsh-aifisher-canvas] PSD 下载桥不在（页面还是旧版），刷新一下再试。');
+            return;
+          }
+          void bridge
+            .downloadPsd(layerStack, node.title || '图层文档')
+            .catch((error: unknown) => ({
+              ok: false,
+              error: error instanceof Error ? error.message : String(error),
+            }))
+            .then((saved) => {
+              if (!saved.ok)
+                console.warn(\`[dsh-aifisher-canvas] 下载 PSD 失败：\${saved.error ?? '未知原因'}\`);
+            });
+        }}
+        data-fisherai-image-psd-download="true"
+        aria-label="下载 PSD"
+        title="下载成 PSD 文件（一层一个图层、保留位置与顺序，可直接在 Photoshop 里打开）"
+        className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium bg-[var(--af-surface)] text-[var(--af-text-secondary)] hover:bg-[var(--af-hover)] hover:text-[var(--af-text)] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--af-focus)] transition-colors"
+      >
+        下载 PSD
+      </button>
+    ) : null;
+  const headerControls = (
+    <>
+      {layerBadge}
+      {psdControl}
+      {psdDownload}
+      {historyControl}
+    </>
+  );`,
+    why: '图片节点头部「下载 PSD」按钮',
+  },
+];
+
+{
+  const problems = [];
+  for (const patch of LAYER_DECOMPOSITION_PATCHES) {
+    const target = path.join(VENDOR, patch.file);
+    if (!fs.existsSync(target)) {
+      problems.push(`${patch.file}（文件不存在）`);
+      continue;
+    }
+    const original = fs.readFileSync(target, 'utf8');
+    const hits = original.split(patch.from).length - 1;
+    if (hits !== 1) {
+      problems.push(`${patch.file}: ${patch.why} —— 锚点命中 ${hits} 次（预期 1 次）`);
+      continue;
+    }
+    fs.writeFileSync(target, original.split(patch.from).join(patch.to));
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `[vendor] 图层拆分补丁没对齐（上游可能改了写法，请核对）：\n  - ${problems.join('\n  - ')}`,
+    );
+  }
+  console.log(
+    `[vendor] 图层拆分：${LAYER_DECOMPOSITION_PATCHES.length} 处（空提示词放行 + 摊开图层入口）`,
+  );
+}
+
+// ---------------------------------------------------------------- 3.16) 复制并移动（Shift+D / Alt+D，v1.103）
+//
+// 用户 2026-11-21 原话：「做一个画布功能，节点复制并移动。按alt或者shift+d。调色节点也要」。
+//
+// 语义（照 Blender 的 duplicate，和本插件既有的 G / X / A 同一套手感）：
+//   Shift+D / Alt+D = 选中的节点整批复制、原地偏移 40px，复制完直接进入抓取移动：
+//     移动鼠标 = 副本跟着走；X / Y = 锁轴；左键 / Enter = 落下；Esc = 连这批复制的节点一起撤销。
+//   连线：选中集合内部的线整段复制；连到**没被选中**的上游时继续指着原上游（链接式复制）。
+//     这一点和 Ctrl+C / Ctrl+V 相同 —— 复制一张参考图 / 一个调色节点立刻能接着用。
+//   调色节点（Color Grade）不需要特殊处理：节点数据是整份克隆，resultUrl / compositorGraph
+//     一起带过去，副本打开合成器看到的就是复制时那份图。
+//
+// 为什么改在这里而不是插件侧：复制要动 nodes / setNodes / 选中态，这些只有 vendor 的
+// canvasCommands hook 握着；插件侧没有这份状态，硬造一份反而会和画布打架。
+const DUPLICATE_NODE_PATCHES = [
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `import {
+  cloneCanvasNodes,
+  hasGeneratingCanvasNodes,`,
+    to: `import {
+  cloneCanvasNodes,
+  deleteCanvasNodes,
+  hasGeneratingCanvasNodes,`,
+    why: '画布命令没导入 deleteCanvasNodes（Esc 取消复制要整批删掉副本）',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `  const handlePaste = hooks.useCallback(() => insertCopy(clipboard.current, true), [insertCopy]);
+  const hasCopiedNodes = hooks.useCallback(() => clipboard.current.length > 0, []);`,
+    to: `  const handlePaste = hooks.useCallback(() => insertCopy(clipboard.current, true), [insertCopy]);
+  const hasCopiedNodes = hooks.useCallback(() => clipboard.current.length > 0, []);
+
+  // ---- dsh-aifisher-canvas：Shift+D / Alt+D 复制并移动（补丁 3.16）----
+  //
+  // 和 Ctrl+C/V 的两点差别：
+  //   ① 落点是「原地偏移 40px」而不是鼠标处，复制完直接进抓取（Blender 的 Shift+D）；
+  //   ② Esc 取消时连这批复制的节点一起撤掉（粘贴错了只能再删一次）。
+  //
+  // 复制前先 pushHistory：把「上一次提交之后攒下的改动」（建节点这类不会自己提交的操作）
+  // 顺手落成一步，撤销才不会跨过它跳回很早以前。落在同一状态上是空操作，没有副作用。
+  const DUPLICATE_OFFSET = 40;
+  const duplicateSelection = hooks.useCallback(() => {
+    const selected = nodes.filter((node) => selectedNodeIds.includes(node.id));
+    if (!selected.length) return null;
+    if (hasGeneratingCanvasNodes(selected)) {
+      window.alert(GENERATING_COPY_MESSAGE);
+      return null;
+    }
+    const previousSelection = [...selectedNodeIds];
+    const adapter = window.__FISHERAI_CANVAS_CLIPBOARD__;
+    const { newNodes, idMap } = (adapter?.clone ?? cloneCanvasNodes)(snapshot(selected), {
+      offset: DUPLICATE_OFFSET,
+      createId,
+      preserveParentConnections: true,
+    });
+    if (!newNodes.length) return null;
+    pushHistory?.();
+    setNodes((current) =>
+      (adapter?.insert ?? insertClonedCanvasNodes)(current, newNodes, idMap, {
+        preserveChildConnections: false,
+      }),
+    );
+    setSelectedNodeIds(newNodes.map((node) => node.id));
+    return {
+      ids: newNodes.map((node) => node.id),
+      nodes: newNodes,
+      previousSelection,
+    };
+  }, [nodes, selectedNodeIds, createId, setNodes, setSelectedNodeIds, pushHistory]);`,
+    why: '画布命令没有「复制一批选中节点」的出口',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `    axis: 'x' | 'y' | null;
+    moved: boolean;
+    apply: () => void;
+    stop: () => void;
+  } | null>(null);`,
+    to: `    axis: 'x' | 'y' | null;
+    moved: boolean;
+    /** 复制并移动（Shift+D）：Esc 要把这批复制的节点整个撤掉。 */
+    removeOnCancel: boolean;
+    /** 取消复制时把选区还给复制前那些节点。 */
+    previousSelection: string[];
+    apply: () => void;
+    stop: () => void;
+  } | null>(null);`,
+    why: '抓取状态里没有「这次是复制出来的」标记',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `    [pushHistory, setNodes],
+  );
+
+  const startGrab = hooks.useCallback(() => {
+    if (grabRef.current) return;
+    const ids = selectedNodeIds.filter((id) => nodes.some((node) => node.id === id));
+    if (!ids.length) return;
+    const positions = new Map<string, { x: number; y: number }>();
+    for (const node of nodes) {
+      if (ids.includes(node.id)) positions.set(node.id, { x: node.x, y: node.y });
+    }`,
+    to: `    [pushHistory, setNodes, setSelectedNodeIds],
+  );
+
+  const startGrab = hooks.useCallback((forced?: {
+    ids?: string[];
+    nodes?: CanvasClipboardNode[];
+    previousSelection?: string[];
+    removeOnCancel?: boolean;
+  }) => {
+    if (grabRef.current) return;
+    // 「复制并移动」会传入刚复制出来的那批：那次 setNodes 还没回到 props，不能用 nodes 算。
+    const sourceNodes = forced?.nodes ?? nodes;
+    const sourceIds = forced?.ids ?? selectedNodeIds;
+    const ids = sourceIds.filter((id) => sourceNodes.some((node) => node.id === id));
+    if (!ids.length) return;
+    const positions = new Map<string, { x: number; y: number }>();
+    for (const node of sourceNodes) {
+      if (ids.includes(node.id)) positions.set(node.id, { x: node.x, y: node.y });
+    }`,
+    why: 'G 抓取只认当前选中项，接不了「刚复制出来的那批」',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `      axis: null,
+      moved: false,
+      apply: () => undefined,
+      stop: () => undefined,
+    };`,
+    to: `      axis: null,
+      moved: false,
+      removeOnCancel: Boolean(forced?.removeOnCancel),
+      previousSelection: forced?.previousSelection ?? ids,
+      apply: () => undefined,
+      stop: () => undefined,
+    };`,
+    why: '抓取对象缺少复制标记与「取消时还原哪个选区」',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `      if (!commit) {
+        // 取消：把位置放回起手那一刻（不记历史）`,
+    to: `      if (!commit) {
+        // Shift+D 复制并移动：Esc = 连刚复制出来的整批节点一起取消（Blender 同款）。
+        // 位置不用回正 —— 它们本来就站在复制时的偏移落点上，整批删掉即可；
+        // 这时画布状态已经回到复制前，所以不必再往撤销栈里补一步。
+        if (grab.removeOnCancel) {
+          const adapter = window.__FISHERAI_CANVAS_CLIPBOARD__;
+          setNodes((current) => (adapter?.delete ?? deleteCanvasNodes)(current, grab.ids));
+          setSelectedNodeIds(grab.previousSelection);
+          return;
+        }
+        // 取消：把位置放回起手那一刻（不记历史）`,
+    why: '抓取取消只回正位置，复制出来的副本会留在画布上',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `      if (!grab.moved) return;
+      const commitHistory = pushHistory;`,
+    to: `      // 复制并移动：复制这一下本身也算一步 —— 复制完没移动也要能 Ctrl+Z 撤回去。
+      if (!grab.moved && !grab.removeOnCancel) return;
+      const commitHistory = pushHistory;`,
+    why: '落下时没移动过就不记历史，复制出来的节点撤不掉',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `      // X 与 Delete / Backspace 同义（Blender 里 X 就是删；Ctrl+X 之类不拦）`,
+    to: `      // Shift+D / Alt+D = 复制选中节点并跟着鼠标移动（Blender 的 duplicate；Alt 是同义键）
+      if (
+        key === 'd' &&
+        (event.shiftKey || event.altKey) &&
+        !event.ctrlKey &&
+        !event.metaKey
+      ) {
+        // 抓取中再按不算：一次手势只复制一批
+        if (!grabRef.current) {
+          event.preventDefault();
+          const duplicated = duplicateSelection();
+          if (duplicated) {
+            startGrab({
+              ids: duplicated.ids,
+              nodes: [...nodes, ...duplicated.nodes],
+              previousSelection: duplicated.previousSelection,
+              removeOnCancel: true,
+            });
+          }
+        }
+        return;
+      }
+      // X 与 Delete / Backspace 同义（Blender 里 X 就是删；Ctrl+X 之类不拦）`,
+    why: '键盘里没有 Shift+D / Alt+D 复制',
+  },
+  {
+    file: 'src/stable/canvas/canvasCommands.ts',
+    from: `    groupSelectedNodes,
+    handleCopy,
+    startGrab,
+  ]);`,
+    to: `    groupSelectedNodes,
+    handleCopy,
+    startGrab,
+    duplicateSelection,
+  ]);`,
+    why: '快捷键 effect 依赖里缺 duplicateSelection',
+  },
+];
+
+{
+  const problems = [];
+  for (const patch of DUPLICATE_NODE_PATCHES) {
+    const target = path.join(VENDOR, patch.file);
+    if (!fs.existsSync(target)) {
+      problems.push(`${patch.file}（文件不存在）`);
+      continue;
+    }
+    const original = fs.readFileSync(target, 'utf8');
+    const hits = original.split(patch.from).length - 1;
+    if (hits !== 1) {
+      problems.push(`${patch.file}: ${patch.why} —— 锚点命中 ${hits} 次（预期 1 次）`);
+      continue;
+    }
+    fs.writeFileSync(target, original.split(patch.from).join(patch.to));
+  }
+  if (problems.length > 0) {
+    throw new Error(
+      `[vendor] 复制并移动（Shift+D）补丁没对齐（上游可能改了写法，请核对）：\n  - ${problems.join('\n  - ')}`,
+    );
+  }
+  console.log(
+    `[vendor] 复制并移动（Shift+D / Alt+D）：${DUPLICATE_NODE_PATCHES.length} 处（含调色节点）`,
+  );
+}
+
 // ---------------------------------------------------------------- 
 console.log(
   [

@@ -89,11 +89,14 @@ const SHORTCUTS: Array<[string, string]> = [
   ['界面大小', 'Ctrl + = / − / 0'],
   ['聚焦选中/全部', 'F'],
   ['自动排列', 'L'],
+  ['全选 / 取消选择', 'A / Alt + A'],
+  ['抓取移动 / 锁轴', 'G → X / Y'],
+  ['复制并移动', 'Shift + D / Alt + D'],
   ['保存工作流', 'Ctrl + S'],
   ['复制 / 粘贴', 'Ctrl + C / V'],
   ['节点打组', 'Ctrl + G'],
   ['撤销 / 重做', 'Ctrl + Z / Y'],
-  ['删除节点', 'Del / Backspace'],
+  ['删除节点', 'Del / Backspace / X'],
   ['断开连线', '双击连线'],
 ];
 

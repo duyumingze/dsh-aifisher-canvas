@@ -218,7 +218,250 @@ const discardClose = async () => {
   );
 }
 
-// ---------------------------------------------------------------- 1) 产物符号
+// ---------------------------------------------------------------- 1.7) 图层文档（v1.101）
+//
+// 用户 2026-11-21 报障：「接入调色节点后它的图层混合方式不对，顺序也不对，我想要走的是
+// 通过混合节点的方式来混合，并且保留正确的位置」。
+//
+// 这里钉死三件事：
+//   ① 输入节点按**一层一个口**展开（顺序 = zindex，从下往上）；
+//   ② 默认图自动铺「放置 → Alpha 上叠」链（底图不放置，其余按 bbox 归一化贴）；
+//   ③ 放置参数是**左下原点**（bbox 是左上原点，y 要翻）。
+
+{
+  const doc = {
+    width: 1000,
+    height: 500,
+    layers: [
+      { url: 'base.png', zindex: 0, x: 0, y: 0, width: 1000, height: 500 },
+      { url: 'person.png', name: '人物', zindex: 1, x: 100, y: 50, width: 300, height: 200 },
+      { url: 'bubble.png', name: '气泡', zindex: 2, x: 700, y: 20, width: 200, height: 150 },
+    ],
+  };
+  const slots = canvasApp.inputSlots([
+    { nodeId: 'layer-doc', url: 'flat.png', title: '图层文档', layerStack: doc },
+  ]);
+  check(
+    '图层文档 → 3 个端口（一层一个口，顺序 = zindex 从下往上）',
+    slots.length === 3 &&
+      slots[0].url === 'base.png' &&
+      slots[1].url === 'person.png' &&
+      slots[2].url === 'bubble.png',
+    JSON.stringify(slots.map((slot) => slot.url)),
+  );
+  check(
+    '每个口带自己的矩形与文档尺寸（位置不丢）',
+    slots[1].rect?.x === 100 &&
+      slots[1].rect?.y === 50 &&
+      slots[1].rect?.width === 300 &&
+      slots[1].rect?.height === 200 &&
+      slots[1].document?.width === 1000 &&
+      slots[1].document?.height === 500,
+    JSON.stringify(slots[1]),
+  );
+  check(
+    '普通图片仍然一个口、没有矩形（不走图层路径）',
+    canvasApp.inputSlots([{ nodeId: 'img', url: 'a.png' }]).length === 1 &&
+      canvasApp.inputSlots([{ nodeId: 'img', url: 'a.png' }])[0].layered === false &&
+      canvasApp.slotsHaveLayers(canvasApp.inputSlots([{ nodeId: 'img', url: 'a.png' }])) === false,
+  );
+
+  const graph = canvasApp.createLayerCompositeGraph(slots);
+  const byId = new Map(graph.nodes.map((node) => [node.id, node]));
+  check(
+    '默认图：底图不放置，两个图层各一个「放置」节点',
+    byId.has('place-1') && byId.has('place-2') && !byId.has('place-0'),
+    JSON.stringify(graph.nodes.map((node) => node.id)),
+  );
+  check(
+    '默认图：每层一个「Alpha 上叠」（底图不套）',
+    byId.has('alpha-1') &&
+      byId.has('alpha-2') &&
+      !byId.has('alpha-0') &&
+      byId.get('alpha-1').kind === 'alphaOver',
+    JSON.stringify(graph.nodes.filter((node) => node.kind === 'alphaOver').map((node) => node.id)),
+  );
+  const place1 = byId.get('place-1')?.params ?? {};
+  check(
+    '放置参数：x/宽 按文档归一，y 换成左下原点（1 - (y+h)/H）',
+    Math.abs(Number(place1.placeX) - 0.1) < 1e-6 &&
+      Math.abs(Number(place1.placeY) - 0.5) < 1e-6 &&
+      Math.abs(Number(place1.placeWidth) - 0.3) < 1e-6 &&
+      Math.abs(Number(place1.placeHeight) - 0.4) < 1e-6,
+    JSON.stringify(place1),
+  );
+  const edge = (fromNode, fromPort, toNode, toPort) =>
+    graph.edges.some(
+      (item) =>
+        item.fromNode === fromNode &&
+        item.fromPort === fromPort &&
+        item.toNode === toNode &&
+        item.toPort === toPort,
+    );
+  check(
+    '链路：输入(0) 当底 → alpha-1 的「底下」口；输入(1) 经放置进 alpha-1 的「上面」口',
+    edge('input', 0, 'alpha-1', 1) && edge('place-1', 0, 'alpha-1', 0),
+    JSON.stringify(graph.edges.map((item) => `${item.fromNode}:${item.fromPort}->${item.toNode}:${item.toPort}`)),
+  );
+  check(
+    '链路：alpha-1 当 alpha-2 的「底下」口（从下往上叠，顺序不错）',
+    edge('alpha-1', 0, 'alpha-2', 1) && edge('place-2', 0, 'alpha-2', 0),
+  );
+  check(
+    '链路：末端同时接输出与预览',
+    edge('alpha-2', 0, 'output', 0) && edge('alpha-2', 0, 'viewer', 0),
+  );
+  check(
+    '求值顺序里每一层都在它自己的 alphaOver 之前（能算出来）',
+    (() => {
+      const order = canvasApp.evaluationOrder(graph, 'output').order;
+      const index = (id) => order.indexOf(id);
+      return index('place-1') < index('alpha-1') && index('alpha-1') < index('alpha-2') && index('alpha-2') < index('output');
+    })(),
+  );
+  check(
+    '图层文档走「上叠链」而不是默认图（normalizeGraph 没有存图时）',
+    (() => {
+      const normalized = canvasApp.normalizeGraph(null, slots.length, slots);
+      return (
+        normalized.nodes.some((node) => node.kind === 'alphaOver') &&
+        !canvasApp.inputSlots([{ nodeId: 'x', url: 'a.png' }]).some((slot) => slot.layered)
+      );
+    })(),
+  );
+  check(
+    '老图（已存 nodes）不被改写成上叠链（用户自己接的图不动）',
+    (() => {
+      const saved = canvasApp.createDefaultGraph(1);
+      const normalized = canvasApp.normalizeGraph(saved, slots.length, slots);
+      return !normalized.nodes.some((node) => node.kind === 'alphaOver');
+    })(),
+  );
+}
+
+// ---------------------------------------------------------------- 1.8) PSD 导出（v1.101）
+//
+// 用户 2026-11-21：「psd节点可以下载导入ps里」。
+// 这里把编码器写出来的字节**按规范重新解一遍**：文件头、图层数、每层矩形（位置/尺寸）、
+// 图层名、通道表、合成图像数据长度。真在 Photoshop 里打开由用户验收。
+
+{
+  const makePixels = (rgba) => {
+    const data = new Uint8ClampedArray(16);
+    for (let index = 0; index < 4; index += 1) data.set(rgba, index * 4);
+    return data;
+  };
+  const docWidth = 4;
+  const docHeight = 4;
+  const bytes = canvasApp.buildPsd({
+    width: docWidth,
+    height: docHeight,
+    layers: [
+      { name: '底图', x: 0, y: 0, width: 2, height: 2, rgba: makePixels([10, 20, 30, 255]) },
+      { name: 'Person', x: 1, y: 2, width: 2, height: 2, rgba: makePixels([200, 100, 50, 128]) },
+    ],
+    composite: new Uint8ClampedArray(4 * 4 * 4).fill(255),
+  });
+
+  const text = (offset, length) =>
+    Array.from(bytes.subarray(offset, offset + length))
+      .map((value) => String.fromCharCode(value))
+      .join('');
+  const u16 = (offset) => (bytes[offset] << 8) | bytes[offset + 1];
+  const i16 = (offset) => (u16(offset) >= 0x8000 ? u16(offset) - 0x10000 : u16(offset));
+  const u32 = (offset) =>
+    ((bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0;
+
+  check(
+    'PSD 文件头：8BPS / version 1 / RGBA 4 通道 / 8bit / RGB 模式',
+    text(0, 4) === '8BPS' &&
+      u16(4) === 1 &&
+      u16(12) === 4 &&
+      u32(14) === docHeight &&
+      u32(18) === docWidth &&
+      u16(22) === 8 &&
+      u16(24) === 3,
+    `${text(0, 4)} v${u16(4)} ch${u16(12)} ${u32(18)}x${u32(14)} d${u16(22)} m${u16(24)}`,
+  );
+  check(
+    'PSD：颜色模式数据与图像资源两段都是空（各 4 字节 0）',
+    u32(26) === 0 && u32(30) === 0,
+    `${u32(26)} / ${u32(30)}`,
+  );
+  const layerSectionLength = u32(34);
+  const layerInfoLength = u32(38);
+  check(
+    'PSD：图层与蒙版段长度自洽（段长 = 4 + 图层信息长 + 全局蒙版空段 4）且为偶数',
+    layerSectionLength === layerInfoLength + 8 && layerSectionLength % 2 === 0,
+    `section=${layerSectionLength} info=${layerInfoLength}`,
+  );
+  let offset = 42;
+  const layerCount = i16(offset);
+  offset += 2;
+  check('PSD：图层数 = 2', layerCount === 2, String(layerCount));
+  const readLayer = () => {
+    const top = u32(offset);
+    const left = u32(offset + 4);
+    const bottom = u32(offset + 8);
+    const right = u32(offset + 12);
+    offset += 16;
+    const channels = u16(offset);
+    offset += 2;
+    const channelIds = [];
+    for (let index = 0; index < channels; index += 1) {
+      channelIds.push(i16(offset));
+      offset += 6; // id(2) + 数据长度(4)
+    }
+    offset += 4; // '8BIM'
+    const blend = text(offset, 4);
+    offset += 4; // norm
+    offset += 4; // opacity + clipping + flags + filler
+    const extraLength = u32(offset);
+    offset += 4;
+    const extraStart = offset;
+    offset += 8; // 蒙版数据长 + 混合范围长（都是 0）
+    const nameLength = bytes[offset];
+    const name = new TextDecoder().decode(bytes.subarray(offset + 1, offset + 1 + nameLength));
+    offset = extraStart + extraLength;
+    return { top, left, bottom, right, channels, channelIds, blend, name };
+  };
+  const first = readLayer();
+  const second = readLayer();
+  check(
+    'PSD 图层 1：矩形 + 名字「底图」+ 正常混合',
+    first.left === 0 &&
+      first.top === 0 &&
+      first.right === 2 &&
+      first.bottom === 2 &&
+      first.name === '底图' &&
+      first.blend === 'norm',
+    JSON.stringify(first),
+  );
+  check(
+    'PSD 图层 2：矩形就是 bbox（位置与尺寸都保留）+ 4 个通道（A/R/G/B）',
+    second.left === 1 &&
+      second.top === 2 &&
+      second.right === 3 &&
+      second.bottom === 4 &&
+      second.channels === 4 &&
+      second.channelIds.join(',') === '-1,0,1,2' &&
+      second.name === 'Person',
+    JSON.stringify(second),
+  );
+  const compositeStart = bytes.byteLength - (2 + 4 * docWidth * docHeight);
+  check(
+    'PSD：合成图像数据是「压缩=0 + 4 个平面」= 2 + 4×宽×高 字节（文件尾）',
+    compositeStart > 0 && u16(compositeStart) === 0,
+    `file=${bytes.byteLength} composite@${compositeStart}`,
+  );
+  check(
+    'PSD 文件名：去掉路径非法字符并补 .psd',
+    canvasApp.psdFileName('图层/文档: 1') === '图层_文档_ 1.psd' &&
+      canvasApp.psdFileName('') === '图层文档.psd',
+    canvasApp.psdFileName('图层/文档: 1'),
+  );
+}
+
 
 check(
   '产物导出合成器纯函数',
@@ -1709,7 +1952,7 @@ if (button) {
   check(
     '节点搜索：空查询列出全部可建节点（不含输入/输出/预览）',
     canvasApp.searchNodeKinds('').length === canvasApp.creatableNodeCount() &&
-      canvasApp.creatableNodeCount() === 19,
+      canvasApp.creatableNodeCount() === 20,
     `${canvasApp.searchNodeKinds('').length} / ${canvasApp.creatableNodeCount()}`,
   );
   check(
@@ -2361,6 +2604,145 @@ if (button) {
   );
   await discardClose();
   check('这一轮结束后合成器还能关掉', !doc.querySelector('.cg-root'));
+}
+
+// ---------------------------------------------------------------- 7.11) 复制并移动（Shift+D / Alt+D）
+//
+// 用户 2026-11-21：「做一个画布功能，节点复制并移动。按alt或者shift+d。调色节点也要」。
+// 主画布那份在 test-canvas-blender-keys 守；这里守合成器里同一套手势：
+//   整批复制、偏移 40px、直接进抓取（X/Y 锁轴沿用 G 那套）、左键落下、Esc 连副本一起撤；
+//   复制本身进撤销栈；输入 / 输出 / 预览是固定节点，不参与复制。
+{
+  const report = () => canvasApp.compositorReport();
+  const press = (options) =>
+    doc.dispatchEvent(
+      new window.KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...options }),
+    );
+  const poke = (type, target, options) =>
+    target?.dispatchEvent(new window.MouseEvent(type, { bubbles: true, cancelable: true, ...options }));
+
+  doc
+    .querySelector('[data-fisherai-open-compositor]')
+    ?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  await settle(320);
+  const overlay = doc.querySelector('.cg-root');
+  const stageElement = overlay?.querySelector('.cg-stage');
+  check(
+    '重新打开合成器做「复制并移动」（默认三个固定节点）',
+    !!overlay && report().nodes.length === 3,
+    `nodes=${report().nodes.length}`,
+  );
+
+  // 先建一个「色彩平衡」节点当复制对象（Shift+A → 搜 scph → Enter）
+  press({ key: 'a', shiftKey: true });
+  await settle(40);
+  const searchBox = doc.querySelector('.cg-menu-search input');
+  if (searchBox) {
+    searchBox.value = 'scph';
+    searchBox.dispatchEvent(new window.Event('input', { bubbles: true }));
+    await settle(30);
+    doc
+      .querySelector('.cg-menu-item')
+      ?.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await settle(60);
+    // 新节点跟着鼠标：先挪到左下角空白处再落下
+    poke('pointermove', window, { clientX: 120, clientY: 700 });
+    poke('pointermove', window, { clientX: 60, clientY: 660 });
+    poke('pointerdown', stageElement, { button: 0, clientX: 60, clientY: 660 });
+    await settle(60);
+  }
+  const filterNode = report().nodes.find((node) => node.kind === 'colorBalance');
+  check('建出色彩平衡节点（复制的前提）', !!filterNode, JSON.stringify(report().nodes.map((node) => node.kind)));
+  check('新建的效果节点是选中的', report().selection?.includes(filterNode?.id));
+
+  const countBefore = report().nodes.length;
+  poke('pointermove', window, { clientX: 300, clientY: 300 });
+  press({ key: 'd', shiftKey: true });
+  await settle(30);
+  const grab = report().grab;
+  check(
+    'Shift+D：复制一个节点并直接进入抓取（grab.duplicated = 1）',
+    report().nodes.length === countBefore + 1 && grab?.duplicated === 1,
+    `nodes=${report().nodes.length} grab=${JSON.stringify(grab)}`,
+  );
+  const copyId = report().selection?.[0];
+  const copyNode = report().nodes.find((node) => node.id === copyId);
+  check(
+    '副本是同一个效果、落在原节点右下 40px，并且只有副本被选中',
+    copyNode?.kind === 'colorBalance' &&
+      copyNode.x === filterNode.x + 40 &&
+      copyNode.y === filterNode.y + 40 &&
+      report().selection?.length === 1,
+    JSON.stringify({ filter: filterNode, copy: copyNode }),
+  );
+
+  poke('pointermove', window, { clientX: 420, clientY: 380 });
+  await settle(30);
+  const movedCopy = report().nodes.find((node) => node.id === copyId);
+  check(
+    '复制完直接跟着鼠标走（位移 ÷ 缩放 = +120 / +80），原节点不动',
+    movedCopy.x - filterNode.x === 160 &&
+      movedCopy.y - filterNode.y === 120 &&
+      report().nodes.find((node) => node.id === filterNode.id).x === filterNode.x,
+    JSON.stringify(movedCopy),
+  );
+
+  poke('pointerdown', stageElement, { button: 0, clientX: 420, clientY: 380 });
+  await settle(30);
+  check(
+    '左键落下：抓取结束、副本留下',
+    report().grab === null && report().nodes.length === countBefore + 1,
+    `nodes=${report().nodes.length}`,
+  );
+
+  press({ key: 'z', ctrlKey: true });
+  await settle(40);
+  check(
+    'Ctrl+Z 一步撤回这次复制（连同那次移动）',
+    report().nodes.length === countBefore && !report().nodes.some((node) => node.id === copyId),
+    `nodes=${report().nodes.length}`,
+  );
+
+  // 固定节点不复制：全选之后 Alt+D 只该多出一个效果节点
+  const filterCard = [...(overlay?.querySelectorAll('.cg-node') || [])].find((element) =>
+    element.querySelector('.cg-node-title')?.textContent?.includes('色彩平衡'),
+  );
+  poke('pointerdown', filterCard?.querySelector('.cg-node-head'), { button: 0, clientX: 200, clientY: 200 });
+  poke('pointerup', window, { button: 0, clientX: 200, clientY: 200 });
+  await settle(30);
+  press({ key: 'a' });
+  await settle(20);
+  check('A 全选四个节点', report().selection?.length === 4, JSON.stringify(report().selection));
+  press({ key: 'd', altKey: true });
+  await settle(30);
+  check(
+    'Alt+D：只复制效果节点，输入 / 输出 / 预览不复制',
+    report().nodes.length === countBefore + 1 &&
+      report().nodes.filter((node) => node.kind === 'colorBalance').length === 2 &&
+      report().nodes.filter((node) => node.kind === 'input').length === 1 &&
+      report().nodes.filter((node) => node.kind === 'output').length === 1 &&
+      report().nodes.filter((node) => node.kind === 'viewer').length === 1,
+    JSON.stringify(report().nodes.map((node) => node.kind)),
+  );
+  const undoBeforeCancel = report().history.undo;
+  press({ key: 'Escape' });
+  await settle(40);
+  check(
+    'Esc 取消复制：副本整批撤掉，固定节点都还在',
+    report().nodes.length === countBefore &&
+      report().grab === null &&
+      report().nodes.some((node) => node.kind === 'input') &&
+      report().nodes.some((node) => node.kind === 'output'),
+    `nodes=${report().nodes.length}`,
+  );
+  check(
+    '取消复制不往撤销栈里留空步（Esc 前后 undo 深度一致）',
+    report().history.undo === undoBeforeCancel,
+    `undo=${report().history.undo} before=${undoBeforeCancel}`,
+  );
+
+  await discardClose();
+  check('复制这一轮结束后合成器能正常关掉', !doc.querySelector('.cg-root'));
 }
 
 // ---------------------------------------------------------------- 8) 「应用」后落一张成品图

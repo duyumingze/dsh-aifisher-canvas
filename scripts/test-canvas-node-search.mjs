@@ -70,6 +70,7 @@ console.log(JSON.stringify({
     工作流: ranked('工作流'),
     音pin: ranked('音pin'),
     调色: ranked('调色'),
+    超分: ranked('超分'),
     不存在xyz: ranked('不存在xyz'),
     空: ranked(''),
   },
@@ -105,14 +106,24 @@ if (probe.status !== 0) {
 const pure = JSON.parse(probe.stdout.trim().split('\n').pop());
 
 check(
-  '候选目录含 9 种画布节点类型（v1.70 加调色 / Color Grade，v1.71 加转接 / Junction）',
-  pure.catalog.filter((item) => item.id.startsWith('type:')).length === 9,
+  '候选目录含 10 种画布节点类型（v1.70 调色 / v1.71 转接 / v1.100 视频超分）',
+  pure.catalog.filter((item) => item.id.startsWith('type:')).length === 10,
   String(pure.catalog.filter((item) => item.id.startsWith('type:')).length),
 );
 check(
   '候选目录里有「转接」（Junction，v1.71 的划选合并产物）',
   pure.catalog.some((item) => item.id === 'type:Junction'),
   JSON.stringify(pure.catalog.filter((item) => item.id.startsWith('type:')).map((item) => item.id)),
+);
+check(
+  '候选目录里有「视频超分」（v1.100，建出来是预置好的 Video 节点）',
+  pure.catalog.some((item) => item.id === 'type:Video Upscale' && item.type === 'Video Upscale'),
+  JSON.stringify(pure.catalog.filter((item) => item.id.startsWith('type:')).map((item) => item.id)),
+);
+check(
+  '搜「超分」第一名是视频超分节点（Video Upscale）',
+  pure.queries.超分[0] === 'type:Video Upscale',
+  JSON.stringify(pure.queries.超分.slice(0, 3)),
 );
 check(
   '搜「调色」第一名是调色节点（Color Grade）',
@@ -612,6 +623,46 @@ check('未打开时页面上没有搜索面板', !panel());
   check('快捷键说明里能看到「搜索节点」与 Shift + A', helpText.includes('搜索节点') && helpText.includes('Shift + A'));
   shortcuts?.click();
   await settle(150);
+}
+
+// ---------------------------------------------------------------- B3b. 「视频超分」预设（v1.100）
+//
+// 用户 2026-11-21：「现在想要做视频超分节点，接入模型 Topaz-Upscale-LowPirce」。
+// 它不是新的 node.type —— 建节点时下发 `Video Upscale`，vendor 换成普通 Video 并预置
+// （超分模型 + video-edit + 1080p + 标题「视频超分」），生成链路/批次审批/历史全都照旧。
+{
+  window.dispatchEvent(
+    new window.CustomEvent('fisherai:add-canvas-node', {
+      detail: { type: 'Video Upscale', point: { x: 640, y: 320 } },
+    }),
+  );
+  await settle(600);
+  const nodes = await readCanvas();
+  const upscale = nodes.filter((node) => node.title === '视频超分');
+  check(
+    '建「视频超分」→ 落成一个 Video 节点（不是新类型）',
+    upscale.length === 1 && upscale[0].type === 'Video',
+    JSON.stringify(nodes.filter((node) => String(node.type).includes('Video')).map((node) => ({ type: node.type, title: node.title }))),
+  );
+  const savedUpscale = await waitFor(async () => {
+    const node = (await savedNodes()).find((item) => item.id === upscale[0]?.id);
+    return node ?? null;
+  });
+  check(
+    '超分预设预置了 video-edit 模式与目标 1080p',
+    savedUpscale?.videoMode === 'video-edit' && savedUpscale?.resolution === '1080p',
+    JSON.stringify({ videoMode: savedUpscale?.videoMode, resolution: savedUpscale?.resolution }),
+  );
+  check(
+    '存盘里也是 Video + 「视频超分」标题（重开项目还在）',
+    savedUpscale?.type === 'Video' && savedUpscale?.title === '视频超分',
+    JSON.stringify({ type: savedUpscale?.type, title: savedUpscale?.title }),
+  );
+  check(
+    '画布上没有多出「Video Upscale」这种类型（预设在建节点时就换掉了）',
+    !nodes.some((node) => node.type === 'Video Upscale'),
+    JSON.stringify(nodes.map((node) => node.type)),
+  );
 }
 
 // ---------------------------------------------------------------- C. 产物与 vendor 补丁

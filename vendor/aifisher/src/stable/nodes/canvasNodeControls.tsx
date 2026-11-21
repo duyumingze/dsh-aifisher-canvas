@@ -242,7 +242,7 @@ export function CanvasDimensions(
         {preview(ratio, true, disabled)}
         <span className="whitespace-nowrap">
           {ratio} · {resolution}
-          {videoSettings && ` · ${videoSettings.duration}秒`}
+          {videoSettings && videoSettings.duration > 0 && ` · ${videoSettings.duration}秒`}
           {videoSettings?.audio !== undefined && ` · ${videoSettings.audio ? '有声' : '静音'}`}
         </span>
       </button>
@@ -279,7 +279,7 @@ export function CanvasDimensions(
               })}
             </div>
           </div>
-          {videoSettings && (
+          {videoSettings && videoSettings.duration > 0 && (
             <div className="mb-3 space-y-2 px-1">
               <div className="flex justify-between text-xs text-[var(--af-text-secondary)]">
                 <span>生成时长</span>

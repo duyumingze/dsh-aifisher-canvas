@@ -9,14 +9,20 @@
  *   - 合成器里预置三个节点：输入（上游几张图就几个输出口）、输出、预览；
  *   - 一个效果一个节点；
  *   - Shift+T 点节点 → 自动接到预览节点（Blender 的 viewer 手势）。
+ *
+ * v1.101 追加：图层文档（图层拆分的结果）接进来时，输入节点按**一层一个口**展开，
+ * 默认图不再是「每个口都直连输出」（那样只是最后一条赢、既不叠也不对位），
+ * 而是自动铺好「放置 → Alpha 上叠」链（见 createLayerCompositeGraph）。
  */
+import type { LayerStack } from '../layerStack';
 
-/** 节点种类。'input' 的输出口数量跟着上游图片数走，是唯一动态端口。 */
+/** 节点种类。'input' 的输出口数量跟着上游图片/图层数走，是唯一动态端口。 */
 export type CompositorKind =
   | 'input'
   | 'output'
   | 'viewer'
   | 'reroute'
+  | 'place'
   | 'colorBalance'
   | 'whiteBalance'
   | 'curves'
@@ -109,10 +115,75 @@ export interface CompositorGraph {
   scope?: { kind: string; visible: boolean; width: number; height: number };
 }
 
-/** 主画布传进来的上游图片，顺序即输入节点的端口顺序。 */
+/**
+ * 主画布传进来的上游图片，顺序即输入节点**没图层时**的端口顺序。
+ *
+ * `layerStack`（v1.101）：这一路上游是「图层拆分」的结果（一个 PSD 式的图层文档）。
+ * 它会把输入节点的端口展开成**一层一个口**（按 zindex 从下往上），
+ * 每个口带自己的矩形（`x/y/width/height`，文档像素）—— 合成器靠它把图层贴回原位。
+ */
 export interface CompositorInputImage {  nodeId: string;
   url: string;
   title?: string;
+  layerStack?: LayerStack;
+}
+
+/**
+ * 输入节点的一个输出口。
+ *
+ * 没有图层的图片 = 1 个口（整幅）；图层文档 = 一层一个口，带 `rect`（该层在文档里的位置）。
+ * `document` 只有图层文档的口才有，编辑器/引擎拿它当画布尺寸。
+ */
+export interface CompositorInputSlot {
+  nodeId: string;
+  url: string;
+  name?: string;
+  /** 该层在文档里的位置与尺寸（像素）；缺省 = 整幅。 */
+  rect?: { x: number; y: number; width: number; height: number };
+  /** 文档尺寸（图层文档才有）。 */
+  document?: { width: number; height: number };
+  /** 是不是图层文档里的一层（决定要不要自动铺「放置 + 上叠」链）。 */
+  layered: boolean;
+}
+
+/**
+ * 上游图片 → 端口列表（端口序号就是这里的下标）。
+ *
+ * 图层文档按 zindex **从下往上**展开：下标 0 = 底图（最下层）。
+ * 求值链也就是这个顺序：结果 = 上层 over (… over 底图)。
+ */
+export function inputSlots(images: readonly CompositorInputImage[]): CompositorInputSlot[] {
+  const slots: CompositorInputSlot[] = [];
+  for (const image of images) {
+    const stack = image.layerStack;
+    const layers = stack && Array.isArray(stack.layers) ? stack.layers : [];
+    if (stack && layers.length) {
+      const sorted = [...layers].sort((a, b) => (a.zindex ?? 0) - (b.zindex ?? 0));
+      for (const layer of sorted) {
+        slots.push({
+          nodeId: image.nodeId,
+          url: layer.url,
+          ...(layer.name ? { name: layer.name } : {}),
+          rect: { x: layer.x, y: layer.y, width: layer.width, height: layer.height },
+          document: { width: stack.width, height: stack.height },
+          layered: true,
+        });
+      }
+      continue;
+    }
+    slots.push({
+      nodeId: image.nodeId,
+      url: image.url,
+      ...(image.title ? { name: image.title } : {}),
+      layered: false,
+    });
+  }
+  return slots;
+}
+
+/** 端口里有没有图层文档（决定默认图要不要走「放置 + 上叠」链）。 */
+export function slotsHaveLayers(slots: readonly CompositorInputSlot[]): boolean {
+  return slots.some((slot) => slot.layered);
 }
 
 export interface CompositorNodeSpec {
@@ -139,6 +210,21 @@ export const NODE_SPECS: Record<CompositorKind, CompositorNodeSpec> = {
   // 转接点（Blender 的 Reroute）：一路进、一路出，纯整理走向；求值就是原样拷贝上游。
   // 不放进「可删除的固定节点」名单 —— 用户可以像普通节点一样 Delete 它。
   reroute: { label: '转接点', category: '基础', inputs: 1, outputs: 1 },
+  /**
+   * 放置（v1.101）：把一张**裁片**按矩形贴回文档，矩形外一律透明。
+   *
+   * 为什么需要它：图层拆分的每层 PNG 都是「元素区域等比例放大的裁片」，尺寸不等于它在文档里的
+   * 占位（实测 1062×397 的图要贴在 588×220 的框里）。这是个**非等比**缩放，
+   * 现有的「变换」节点只有一个 `scale` 标量，做不了；所以单开一个只做几何放置的节点。
+   * 参数是**归一化**的 x/y/w/h（0..1，相对文档），这样换分辨率不用改图。
+   */
+  place: {
+    label: '放置',
+    category: '基础',
+    inputs: 1,
+    outputs: 1,
+    defaults: { placeX: 0, placeY: 0, placeWidth: 1, placeHeight: 1 },
+  },
 
   // 色彩平衡 = Blender Color Balance 那套四轮调色（用户 2026-10-29 给的参照图）：
   // 暗部 / 中灰 / 亮部 / 偏移 各一个色轮，值就是界面上的数字（0.00 / 1.00 / 25.00 为中性）。
@@ -577,7 +663,7 @@ export function createCompositorMask(masks: readonly CompositorMask[]): Composit
 }
 
 /**
- * 默认图：输入 → 输出，输入 → 预览。
+ * 默认图（普通多图）：输入 → 输出，输入 → 预览。
  * 输入节点的输出口数量由 upstream 图片数决定，节点本身只有一张卡片。
  */
 export function createDefaultGraph(inputCount: number): CompositorGraph {
@@ -612,7 +698,163 @@ export function createDefaultGraph(inputCount: number): CompositorGraph {
   return { version: 1, nodes: [inputNode, outputNode, viewerNode], edges, masks: [] };
 }
 
-/** 兼容性修补：老图 / 外部写入的图进编辑器前先过一遍。 */export function normalizeGraph(value: unknown, inputCount: number): CompositorGraph {
+/**
+ * 默认图（图层文档，v1.101）：输入 → 放置 → Alpha 上叠 … → 输出 + 预览。
+ *
+ * 为什么不是「每个口都直连输出」：那样 11 个口接同一个输入口，只有最后一条边生效 ——
+ * 既不叠、也不对位，正是用户 2026-11-21 报的「图层混合方式不对、顺序也不对」。
+ *
+ * 这里按 zindex 从下往上铺链（下标 0 = 底图，整幅文档，不需要放置节点）：
+ *   prev = port(0)
+ *   for i = 1..N-1:  placed_i = place(port(i), rect_i)；prev = alphaOver(top=placed_i, bottom=prev)
+ * 结果接输出与预览。每一层都单独一路上来，用户可以在 `port(i) → place` 之间插效果节点，
+ * 逐层调色后仍然按原位叠加。
+ */
+export function createLayerCompositeGraph(
+  slots: readonly CompositorInputSlot[],
+): CompositorGraph {
+  if (!slots.length) return createDefaultGraph(1);
+  const inputNode: CompositorNode = {
+    id: 'input',
+    kind: 'input',
+    x: 60,
+    y: 280,
+    params: {},
+    title: '输入图像',
+  };
+  const nodes: CompositorNode[] = [inputNode];
+  const edges: CompositorEdge[] = [];
+  const document = slots.find((slot) => slot.document)?.document;
+  const docWidth = document?.width ?? 0;
+  const docHeight = document?.height ?? 0;
+  /** 每列最多排几层，免得十几层一路竖着排到屏幕外。 */
+  const ROWS_PER_COLUMN = 3;
+  /** 链路当前的末端（下一层的 alphaOver 要把它接在 1 号「底下」口）。 */
+  let previous = '';
+  let previousPort = 0;
+  let column = 0;
+  let row = 0;
+  for (let index = 0; index < slots.length; index += 1) {
+    const slot = slots[index];
+    let source = 'input';
+    let sourcePort = index;
+    const rect = slot.layered ? slot.rect : undefined;
+    /** 整幅文档的图层（典型：底图 zindex 0）不需要放置节点 —— 它就是原样铺满。 */
+    const coversDocument =
+      !!rect &&
+      rect.x === 0 &&
+      rect.y === 0 &&
+      rect.width >= docWidth &&
+      rect.height >= docHeight;
+    if (rect && docWidth > 0 && docHeight > 0 && !coversDocument) {
+      const placeNode: CompositorNode = {
+        id: `place-${index}`,
+        kind: 'place',
+        x: 320 + column * 520,
+        y: 120 + row * 190,
+        params: {
+          placeX: rect.x / docWidth,
+          // bbox 是「左上角原点」的像素坐标，而 shader 的 v_uv 是「左下角原点」，
+          // 所以 y 要翻一次：y_bottom = 1 - (y + height) / H。
+          placeY: 1 - (rect.y + rect.height) / docHeight,
+          placeWidth: rect.width / docWidth,
+          placeHeight: rect.height / docHeight,
+        },
+        title: `放置 · ${slot.name ?? `图层 ${index}`}`,
+      };
+      nodes.push(placeNode);
+      edges.push({
+        id: edgeId('input', index, placeNode.id, 0),
+        fromNode: 'input',
+        fromPort: index,
+        toNode: placeNode.id,
+        toPort: 0,
+      });
+      source = placeNode.id;
+      sourcePort = 0;
+    }
+    // 底图（下标 0）就是链路起点，不套上叠 —— 「over 一个空」会多出一个没底的口。
+    if (index === 0) {
+      previous = source;
+      previousPort = sourcePort;
+      row += 1;
+      continue;
+    }
+    const overNode: CompositorNode = {
+      id: `alpha-${index}`,
+      kind: 'alphaOver',
+      x: 580 + column * 520,
+      y: 120 + row * 190,
+      params: { factor: 1 },
+      title: `上叠 · ${slot.name ?? `图层 ${index}`}`,
+    };
+    nodes.push(overNode);
+    // alphaOver：0 口 = 上面那层，1 口 = 底下已经合成好的结果
+    edges.push({
+      id: edgeId(source, sourcePort, overNode.id, 0),
+      fromNode: source,
+      fromPort: sourcePort,
+      toNode: overNode.id,
+      toPort: 0,
+    });
+    edges.push({
+      id: edgeId(previous, previousPort, overNode.id, 1),
+      fromNode: previous,
+      fromPort: previousPort,
+      toNode: overNode.id,
+      toPort: 1,
+    });
+    previous = overNode.id;
+    previousPort = 0;
+    row += 1;
+    if (row >= ROWS_PER_COLUMN) {
+      row = 0;
+      column += 1;
+    }
+  }
+  const outputNode: CompositorNode = {
+    id: 'output',
+    kind: 'output',
+    x: 580 + (column + 1) * 520,
+    y: 120,
+    params: {},
+  };
+  const viewerNode: CompositorNode = {
+    id: 'viewer',
+    kind: 'viewer',
+    x: 580 + (column + 1) * 520,
+    y: 360,
+    params: {},
+  };
+  nodes.push(outputNode, viewerNode);
+  edges.push({
+    id: edgeId(previous, previousPort, 'output', 0),
+    fromNode: previous,
+    fromPort: previousPort,
+    toNode: 'output',
+    toPort: 0,
+  });
+  edges.push({
+    id: edgeId(previous, previousPort, 'viewer', 0),
+    fromNode: previous,
+    fromPort: previousPort,
+    toNode: 'viewer',
+    toPort: 0,
+  });
+  return { version: 1, nodes, edges, masks: [] };
+}
+
+/**
+ * 兼容性修补：老图 / 外部写入的图进编辑器前先过一遍。
+ *
+ * `slots`（v1.101，可选）：上游端口列表。给了并且里面有图层文档时，**没有存图**的老节点
+ * 会铺「放置 + 上叠」链而不是「每口直连输出」—— 后者在图层场景里就是用户报的错位叠法。
+ */
+export function normalizeGraph(
+  value: unknown,
+  inputCount: number,
+  slots?: readonly CompositorInputSlot[],
+): CompositorGraph {
   const record = (value: unknown): Record<string, unknown> =>
     value && typeof value === 'object' && !Array.isArray(value)
       ? (value as Record<string, unknown>)
@@ -635,7 +877,10 @@ export function createDefaultGraph(inputCount: number): CompositorGraph {
       title: typeof item.title === 'string' ? item.title : undefined,
     });
   }
-  if (!nodes.length) return createDefaultGraph(inputCount);
+  if (!nodes.length)
+    return slots && slotsHaveLayers(slots)
+      ? createLayerCompositeGraph(slots)
+      : createDefaultGraph(inputCount);
   const ids = new Set(nodes.map((node) => node.id));
   const edges: CompositorEdge[] = [];
   for (const raw of Array.isArray(source.edges) ? source.edges : []) {

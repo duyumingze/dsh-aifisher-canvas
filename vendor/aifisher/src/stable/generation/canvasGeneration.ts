@@ -223,8 +223,12 @@ export function createCanvasGeneration(
           node.type === 'Video' &&
           text(node.videoModel).startsWith('kling-') &&
           (node.parentIds?.length ?? 0) >= 2;
+        // dsh-aifisher-canvas v1.100：视频超分模型只处理源视频，空提示词不是错误
+        const promptOptional =
+          (node.type === 'Video' || node.type === 'Image') &&
+          (model as unknown as { promptOptional?: boolean } | undefined)?.promptOptional === true;
         if (
-          (!prompt && !lyrics && !stems && !klingFrames) ||
+          (!prompt && !promptOptional && !lyrics && !stems && !klingFrames) ||
           (lyrics && !text(node.lyrics).trim()) ||
           (stems && !text(node.task_id).trim())
         ) {
@@ -297,8 +301,15 @@ export function createCanvasGeneration(
             if (!owns()) return;
             const current = binding.getNodes().find((candidate) => candidate.id === id)!;
             const history = mergeImageResultHistory({ resultUrl: current.resultUrl, resultUrls: current.resultUrls }, urls);
+            // dsh-aifisher-canvas v1.101：图层拆分的几何（generationClient 暂存的那份）
+            const layerResults = (
+              window as unknown as { __FISHERAI_LAYER_RESULTS__?: Map<string, unknown> }
+            ).__FISHERAI_LAYER_RESULTS__;
+            const layerStack = layerResults?.get(id);
+            if (layerStack) layerResults!.delete(id);
             patch = {
               ...history,
+              ...(layerStack ? { layerStack } : {}),
               ...('resultAspectRatio' in metadata
                 ? { resultAspectRatio: metadata.resultAspectRatio }
                 : {}),
