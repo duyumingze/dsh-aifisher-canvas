@@ -954,8 +954,12 @@ function scopeChartPng() {
  *
  * `scopeChartPng` 给的是 RGB（无透明通道），而图层拆分的关键正是**透明**：
  * 每一层只在它自己的矩形里有像素、矩形外全透明。所以这里单独写一个 8bit RGBA（color type 6）。
+ *
+ * v1.106：第三个参数也可以传 `(x, y) => [r,g,b,a]` —— α 遮罩口那一场要一张
+ * 左半不透明、右半全透明的图。
  */
-function solidRgbaPng(width, height, [r, g, b, a]) {
+function solidRgbaPng(width, height, color) {
+  const pixelAt = typeof color === 'function' ? color : () => color;
   const crcTable = Array.from({ length: 256 }, (_, index) => {
     let value = index;
     for (let bit = 0; bit < 8; bit += 1)
@@ -981,6 +985,7 @@ function solidRgbaPng(width, height, [r, g, b, a]) {
     const row = y * stride;
     raw[row] = 0; // filter: none
     for (let x = 0; x < width; x += 1) {
+      const [r, g, b, a] = pixelAt(x, y);
       raw[row + 1 + x * 4] = r;
       raw[row + 2 + x * 4] = g;
       raw[row + 3 + x * 4] = b;
@@ -1095,6 +1100,71 @@ const layerDocProjectId = 'browser-layer-doc-proj';
     ),
   );
   console.log(`[browser] 预置图层文档项目 ${layerDocProjectId}（3 层 → 调色）→ ${saved.status}`);
+}
+
+/**
+ * α 遮罩口场景（v1.106，?xcompositor=alpha）的种子项目。
+ *
+ * 用户 2026-11-22：「加上阿尔法透明输出端口。输出来的是遮罩图」。
+ * 素材刻意做成「左半红色 alpha=200 / 右半全透明」：
+ *   · 彩色口接预览 → 左半是**红**（255,0,0）；
+ *   · α 口接预览 → 左半必须变成**灰**（≈200,200,200，即透明程度），右半两边都是黑。
+ * 只读像素就能证明 α 口真的是「透明通道做成的黑白遮罩」，不是把原图原样递过去。
+ */
+const alphaChanProjectId = 'browser-compositor-alpha-proj';
+{
+  const dir = join(fakeHome, 'storages', 'dsh-aifisher-canvas', 'media', alphaChanProjectId, 'images');
+  mkdirSync(dir, { recursive: true });
+  // 320×180：左半 (255,0,0,200)，右半 (0,0,0,0)
+  writeFileSync(
+    join(dir, 'alpha-split.png'),
+    solidRgbaPng(320, 180, (x) => (x < 160 ? [255, 0, 0, 200] : [0, 0, 0, 0])),
+  );
+  const alphaUrl = `/api/aifisher/canvas/media/${alphaChanProjectId}/images/alpha-split.png`;
+  const saved = await dispatchApi(
+    'POST',
+    new URL('/api/aifisher/canvas/workflows', ORIGIN),
+    Buffer.from(
+      JSON.stringify({
+        id: alphaChanProjectId,
+        revision: 0,
+        title: 'α 遮罩口真机验证',
+        nodes: [
+          {
+            id: 'alpha-src',
+            type: 'Image',
+            x: 80,
+            y: 260,
+            title: '半透明素材',
+            status: 'success',
+            model: 'Upload',
+            resultUrl: alphaUrl,
+            resultUrls: [alphaUrl],
+            resultAspectRatio: '320/180',
+            aspectRatio: '16:9',
+            parentIds: [],
+            projectId: alphaChanProjectId,
+            width: 320,
+            height: 180,
+          },
+          {
+            id: 'alpha-grade',
+            type: 'Color Grade',
+            x: 540,
+            y: 260,
+            title: 'α 调色',
+            status: 'idle',
+            parentIds: ['alpha-src'],
+            projectId: alphaChanProjectId,
+          },
+        ],
+        groups: [],
+        viewport: { x: 0, y: 0, zoom: 1 },
+      }),
+      'utf8',
+    ),
+  );
+  console.log(`[browser] 预置 α 遮罩口项目 ${alphaChanProjectId}（半透明素材 → 调色）→ ${saved.status}`);
 }
 
 /**
@@ -1880,6 +1950,30 @@ const HOST_PAGE = `<!doctype html>
         label: location.search || 'default',
         resourceEntry,
         /**
+         * v1.107 手势降载（性能 P0）：打上 data-canvas-gesture 读一次 computedStyle、摘掉再读一次。
+         * 全程同步（headless 的虚拟时间预算下不能 await），只碰两三个元素，很便宜。
+         * 断言在 Node 侧（有玻璃面板的场景才判，dashboard 这类没有头部的场景自动跳过）。
+         */
+        gesture: (() => {
+          if (!mount) return null;
+          const glass =
+            mount.querySelector('.af-canvas-header') || mount.querySelector("[class*='backdrop-blur']");
+          const highlight = mount.querySelector(
+            "[data-canvas-grid='true'] .canvas-grid-cross.is-highlight",
+          );
+          const read = () => ({
+            blur: glass ? String(getComputedStyle(glass).backdropFilter ?? '') : '',
+            shadow: glass ? String(getComputedStyle(glass).boxShadow ?? '') : '',
+            highlight: highlight ? getComputedStyle(highlight).visibility : '',
+          });
+          const before = read();
+          mount.setAttribute('data-canvas-gesture', 'zoom');
+          const during = read();
+          mount.removeAttribute('data-canvas-gesture');
+          const after = read();
+          return { hasGlass: !!glass, hasHighlight: !!highlight, before, during, after };
+        })(),
+        /**
          * 画布首屏（v1.85）：打开画布不再停在 vendor 旧看板，而是直接进页面层项目库。
          * 看板仍在底下（当「没有项目」的占位），但被 html.afg-page-open 规则藏起来。
          */
@@ -1973,6 +2067,8 @@ const HOST_PAGE = `<!doctype html>
         compositorFactor: compositorFactorSteps,
         /** v1.101：图层文档（一层一个口 + 按 bbox 放置 + 上叠）的像素口径（?xcompositor=layers） */
         compositorLayers: compositorLayersSteps,
+        /** v1.106：输入节点的 α 遮罩口（?xcompositor=alpha 场景，见 buildCompositorAlphaScene） */
+        compositorAlpha: compositorAlphaSteps,
         /** v1.94：遮罩（Blender 样条；?xcompositor=mask 场景，见 buildCompositorMaskScene） */
         compositorMask: compositorMaskSteps,
       };
@@ -6849,6 +6945,104 @@ const HOST_PAGE = `<!doctype html>
     };
 
     /**
+     * α 遮罩口（v1.106，?xcompositor=alpha）：用户 2026-11-22
+     * 「加上阿尔法透明输出端口。输出来的是遮罩图」。
+     *
+     * 素材是「左半红色 alpha=200 / 右半全透明」的一张图：
+     *   · 默认彩色口接预览 → 左半是红 (255,0,0)；
+     *   · 把 α 口拖到预览 → 左半必须变成灰 (≈200)，右半黑。
+     * 顺带取输入节点的端口结构（1 张图 = 1 彩色口 + 1 α 口）。
+     * 坐标注意：readPixels 原点在左下，fy=0.5 就是画面中线。
+     */
+    const compositorAlphaScene =
+      new URLSearchParams(location.search).get('xcompositor') === 'alpha';
+    const compositorAlphaSteps = {
+      opened: false,
+      colorPorts: 0,
+      alphaPorts: 0,
+      portTitles: '',
+      colorLeft: null,
+      maskLeft: null,
+      maskRight: null,
+      edgeTo: '',
+      error: '',
+      done: false,
+    };
+    const buildCompositorAlphaScene = async () => {
+      if (!compositorAlphaScene) return;
+      try {
+        applyDshDesktopEmulation();
+        await until(() => document.querySelector('[data-fisherai-open-compositor]'), 20000);
+        await wait(400);
+        document
+          .querySelector('[data-fisherai-open-compositor]')
+          .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+        await until(() => document.querySelector('.cg-root'), 8000);
+        await wait(1400);
+        const root = document.querySelector('.cg-root');
+        compositorAlphaSteps.opened = true;
+        const cardOf = (title) =>
+          [...root.querySelectorAll('.cg-node')].find(
+            (card) => card.querySelector('.cg-node-title')?.textContent?.trim() === title,
+          );
+        const inputCard = cardOf('输入图像');
+        const outs = [...(inputCard?.querySelectorAll('.cg-port.cg-out') ?? [])];
+        compositorAlphaSteps.colorPorts = outs.filter((port) => port.dataset.alpha !== 'true').length;
+        compositorAlphaSteps.alphaPorts = outs.filter((port) => port.dataset.alpha === 'true').length;
+        compositorAlphaSteps.portTitles = outs.map((port) => port.title).join(' | ');
+
+        const canvas = root.querySelector('.cg-preview-canvas');
+        const gl = canvas?.getContext('webgl2');
+        const sample = (fx, fy) => {
+          if (!canvas || !gl) return null;
+          const pixel = new Uint8Array(4);
+          const x = Math.min(canvas.width - 1, Math.max(0, Math.round(canvas.width * fx)));
+          const y = Math.min(canvas.height - 1, Math.max(0, Math.round(canvas.height * fy)));
+          gl.readPixels(x, y, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+          return [pixel[0], pixel[1], pixel[2]];
+        };
+        compositorAlphaSteps.colorLeft = sample(0.25, 0.5);
+
+        const alphaPort = outs.find((port) => port.dataset.alpha === 'true');
+        const viewerIn = cardOf('预览')?.querySelector('.cg-port.cg-in');
+        if (alphaPort && viewerIn) {
+          const fromBox = alphaPort.getBoundingClientRect();
+          const toBox = viewerIn.getBoundingClientRect();
+          const at = {
+            clientX: fromBox.left + fromBox.width / 2,
+            clientY: fromBox.top + fromBox.height / 2,
+          };
+          const to = { clientX: toBox.left + toBox.width / 2, clientY: toBox.top + toBox.height / 2 };
+          alphaPort.dispatchEvent(
+            new PointerEvent('pointerdown', {
+              button: 0,
+              buttons: 1,
+              ...at,
+              pointerId: 201,
+              pointerType: 'mouse',
+              isPrimary: true,
+              bubbles: true,
+              cancelable: true,
+            }),
+          );
+          window.dispatchEvent(new PointerEvent('pointermove', { buttons: 1, ...to, bubbles: true }));
+          window.dispatchEvent(new PointerEvent('pointerup', { button: 0, buttons: 0, ...to, bubbles: true }));
+          await wait(900);
+          const report = window.__FISHERAI_COMPOSITOR__?.report?.() ?? {};
+          compositorAlphaSteps.edgeTo = (report.edges ?? [])
+            .filter((edge) => edge.from === 'input' && edge.fromPort === 1)
+            .map((edge) => edge.to)
+            .join(',');
+          compositorAlphaSteps.maskLeft = sample(0.25, 0.5);
+          compositorAlphaSteps.maskRight = sample(0.75, 0.5);
+        }
+      } catch (error) {
+        compositorAlphaSteps.error = String((error && error.stack) || error);
+      }
+      compositorAlphaSteps.done = true;
+    };
+
+    /**
      * 遮罩（v1.94，?xcompositor=mask）：用户 2026-11-11 原话
      * 「在调色面板做绘制功能。我需要遮罩功能，但是要用混合节点来实现，接入黑白遮罩图像来实现。
      *  参考 blender 的遮罩操作方式。」
@@ -7322,6 +7516,7 @@ const HOST_PAGE = `<!doctype html>
     void buildCompositorMixScene();
     void buildCompositorFactorScene();
     void buildCompositorLayersScene();
+    void buildCompositorAlphaScene();
     void buildCompositorMaskScene();
   </script>
 </body>
@@ -7828,6 +8023,12 @@ const SCENES = [
   ['compositor-layers', `${ORIGIN}/?resume=${layerDocProjectId}&xcompositor=layers`, `?resume=${layerDocProjectId}&xcompositor=layers`,
     (probe) => probe.compositorLayers?.done === true, 32000],
   /**
+   * α 遮罩口（v1.106）：用户 2026-11-22「加上阿尔法透明输出端口。输出来的是遮罩图」。
+   * 半透明素材上把 α 口拖到预览，读像素：红色原图 → 灰色遮罩。
+   */
+  ['compositor-alpha', `${ORIGIN}/?resume=${alphaChanProjectId}&xcompositor=alpha`, `?resume=${alphaChanProjectId}&xcompositor=alpha`,
+    (probe) => probe.compositorAlpha?.done === true, 32000],
+  /**
    * 遮罩（v1.94）：用户 2026-11-11「在调色面板做绘制功能。我需要遮罩功能，
    * 但是要用混合节点来实现，接入黑白遮罩图像来实现。参考 blender 的遮罩操作方式」。
    * 场景：建「遮罩」→ 开编辑大画布 → 点四个控制点围出一块 → 完成（卡片预览有白块）
@@ -7876,6 +8077,29 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
   if ((probe.errors ?? []).length > 0) {
     browserFailures += 1;
     console.log(`[browser] FAIL  ${label}: 画布运行时错误 ${JSON.stringify(probe.errors)}`);
+  }
+
+  // v1.107：手势降载（性能 P0）—— 真浏览器里确认「手势期间玻璃模糊/大阴影真的没了、点阵提亮层不画，
+  // 摘掉属性后原样恢复」。只在有玻璃面板的场景判（dashboard 之类没有头部，自动跳过）。
+  const gesture = probe.gesture;
+  if (gesture && gesture.hasGlass && gesture.before.blur && gesture.before.blur !== 'none') {
+    const gestureOk =
+      gesture.during.blur === 'none' &&
+      gesture.during.shadow === 'none' &&
+      gesture.after.blur === gesture.before.blur;
+    if (!gestureOk) browserFailures += 1;
+    console.log(
+      `[browser] ${gestureOk ? 'PASS' : 'FAIL'}  ${label}: 手势降载（blur/shadow → none，停手恢复）  ` +
+        `[before=${gesture.before.blur} during=${gesture.during.blur} after=${gesture.after.blur}]`,
+    );
+    if (gesture.hasHighlight) {
+      const highlightOk = gesture.during.highlight === 'hidden' && gesture.after.highlight !== 'hidden';
+      if (!highlightOk) browserFailures += 1;
+      console.log(
+        `[browser] ${highlightOk ? 'PASS' : 'FAIL'}  ${label}: 手势期间点阵提亮层不画（visibility: hidden）  ` +
+          `[during=${gesture.during.highlight} after=${gesture.after.highlight}]`,
+      );
+    }
   }
 
   // v1.15：看板头部那两个站外入口（用户「移除这两个功能」）—— 真浏览器里再确认一遍。
@@ -9699,6 +9923,46 @@ for (const [label, url, probeKey, probeReady, budgetMs, scale] of onlyScenes.len
         near(scene.emptyTopRight, [20, 60, 120]), JSON.stringify(scene.emptyTopRight));
       report('左下空白处仍是底图蓝',
         near(scene.emptyBottomLeft, [20, 60, 120]), JSON.stringify(scene.emptyBottomLeft));
+    } else {
+      console.log(`[browser] SKIP  ${label}: 这个 headless 环境读不到预览像素`);
+    }
+  }
+
+  /**
+   * α 遮罩口（?xcompositor=alpha，v1.106）：用户 2026-11-22
+   * 「加上阿尔法透明输出端口。输出来的是遮罩图」。
+   *
+   * 半透明素材（左半红 alpha=200 / 右半全透明）：彩色口直通时左半是红；
+   * 把 α 口接进预览后左半必须变成灰（透明程度），右半黑。
+   */
+  if (label === 'compositor-alpha') {
+    const report = (name, good, extra = '') => {
+      if (!good) browserFailures += 1;
+      console.log(`[browser] ${good ? 'PASS' : 'FAIL'}  ${label}: ${name}${extra ? `  [${extra}]` : ''}`);
+    };
+    const scene = probe.compositorAlpha ?? {};
+    const near = (pixel, rgb, tolerance = 30) =>
+      Array.isArray(pixel) &&
+      rgb.every((value, index) => Math.abs(Number(pixel[index]) - value) <= tolerance);
+    report('α 遮罩口场景跑完了（没有半途报错）', scene.done === true && !scene.error,
+      String(scene.error ?? '').slice(0, 300));
+    report('输入节点同时开出彩色口与 α 口（1 张图 = 2 个输出口）',
+      Number(scene.colorPorts) === 1 && Number(scene.alphaPorts) === 1,
+      `color=${scene.colorPorts} alpha=${scene.alphaPorts} titles=${scene.portTitles}`);
+    report('α 口的提示语写的是「遮罩 … （透明通道）」',
+      /遮罩/.test(String(scene.portTitles)) && /透明通道/.test(String(scene.portTitles)),
+      String(scene.portTitles));
+    report('α 口能拖到预览上（连上了 viewer）',
+      String(scene.edgeTo).split(',').includes('viewer'), String(scene.edgeTo));
+    if (scene.maskLeft) {
+      report('彩色口直通时左半是红（原图原样，没有被动过）',
+        near(scene.colorLeft, [255, 0, 0]), JSON.stringify(scene.colorLeft));
+      report('α 口接到预览后左半变成灰（透明程度做成的遮罩，不是原图）',
+        near(scene.maskLeft, [200, 200, 200], 36) &&
+          Math.abs(Number(scene.maskLeft[0]) - Number(scene.maskLeft[1])) < 12,
+        JSON.stringify(scene.maskLeft));
+      report('全透明的那半边遮罩是黑的',
+        near(scene.maskRight, [0, 0, 0], 26), JSON.stringify(scene.maskRight));
     } else {
       console.log(`[browser] SKIP  ${label}: 这个 headless 环境读不到预览像素`);
     }

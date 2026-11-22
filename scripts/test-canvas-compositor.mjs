@@ -834,10 +834,12 @@ if (button) {
     overlay?.querySelectorAll('.cg-node').length === 3,
     `nodes=${overlay?.querySelectorAll('.cg-node').length ?? 0}`,
   );
+  // v1.106：每张图两路输出（Blender Image 节点的 Color / Alpha 双口）——1 张 = 1 彩色 + 1 α。
   check(
-    '输入节点按上游图片数给输出口（1 张 = 1 个）',
-    overlay?.querySelectorAll('.cg-port.cg-out').length === 1,
-    `outs=${overlay?.querySelectorAll('.cg-port.cg-out').length ?? 0}`,
+    '输入节点按上游图片数给输出口（1 张 = 1 彩色口 + 1 α 口）',
+    overlay?.querySelectorAll('.cg-port.cg-out').length === 2 &&
+      overlay?.querySelectorAll('.cg-port.cg-out[data-alpha="true"]').length === 1,
+    `outs=${overlay?.querySelectorAll('.cg-port.cg-out').length ?? 0} alpha=${overlay?.querySelectorAll('.cg-port.cg-out[data-alpha="true"]').length ?? 0}`,
   );
   check(
     '上方只有一块合成预览画布（遮罩画布是它上面的编辑层，默认隐藏）',

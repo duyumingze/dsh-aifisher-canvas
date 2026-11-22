@@ -50,6 +50,7 @@ export const SUITES = [
   { file: 'scripts/test-canvas-cloud-generation.mjs' },
   { file: 'scripts/test-canvas-ui-services.mjs' },
   { file: 'scripts/test-canvas-grid.mjs' },
+  { file: 'scripts/test-canvas-perf.mjs', note: 'v1.107 手势降载 + 缩略图管线（?w= / POST /media/thumb）' },
   { file: 'scripts/test-canvas-node-search.mjs' },
   { file: 'scripts/test-canvas-stack.mjs' },
   { file: 'scripts/test-canvas-video-history.mjs' },
@@ -59,6 +60,10 @@ export const SUITES = [
   { file: 'scripts/test-canvas-knife.mjs' },
   { file: 'scripts/test-canvas-blender-keys.mjs', note: 'v1.94 主画布 G 抓取移动（X/Y 锁轴）/ X 删除' },
   { file: 'scripts/test-canvas-compositor.mjs', note: 'v1.70 调色节点 + 全屏合成器' },
+  {
+    file: 'scripts/test-canvas-compositor-input.mjs',
+    note: 'v1.106 输入节点缩略图（间距 / 换顺序 / 拉高）+ α 遮罩口 + Shift+Ctrl 手势',
+  },
   { file: 'scripts/test-canvas-reroute.mjs', note: 'v1.71 Shift+右键划选合并' },
   { file: 'scripts/test-canvas-outpaint.mjs' },
   { file: 'scripts/test-canvas-last-model.mjs' },

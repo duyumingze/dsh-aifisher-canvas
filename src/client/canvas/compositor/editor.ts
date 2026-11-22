@@ -18,7 +18,8 @@
  *     用户 2026-10-29「节点属性希望和 blender 一样显示在节点里，而不是在右侧」；
  *   - 新加的节点跟着鼠标走、左键放下（和主画布「新建并移动」一致）—— 用户 2026-10-29
  *     「shift新建节点后节点不会跟随鼠标指针，操作和主画布不一致」；
- *   - Shift+点击节点 = 接到预览，Ctrl+Shift+点击 = 接到输出，Shift+A 添加效果；
+ *   - Shift+点击节点 = 接到预览，Shift+Ctrl+点击 = 接到预览（同一手势两种写法），
+ *     Shift+Ctrl+**右键** = 接到输出，Shift+A 添加效果；
  *   - Shift+右键划过连线 = 同源合并 + 插转接点（和主画布同一套手势，且**任何起手位置
  *     都认**，包括正好压在连线上 —— 以前只认 stage/world 时压线就起不来）。
  *
@@ -62,6 +63,7 @@ import {
 } from './engine';
 import {
   NODE_SPECS,
+  alphaPortOfSlot,
   canInsertIntoEdge,
   chooseApplyTargets,
   connect,
@@ -74,17 +76,23 @@ import {
   inputPortsFor,
   insertNodeIntoEdge,
   inputSlots,
+  inputTotalPortCount,
+  isAlphaInputPort,
   newCompositorId,
   normalizeGraph,
+  normalizeSlotOrder,
   outputPortCount,
   paramsOf,
+  remapInputPorts,
   removeNode,
   resolveNodeOverlaps,
+  slotOfInputPort,
   specOf,
   targetIsRawInput,
   type CompositorEdge,
   type CompositorGraph,
   type CompositorInputImage,
+  type CompositorInputSlot,
   type CompositorKind,
   type CompositorMask,
   type CompositorMaskShape,
@@ -161,6 +169,19 @@ const PORT_SIZE = 12;
 const PORT_HALF = PORT_SIZE / 2;
 const GRID_STEP = 26;
 const SVG_NS = 'http://www.w3.org/2000/svg';
+/**
+ * 输入节点缩略图的行高与行距（v1.106）。
+ *
+ * 用户 2026-11-22：「接入调色节点之后这里输入的图间距大一点，可以解散自由调整」——
+ * 行距 6 → 14，行高提成可拖的参数（`params.rowHeight`，40–260），整体高度跟着变。
+ * 端口位置不写死：layoutPorts 每次按缩略图实测的 offsetTop/offsetHeight 对齐。
+ */
+const ROW_GAP = 14;
+const ROW_HEIGHT_DEFAULT = 96;
+const ROW_HEIGHT_MIN = 40;
+const ROW_HEIGHT_MAX = 260;
+/** α 口长在同一张缩略图上，比彩色口低一点，两个口不会叠在一起。 */
+const ALPHA_PORT_OFFSET = 15;
 /** 划选合并的手势允许的「擦到」半径（屏幕像素）。 */
 const MERGE_HIT_TOLERANCE = 7;
 /** 采一条连线用多少段（命中精度与开销的折中）。 */
@@ -423,6 +444,8 @@ interface PreviewView {
 
 interface Session {
   options: OpenCompositorOptions;
+  /** 上游槽位（图层文档一层一个口）；拖缩略图换顺序就是这个数组在换。 */
+  slots: CompositorInputSlot[];
   graph: CompositorGraph;
   view: { x: number; y: number; scale: number };
   selection: string[];
@@ -508,8 +531,22 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   /**
    * 上游端口（v1.101）：图层文档会展开成「一层一个口」，所以默认图、端口数、缩略图
    * 一律按 `slots` 算，而不是按「几张图」算。
+   *
+   * v1.106 起缩略图还能拖着换顺序：顺序存在输入节点的 `params.order`（新位置 → 旧位置），
+   * 打开时先按它重排一次，再让 normalizeGraph 建图 —— 这样端口号与上次看到的一一对应。
+   * `baseSlots` 留一份「上游原顺序」：撤销换顺序（快照里没有 order 了）时按它排回去。
    */
-  const slots = inputSlots(options.images);
+  const baseSlots = inputSlots(options.images);
+  const slots: CompositorInputSlot[] = [...baseSlots];
+  const storedOrder = normalizeSlotOrder(
+    (options.graph as { nodes?: Array<{ kind?: string; params?: { order?: unknown } }> } | undefined)
+      ?.nodes?.find?.((node) => node?.kind === 'input')?.params?.order,
+    slots.length,
+  );
+  if (storedOrder) {
+    const sorted = storedOrder.map((index) => slots[index]).filter(Boolean);
+    if (sorted.length === slots.length) slots.splice(0, slots.length, ...sorted);
+  }
   const graph = normalizeGraph(options.graph, slots.length, slots);
   const root = document.createElement('div');
   root.className = 'cg-root';
@@ -688,7 +725,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   const hintbar = document.createElement('div');
   hintbar.className = 'cg-hintbar';
   hintbar.textContent =
-    '空白拖=框选 · 中键/空格=平移 · 滚轮=缩放 · A=全选(Alt+A 取消) · Shift+A=添加节点 · 拖节点压线=插入连线 · 双击连线=断开 · Ctrl+右键划过=断开 · Shift+右键划过=合线 · G=移动(X/Y锁轴) · Shift+D=复制并移动 · X/Delete=删除 · Ctrl+Z=撤销';
+    '空白拖=框选 · 中键/空格=平移 · 滚轮=缩放 · A=全选(Alt+A 取消) · Shift+A=添加节点 · 拖节点压线=插入连线 · 双击连线=断开 · Shift+点击=接预览 · Shift+Ctrl+点击=接预览 · Shift+Ctrl+右键=接输出 · Ctrl+右键划过=断开 · Shift+右键划过=合线 · 拖缩略图=换顺序 · G=移动(X/Y锁轴) · Shift+D=复制并移动 · X/Delete=删除 · Ctrl+Z=撤销';
   // 锁轴辅助线：G 之后按 X / Y，画一条贯穿画布的线，锁没锁一眼看得见（Blender 同款）
   const axisGuide = document.createElement('div');
   axisGuide.className = 'cg-axis-guide';
@@ -741,6 +778,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
 
   const session_: Session = {
     options,
+    slots,
     graph,
     view: graph.view
       ? {
@@ -821,7 +859,8 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   const initEngines = (): void => {
     try {
       session_.engine = new CompositorEngine(previewCanvas, session_.graph);
-      session_.engine.setImages(options.images);
+      // 槽位表是编辑器与引擎共用的同一个数组：拖缩略图换顺序后入口号不会错位
+      session_.engine.setSlots(slots);
       session_.engine.onInvalidate = () => schedule();
     } catch (error) {
       session_.toast(error instanceof CompositorEngineError ? error.message : String(error), true);
@@ -1124,8 +1163,17 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   const portTopFallback = (kind: CompositorKind, side: 'in' | 'out', index: number): number => {
     // 转接点只有一个小圆点，端口摆在竖直正中
     if (kind === 'reroute') return REROUTE_HEIGHT / 2 - PORT_HALF;
-    // 输入节点：每张缩略图一个输出口（真位置由 layoutPorts 实测覆盖，这里只兜底）
-    if (kind === 'input') return HEADER_HEIGHT + 9 + 48 - PORT_HALF + index * 102;
+    // 输入节点：每张缩略图一个彩色口 + 一个 α 口（真位置由 layoutPorts 实测覆盖，这里只兜底）
+    if (kind === 'input') {
+      const row = HEADER_HEIGHT + 9 + ROW_HEIGHT_DEFAULT / 2 - PORT_HALF;
+      const pitch = ROW_HEIGHT_DEFAULT + ROW_GAP;
+      const colorCount = Math.max(1, slots.length);
+      if (index >= colorCount) {
+        const slot = index - colorCount;
+        return row + ALPHA_PORT_OFFSET + slot * pitch;
+      }
+      return row + index * pitch;
+    }
     const spec = specOf(kind);
     const count = side === 'in' ? spec.inputs : spec.outputs;
     // 单口：落在标题栏竖直正中（方案 C 的端口就长在标题栏上）
@@ -1138,6 +1186,208 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     `${nodeId}:${side}:${index}`;
   /** 端口在节点内的 top。输入节点的输出口按缩略图实测位置对齐。 */
   const portTops = new Map<string, number>();
+
+  /** 输入节点缩略图的行高（用户拖着改，存在 params.rowHeight；越界钳回来）。 */
+  const rowHeightOf = (node: CompositorNode): number => {
+    const value = Number((node.params || {}).rowHeight);
+    return Number.isFinite(value)
+      ? clamp(Math.round(value), ROW_HEIGHT_MIN, ROW_HEIGHT_MAX)
+      : ROW_HEIGHT_DEFAULT;
+  };
+
+  /**
+   * 槽位顺序以 `params.order` 为准（新位置 → 建图时的槽位下标）。
+   *
+   * 撤销/重做会把整份图换回来（包括这个数组），所以 `slots` 必须跟着它重排一次，
+   * 否则「撤回一次换顺序」之后端口号与屏幕上的缩略图会错开。
+   */
+  const syncSlotsFromGraph = (): void => {
+    const inputNode = session_.graph.nodes.find((node) => node.kind === 'input');
+    const order = normalizeSlotOrder(inputNode?.params?.order, baseSlots.length);
+    // 快照里没有 order（撤销回到「没换过顺序」那一版）→ 按上游原顺序排回去
+    const target = order
+      ? order.map((index) => baseSlots[index]).filter(Boolean)
+      : [...baseSlots];
+    if (target.length !== slots.length) return;
+    if (target.every((slot, index) => slot === slots[index])) return;
+    slots.splice(0, slots.length, ...target);
+    session_.engine?.setSlots(slots);
+    session_.engine?.invalidate();
+  };
+
+  /** 输入节点行高复位（右下角手柄双击）。 */
+  const resetRowHeight = (nodeId: string): void => {
+    const node = session_.graph.nodes.find((item) => item.id === nodeId);
+    if (!node) return;
+    const before = cloneHistorySnapshot();
+    node.params = { ...node.params, rowHeight: ROW_HEIGHT_DEFAULT };
+    session_.edited = true;
+    commitHistory(before);
+    renderNodes();
+    renderEdges();
+    schedule();
+  };
+
+  /**
+   * 拖缩略图换顺序（用户 2026-11-22：「缩略图可拖拽排序」）。
+   *
+   * 换顺序换的是「哪张图占哪个端口位」，所以连线必须跟着**图**走（remapInputPorts）——
+   * 否则只是上下挪了一下缩略图，「放置 · 图层 3」那条链就接到别的图上去了。
+   */
+  const commitSlotOrder = (from: number, to: number, before: GraphSnapshot): void => {
+    const count = slots.length;
+    if (from === to || from < 0 || to < 0 || from >= count || to >= count) return;
+    const inputNode = session_.graph.nodes.find((node) => node.kind === 'input');
+    if (!inputNode) return;
+    // perm[新位置] = 旧位置
+    const perm = slots.map((_, index) => index);
+    const [moved] = perm.splice(from, 1);
+    perm.splice(to, 0, moved);
+    // 存下来的顺序要按「上游原顺序的下标」记，重新打开时才对得上
+    const stored = slots.map((slot) => {
+      const index = baseSlots.indexOf(slot);
+      return index >= 0 ? index : 0;
+    });
+    const nextStored = perm.map((oldPosition) => stored[oldPosition]);
+    session_.graph = {
+      ...session_.graph,
+      nodes: session_.graph.nodes.map((node) =>
+        node.id === inputNode.id
+          ? { ...node, params: { ...node.params, order: nextStored } }
+          : node,
+      ),
+      edges: remapInputPorts(session_.graph.edges, perm, count),
+    };
+    session_.edited = true;
+    commitHistory(before);
+    syncSlotsFromGraph();
+    renderNodes();
+    renderEdges();
+    schedule();
+    session_.toast(`第 ${from + 1} 张挪到第 ${to + 1} 位`);
+  };
+
+  const beginSlotDrag = (nodeId: string, fromIndex: number, event: PointerEvent): void => {
+    if (fromIndex < 0 || fromIndex >= slots.length) return;
+    const node = session_.graph.nodes.find((item) => item.id === nodeId);
+    const element = nodeElement(nodeId);
+    if (!node || !element) return;
+    const thumbs = Array.from(element.querySelectorAll<HTMLElement>('.cg-thumb'));
+    const dragged = thumbs[fromIndex];
+    if (!dragged) return;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const before = cloneHistorySnapshot();
+    const step = Math.max(
+      24,
+      (dragged.getBoundingClientRect().height || rowHeightOf(node)) + ROW_GAP,
+    );
+    let moved = false;
+    let handedOff = false;
+    let target = fromIndex;
+    const paintTarget = (): void => {
+      thumbs.forEach((thumb, index) => {
+        thumb.classList.toggle('cg-thumb-drop', index === target && index !== fromIndex);
+      });
+    };
+    /**
+     * 横着拖 = 想把整张卡片搬走。
+     *
+     * 缩略图几乎铺满卡片，如果竖着横着都只认「换顺序」，用户就再也拖不动这张卡了；
+     * 所以第一次真正移动时按方向分工：横着 → 交给节点拖动，竖着 → 换顺序。
+     */
+    const handOffToNodeDrag = (): void => {
+      handedOff = true;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish, true);
+      dragged.classList.remove('cg-thumb-dragging');
+      thumbs.forEach((thumb) => thumb.classList.remove('cg-thumb-drop'));
+      const positions = new Map<string, { x: number; y: number }>();
+      for (const id of session_.selection) {
+        const item = session_.graph.nodes.find((entry) => entry.id === id);
+        if (item) positions.set(id, { x: item.x, y: item.y });
+      }
+      session_.nodeDrag = {
+        id: nodeId,
+        clientX: startX,
+        clientY: startY,
+        positions,
+        before,
+      };
+    };
+    const move = (moveEvent: PointerEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      if (!moved) {
+        if (Math.abs(dx) >= 4 && Math.abs(dx) > Math.abs(dy)) {
+          handOffToNodeDrag();
+          return;
+        }
+        if (Math.abs(dy) < 4) return;
+        moved = true;
+        dragged.classList.add('cg-thumb-dragging');
+      }
+      const delta = Math.round(dy / step);
+      const next = clamp(fromIndex + delta, 0, slots.length - 1);
+      if (next !== target) {
+        target = next;
+        paintTarget();
+      }
+    };
+    const finish = (): void => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish, true);
+      dragged.classList.remove('cg-thumb-dragging');
+      thumbs.forEach((thumb) => thumb.classList.remove('cg-thumb-drop'));
+      if (handedOff || !moved || target === fromIndex) return;
+      commitSlotOrder(fromIndex, target, before);
+    };
+    paintTarget();
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish, true);
+  };
+
+  /** 右下角手柄：上下拖动改缩略图行高（节点总高、端口位置一起跟着动）。 */
+  const beginRowResize = (nodeId: string, event: PointerEvent): void => {
+    const node = session_.graph.nodes.find((item) => item.id === nodeId);
+    const element = nodeElement(nodeId);
+    if (!node || !element) return;
+    const thumbs = Array.from(element.querySelectorAll<HTMLElement>('.cg-thumb'));
+    const startY = event.clientY;
+    const startHeight = rowHeightOf(node);
+    const before = cloneHistorySnapshot();
+    let height = startHeight;
+    let moved = false;
+    const apply = (): void => {
+      for (const thumb of thumbs) thumb.style.height = `${height}px`;
+      node.params = { ...node.params, rowHeight: height };
+      layoutPorts();
+      renderEdges();
+    };
+    const move = (moveEvent: PointerEvent) => {
+      if (!moved && Math.abs(moveEvent.clientY - startY) < 3) return;
+      moved = true;
+      height = clamp(
+        Math.round(startHeight + (moveEvent.clientY - startY)),
+        ROW_HEIGHT_MIN,
+        ROW_HEIGHT_MAX,
+      );
+      apply();
+    };
+    const finish = (): void => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish, true);
+      if (!moved || height === startHeight) return;
+      session_.edited = true;
+      commitHistory(before);
+      renderNodes();
+      renderEdges();
+      schedule();
+      session_.toast(`缩略图高度 ${height}px`);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish, true);
+  };
 
   const createNodeElement = (node: CompositorNode): HTMLElement => {
     const spec = specOf(node.kind);
@@ -1188,16 +1438,21 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
           empty.textContent = '主画布上没有接图像';
           body.append(empty);
         } else {
-          // 一个端口一张缩略图：图层文档就是一层一张（顺序 = 端口序号 = zindex 从下往上）
-          for (const slot of slots) {
+          // 一个端口一张缩略图：图层文档就是一层一张（顺序 = 端口序号 = zindex 从下往上）。
+          // v1.106：行高来自 params.rowHeight（节点右下角可拖），缩略图还能拖着换顺序。
+          const rowHeight = rowHeightOf(node);
+          body.classList.add('cg-node-body-input');
+          slots.forEach((slot, index) => {
             const thumb = document.createElement('img');
             thumb.className = 'cg-thumb';
             thumb.src = slot.url;
             thumb.alt = slot.name || '输入图像';
-            thumb.title = slot.name || '输入图像';
+            thumb.title = `${slot.name || '输入图像'} · 拖动可换顺序`;
             thumb.draggable = false;
+            thumb.dataset.slotIndex = String(index);
+            thumb.style.height = `${rowHeight}px`;
             body.append(thumb);
-          }
+          });
         }
       } else if (node.kind === 'output') {
         body.textContent = '合成结果写回调色节点';
@@ -1227,20 +1482,53 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       }
       element.append(port);
     }
-    const outputs = outputPortCount(node.kind, slots.length);
+    const outputs =
+      node.kind === 'input'
+        ? inputTotalPortCount(slots.length)
+        : outputPortCount(node.kind, slots.length);
     for (let index = 0; index < outputs; index += 1) {
       const port = document.createElement('div');
-      port.className = 'cg-port cg-out';
+      const alpha = node.kind === 'input' && isAlphaInputPort(index, slots.length);
+      // α 口是同一张图的第二路输出（Blender Image 节点的 Alpha 口），用虚线边区分开
+      port.className = alpha ? 'cg-port cg-out cg-alpha' : 'cg-port cg-out';
       port.dataset.port = String(index);
       port.dataset.side = 'out';
+      if (alpha) port.dataset.alpha = 'true';
       port.style.top = `${portTopFallback(node.kind, 'out', index)}px`;
-      port.title =
-        node.kind === 'input'
-          ? slots[index]?.name
-            ? `${index === 0 ? '底图' : `图层 ${index}`} · ${slots[index].name}`
-            : `图像 ${index + 1}`
-          : '输出';
+      if (node.kind === 'input') {
+        const slotIndex = slotOfInputPort(index, slots.length);
+        const name = slots[slotIndex]?.name;
+        const number = slotIndex + 1;
+        if (alpha) {
+          port.title = name ? `遮罩 ${number} · ${name}（透明通道）` : `遮罩 ${number}（透明通道）`;
+          const tag = document.createElement('span');
+          tag.className = 'cg-port-tag';
+          tag.textContent = 'α';
+          tag.setAttribute('aria-hidden', 'true');
+          port.append(tag);
+        } else {
+          port.title = name
+            ? `${slotIndex === 0 ? '底图' : `图层 ${slotIndex}`} · ${name}`
+            : `图像 ${number}`;
+        }
+      } else {
+        port.title = '输出';
+      }
       element.append(port);
+    }
+    // 输入节点右下角的手柄：上下拖动改缩略图行高（节点总高跟着变）
+    if (node.kind === 'input' && slots.length) {
+      element.classList.add('cg-node-resizable');
+      const grip = document.createElement('div');
+      grip.className = 'cg-node-grip';
+      grip.dataset.grip = 'row';
+      grip.title = '上下拖动调整缩略图高度 · 双击复位';
+      grip.addEventListener('dblclick', (gripEvent) => {
+        gripEvent.preventDefault();
+        gripEvent.stopPropagation();
+        resetRowHeight(node.id);
+      });
+      element.append(grip);
     }
     return element;
   };
@@ -2200,7 +2488,7 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
   const nodeElement = (nodeId: string): HTMLElement | null =>
     world.querySelector<HTMLElement>(`.cg-node[data-node-id="${cssEscape(nodeId)}"]`);
 
-  /** 把端口摆到缩略图中心（输入节点多图时每张图一个口）。 */
+  /** 把端口摆到缩略图中心（输入节点多图时每张图一个彩色口 + 一个 α 口）。 */
   const layoutPorts = (): void => {
     portTops.clear();
     for (const node of session_.graph.nodes) {
@@ -2211,10 +2499,16 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       for (const port of ports) {
         const side = port.dataset.side === 'in' ? 'in' : 'out';
         const index = Number(port.dataset.port || 0);
-        const thumb = node.kind === 'input' && side === 'out' ? thumbs[index] : null;
+        const isInputOut = node.kind === 'input' && side === 'out';
+        const slotIndex = isInputOut ? slotOfInputPort(index, slots.length) : index;
+        const alpha = isInputOut && isAlphaInputPort(index, slots.length);
+        const thumb = isInputOut ? thumbs[slotIndex] : null;
         const top =
           thumb && thumb.offsetHeight > 0
-            ? thumb.offsetTop + thumb.offsetHeight / 2 - PORT_HALF
+            ? thumb.offsetTop +
+              thumb.offsetHeight / 2 -
+              PORT_HALF +
+              (alpha ? Math.min(ALPHA_PORT_OFFSET, thumb.offsetHeight / 2 - PORT_HALF) : 0)
             : portTopFallback(node.kind, side, index);
         port.style.top = `${top}px`;
         portTops.set(portKey(node.id, side, index), top);
@@ -2505,6 +2799,8 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     const known = new Set(copy.nodes.map((node) => node.id));
     session_.selection = session_.selection.filter((id) => known.has(id));
     session_.dirty = true;
+    // 缩略图顺序也在这份图里（输入节点的 params.order）：撤销换顺序时要跟着排回去
+    syncSlotsFromGraph();
     // 撤销回到打开时的样子 = 没有改动，Esc 就不该再落一张图
     session_.edited = !sameHistory(session_.history.baseline, cloneHistorySnapshot());
     renderNodes();
@@ -2928,7 +3224,17 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
     const nodeId = element.dataset.nodeId || '';
     const node = session_.graph.nodes.find((item) => item.id === nodeId);
     if (!node) return;
-    // 右键留给 stage 的划选合并（Shift+右键）与平移，不在节点上起手拖拽
+    // 右键：只有 Shift+Ctrl+右键 是「接到输出」（用户 2026-11-22 定的键位）；
+    // 其余右键照旧留给 stage —— Shift+右键划选合线、Ctrl+右键切刀、不按则平移/菜单。
+    if (event.button === 2) {
+      if (event.ctrlKey && event.shiftKey && node.kind !== 'output') {
+        event.preventDefault();
+        event.stopPropagation();
+        selectNode(nodeId);
+        connectTo(nodeId, 'output', 0);
+      }
+      return;
+    }
     if (event.button !== 0) return;
     const port = target.closest<HTMLElement>('.cg-port');
     if (port) {
@@ -2936,6 +3242,23 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       event.preventDefault();
       selectNode(nodeId);
       if (port.dataset.side === 'out') startLink(nodeId, Number(port.dataset.port ?? 0), event);
+      return;
+    }
+    // 输入节点的缩略图：拖动换顺序（不拖就是普通点击，不改选区逻辑）
+    const thumb = target.closest<HTMLElement>('.cg-thumb');
+    if (thumb && node.kind === 'input') {
+      event.stopPropagation();
+      event.preventDefault();
+      selectNode(nodeId);
+      beginSlotDrag(nodeId, Number(thumb.dataset.slotIndex ?? -1), event);
+      return;
+    }
+    // 右下角手柄：上下拖动改缩略图行高
+    const grip = target.closest<HTMLElement>('.cg-node-grip');
+    if (grip && node.kind === 'input') {
+      event.stopPropagation();
+      event.preventDefault();
+      beginRowResize(nodeId, event);
       return;
     }
     // 参数控件（滑块/数字框/下拉/勾选/色轮）长在节点里：让它自己处理，不要被当成拖动节点
@@ -2946,11 +3269,11 @@ export function openCompositorEditor(options: OpenCompositorOptions): void {
       return;
     }
     event.stopPropagation();
-    // Ctrl+Shift 先判：Blender 里 Ctrl+Shift+点击 = 接到 Viewer，我们反过来用
-    // （Shift 接预览、Ctrl+Shift 接输出），两者不能互相吞掉。
-    if (event.ctrlKey && event.shiftKey && node.kind !== 'output') {
+    // Shift+Ctrl+左键 = 接到预览（用户 2026-11-22：「我之前的要求是接到预览」——以前接的是输出）。
+    // 先判它，再判纯 Shift，两个手势不会互相吞掉。
+    if (event.ctrlKey && event.shiftKey && node.kind !== 'output' && node.kind !== 'viewer') {
       selectNode(nodeId);
-      connectTo(nodeId, 'output', 0);
+      connectTo(nodeId, 'viewer', 0);
       return;
     }
     if ((event.shiftKey || session_.tHeld) && node.kind !== 'output' && node.kind !== 'viewer') {
@@ -4540,6 +4863,24 @@ export function compositorReport(): Record<string, unknown> {
       toPort: edge.toPort,
     })),
     images: session.options.images.length,
+    /** 输入节点（v1.106）：缩略图顺序 / 行高 / 双口分布，拖拽与 α 口回归用。 */
+    input: (() => {
+      const slots = session.slots;
+      const node = session.graph.nodes.find((item) => item.kind === 'input');
+      const count = Math.max(1, slots.length);
+      return {
+        slots: slots.map((slot) => ({
+          name: slot.name ?? '',
+          url: slot.url,
+          layered: slot.layered,
+        })),
+        order: normalizeSlotOrder(node?.params?.order, slots.length) ?? slots.map((_, index) => index),
+        rowHeight: Number(node?.params?.rowHeight) || ROW_HEIGHT_DEFAULT,
+        colorPorts: count,
+        alphaPorts: count,
+        portOffset: ALPHA_PORT_OFFSET,
+      };
+    })(),
   };
 }
 

@@ -20,7 +20,9 @@
 import {
   evaluationOrder,
   inputSlots,
+  isAlphaInputPort,
   paramsOf,
+  slotOfInputPort,
   specOf,
   type CompositorGraph,
   type CompositorInputImage,
@@ -376,6 +378,16 @@ interface InputCache {
   texture: WebGLTexture;
   version: number;
   loading: boolean;
+  /** 图片原始像素尺寸：α 遮罩通道按它建渲染目标（占位期是 0）。 */
+  width?: number;
+  height?: number;
+}
+
+/** α 遮罩通道的缓存：跟着输入图的版本走，图换了就整张重做。 */
+interface AlphaCache {
+  url: string;
+  version: number;
+  target: RenderTarget;
 }
 
 /** 手绘蒙版的黑白图缓存：一张 dataURL 只上传一次，改一笔（maskRev 变）才换。 */
@@ -405,8 +417,15 @@ export class CompositorEngine {
   private inputs = new Map<number, InputCache>();
   /** 手绘蒙版节点的黑白图（key = 节点 id）。 */
   private masks = new Map<string, MaskCache>();
+  /**
+   * 输入图 α 遮罩通道（key = 槽位序号）：把每张图的透明通道渲染成一张黑白遮罩。
+   * 用户 2026-11-22：「加上阿尔法透明输出端口，输出来的是遮罩图」。
+   */
+  private alphas = new Map<number, AlphaCache>();
   /** 1×1 全白纹理：mix 的系数口没接线时用它，shader 里乘出来就等于「只用滑块」。 */
   private white: WebGLTexture | null = null;
+  /** 1×1 全黑纹理：α 口在底图还没 decode 完时先用它（黑 = 没有不透明区域）。 */
+  private black: WebGLTexture | null = null;
   /** 曲线 LUT：key = 四组控制点，最多留 12 张（拖滑块时每条曲线一张，够用）。 */
   private curveLuts = new Map<string, WebGLTexture>();
   /** 示波器降采样目标（固定 RGBA8，readPixels 读 UNSIGNED_BYTE 才是合法组合）。 */
@@ -467,6 +486,16 @@ export class CompositorEngine {
   setImages(images: CompositorInputImage[]): void {
     // 端口 = 展开后的槽位（图层文档一层一个口），不是「一张图一个口」
     this.slots = inputSlots(images);
+  }
+
+  /**
+   * 直接用编辑器算好的槽位表（v1.106）。
+   *
+   * 为什么还要这个入口：拖缩略图换顺序只改**槽位顺序**（图层文档已在编辑器里展开过），
+   * 拿不回原来的 `CompositorInputImage[]`；两边必须共用同一份数组，否则端口号对不上图。
+   */
+  setSlots(slots: readonly CompositorInputSlot[]): void {
+    this.slots = [...slots];
   }
 
   setSize(width: number, height: number): void {
@@ -599,6 +628,23 @@ export class CompositorEngine {
     return texture;
   }
 
+  /** 1×1 全黑纹理（α 口在底图载入前的中性值：没有不透明区域）。 */
+  private blackTexture(): WebGLTexture {
+    if (this.black) return this.black;
+    const gl = this.gl;
+    const texture = gl.createTexture();
+    if (!texture) throw new CompositorEngineError('占位纹理创建失败。');
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.bindTexture(gl.TEXTURE_2D, null);
+    this.black = texture;
+    return texture;
+  }
+
   private uploadImage(image: HTMLImageElement): WebGLTexture {
     const gl = this.gl;
     const texture = gl.createTexture();
@@ -682,8 +728,12 @@ export class CompositorEngine {
           texture,
           version: ++this.version,
           loading: false,
+          width: element.naturalWidth || element.width || 1,
+          height: element.naturalHeight || element.height || 1,
         });
         this.targets.clear();
+        // 底图换了，按它算出来的 α 遮罩也过期了
+        this.dropAlpha(port);
         this.onInvalidate?.();
       } catch (error) {
         this.lastError = error instanceof Error ? error.message : String(error);
@@ -696,6 +746,91 @@ export class CompositorEngine {
     };
     element.src = image.url;
     return placeholder;
+  }
+
+  private dropAlpha(slot: number): void {
+    const cached = this.alphas.get(slot);
+    if (!cached) return;
+    this.gl.deleteFramebuffer(cached.target.framebuffer);
+    this.gl.deleteTexture(cached.target.texture);
+    this.alphas.delete(slot);
+  }
+
+  /** α 遮罩通道的 shader（只做一次：透明通道 → 黑白图）。 */
+  private alphaProgram(): ProgramBundle {
+    const cached = this.programs.get('input-alpha');
+    if (cached) return cached;
+    const bundle = this.compile(
+      `
+    vec4 t = texture(u_tex, v_uv);
+    // 遮罩口径与「遮罩」节点一致：黑 = 透明 / 白 = 不透明，alpha 也等于它，
+    // 这样接进混合的系数口（读 .r）和接进 Alpha 上叠（读 .a）都不会反。
+    fragColor = vec4(vec3(t.a), t.a);
+  `,
+      false,
+    );
+    this.programs.set('input-alpha', bundle);
+    return bundle;
+  }
+
+  /**
+   * 输入图第 slot 个槽位的 **α 遮罩**（用户 2026-11-22：「加上阿尔法透明输出端口，
+   * 输出来的是遮罩图」）。
+   *
+   * 做法：底图纹理 → 一次全屏 pass，把 `.a` 写进 RGB。为什么要单独一张纹理而不是让
+   * 下游直接读 `.a`：合成器里所有「遮罩」型输入（混合的系数口、遮罩节点）读的都是 `.r`，
+   * 直接把带透明的原图当遮罩用会得到「原图亮度」而不是「不透明程度」。
+   *
+   * 渲染进别人的 FBO 时必须归还当前绑定：这段是在 renderNode 绑定自己的 FBO 之后被
+   * textureOf 调到的，不还回去下游那一次 drawArrays 会把结果画进这张遮罩纹理里。
+   */
+  private alphaTextureOf(slot: number): WebGLTexture | null {
+    const image = this.slots[slot];
+    if (!image) return null;
+    // 先让底图开始加载（返回占位时说明还在下载）
+    const base = this.ensureInput(slot);
+    if (!base) return null;
+    const cache = this.inputs.get(slot);
+    if (!cache || cache.loading || !cache.width || !cache.height) return this.blackTexture();
+    const cached = this.alphas.get(slot);
+    if (cached && cached.url === cache.url && cached.version === cache.version) {
+      return cached.target.texture;
+    }
+    this.dropAlpha(slot);
+    const gl = this.gl;
+    const width = Math.max(1, Math.round(cache.width));
+    const height = Math.max(1, Math.round(cache.height));
+    const previousFramebuffer = gl.getParameter(gl.FRAMEBUFFER_BINDING) as WebGLFramebuffer | null;
+    const previousViewport = gl.getParameter(gl.VIEWPORT) as Int32Array;
+    // 这段是在 renderNode「已经 useProgram(自己的效果) 之后」被调到的：换过 program 必须还回去，
+    // 否则回到 renderNode 时它的 uniform1i / drawArrays 会落到遮罩那一张 program 上（真机画面全黑）。
+    const previousProgram = gl.getParameter(gl.CURRENT_PROGRAM) as WebGLProgram | null;
+    try {
+      const target = this.createTarget(width, height);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, target.framebuffer);
+      gl.viewport(0, 0, width, height);
+      gl.clearColor(0, 0, 0, 0);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+      const bundle = this.alphaProgram();
+      gl.useProgram(bundle.program);
+      gl.bindVertexArray(this.vao);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, cache.texture);
+      if (bundle.uTex) gl.uniform1i(bundle.uTex, 0);
+      if (bundle.uTexel) gl.uniform2f(bundle.uTexel, 1 / width, 1 / height);
+      if (bundle.uParams) gl.uniform1fv(bundle.uParams, new Float32Array(MAX_PARAMS));
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      this.alphas.set(slot, { url: cache.url, version: cache.version, target });
+      return target.texture;
+    } catch (error) {
+      this.lastError = error instanceof Error ? error.message : String(error);
+      return this.blackTexture();
+    } finally {
+      gl.bindFramebuffer(gl.FRAMEBUFFER, previousFramebuffer);
+      gl.viewport(previousViewport[0], previousViewport[1], previousViewport[2], previousViewport[3]);
+      gl.useProgram(previousProgram);
+      gl.bindVertexArray(this.vao);
+    }
   }
 
   /**
@@ -782,11 +917,12 @@ export class CompositorEngine {
       if (!ref) return 'null';
       const node = this.graph.nodes.find((item) => item.id === ref.node);
       if (node?.kind === 'input') {
-        // 端口对应的是「槽位」（图层文档一层一个口），版本号仍然按端口算：
+        // 端口对应的是「槽位」（图层文档一层一个口），版本号仍然按**图**算：
         // 纹理异步加载完成时 version 会变，key 一变下游才会重算（否则一直停在占位图上）。
-        const input = this.inputs.get(ref.port);
-        const slot = this.slots[ref.port];
-        return `in${ref.port}:${slot?.url ?? ''}:${input?.version ?? 0}`;
+        const slot = slotOfInputPort(ref.port, this.slots.length);
+        const input = this.inputs.get(slot);
+        const alpha = isAlphaInputPort(ref.port, this.slots.length) ? 'α' : 'c';
+        return `in${alpha}${ref.port}:${this.slots[slot]?.url ?? ''}:${input?.version ?? 0}`;
       }
       return `${ref.node}:${this.targets.get(ref.node)?.version ?? 0}`;
     });
@@ -796,7 +932,13 @@ export class CompositorEngine {
   private textureOf(ref: UpstreamRef | null): WebGLTexture | null {
     if (!ref) return null;
     const node = this.graph.nodes.find((item) => item.id === ref.node);
-    if (node?.kind === 'input') return this.ensureInput(ref.port);
+    if (node?.kind === 'input') {
+      // 彩色口 → 原图；α 口 → 同一张图的透明通道（黑白遮罩）
+      const slot = slotOfInputPort(ref.port, this.slots.length);
+      return isAlphaInputPort(ref.port, this.slots.length)
+        ? this.alphaTextureOf(slot)
+        : this.ensureInput(slot);
+    }
     return this.targets.get(ref.node)?.target.texture ?? null;
   }
   private renderNode(node: CompositorNode, upstream: (UpstreamRef | null)[]): RenderTarget {
@@ -1002,10 +1144,18 @@ export class CompositorEngine {
       gl.deleteTexture(target.target.texture);
     }
     for (const input of this.inputs.values()) gl.deleteTexture(input.texture);
+    for (const alpha of this.alphas.values()) {
+      gl.deleteFramebuffer(alpha.target.framebuffer);
+      gl.deleteTexture(alpha.target.texture);
+    }
     for (const mask of this.masks.values()) gl.deleteTexture(mask.texture);
     if (this.white) {
       gl.deleteTexture(this.white);
       this.white = null;
+    }
+    if (this.black) {
+      gl.deleteTexture(this.black);
+      this.black = null;
     }
     for (const lut of this.curveLuts.values()) gl.deleteTexture(lut);
     if (this.scopeTarget) {
@@ -1017,6 +1167,7 @@ export class CompositorEngine {
     this.programs.clear();
     this.targets.clear();
     this.inputs.clear();
+    this.alphas.clear();
     this.masks.clear();
     this.curveLuts.clear();
   }

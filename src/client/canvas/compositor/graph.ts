@@ -407,6 +407,79 @@ export function outputPortCount(kind: CompositorKind, inputCount: number): numbe
   return NODE_SPECS[kind].dynamicOutputs ? Math.max(1, inputCount) : NODE_SPECS[kind].outputs;
 }
 
+/**
+ * 输入节点的**彩色**输出口数（= 上游图/层数）。这是老图沿用的端口号 0..N-1。
+ *
+ * 用户 2026-11-22：「加上阿尔法透明输出端口，输出来的是遮罩图」——每张图下面再挂一个
+ * α 口（Blender Image 节点的 Color / Alpha 双口），端口号排在彩色口之后（N..2N-1）。
+ * 只有这样排，v1.105 以前存的图（fromPort 全是 0..N-1）打开后语义才不变。
+ */
+export function inputColorPortCount(slotCount: number): number {
+  return Math.max(1, slotCount);
+}
+
+/** 输入节点实际画出来的输出口总数：每张图一个彩色口 + 一个 α 口。 */
+export function inputTotalPortCount(slotCount: number): number {
+  return inputColorPortCount(slotCount) * 2;
+}
+
+/** 端口号是不是 α 口（α 口一律排在彩色口之后）。 */
+export function isAlphaInputPort(port: number, slotCount: number): boolean {
+  return port >= inputColorPortCount(slotCount);
+}
+
+/** 第 slot 张图的 α 口端口号。 */
+export function alphaPortOfSlot(slot: number, slotCount: number): number {
+  return inputColorPortCount(slotCount) + slot;
+}
+
+/** 端口号 → 槽位序号（彩色口与 α 口都落回同一张图）。 */
+export function slotOfInputPort(port: number, slotCount: number): number {
+  const count = inputColorPortCount(slotCount);
+  return isAlphaInputPort(port, slotCount) ? port - count : port;
+}
+
+/**
+ * 校验存下来的缩略图顺序：必须是 0..count-1 的一个排列。
+ * 上游图变了（张数不同 / 撤销后图不同）就当没有，宁可回默认顺序也不要错位。
+ */
+export function normalizeSlotOrder(value: unknown, count: number): number[] | null {
+  if (!Array.isArray(value) || count <= 0) return null;
+  const order = value.map((item) => Number(item));
+  if (order.length !== count) return null;
+  if (!order.every((item) => Number.isInteger(item) && item >= 0 && item < count)) return null;
+  if (new Set(order).size !== count) return null;
+  return order;
+}
+
+/**
+ * 拖缩略图换顺序后，把连线跟着**图**走（不是跟着端口号）。
+ *
+ * `order` 是新的排列（order[新位置] = 旧位置）。一张图从旧位置 a 搬到新位置 b 时，
+ * 原本接在它彩色口 / α 口上的线也要换成新端口号 —— 否则用户只是挪了一下缩略图，
+ * 「放置 · 图层 3」那条链就会悄悄接到另一张图上。
+ */
+export function remapInputPorts(
+  edges: readonly CompositorEdge[],
+  order: readonly number[],
+  slotCount: number,
+): CompositorEdge[] {
+  const count = inputColorPortCount(slotCount);
+  const oldToNew = new Array<number>(count).fill(-1);
+  order.forEach((oldIndex, newIndex) => {
+    if (oldIndex >= 0 && oldIndex < count) oldToNew[oldIndex] = newIndex;
+  });
+  return edges.map((edge) => {
+    if (edge.fromNode !== 'input') return edge;
+    const slot = slotOfInputPort(edge.fromPort, count);
+    const next = oldToNew[slot];
+    if (next == null || next < 0) return edge;
+    const fromPort = isAlphaInputPort(edge.fromPort, count) ? count + next : next;
+    if (fromPort === edge.fromPort) return edge;
+    return { ...edge, fromPort, id: edgeId(edge.fromNode, fromPort, edge.toNode, edge.toPort) };
+  });
+}
+
 /** 缺省参数补齐：老图里没有的新字段不该让求值崩。 */
 export function paramsOf(node: CompositorNode): Record<string, CompositorParamValue> {
   return { ...(NODE_SPECS[node.kind].defaults || {}), ...(node.params || {}) };

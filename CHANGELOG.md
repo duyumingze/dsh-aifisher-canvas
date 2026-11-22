@@ -6,6 +6,117 @@
 > 对不上的（v1.70–v1.76 调色面板迭代、v1.82–v1.83 整页扩图）按批次合并并保留日期，
 > 不再写「未发布」这种既不是版本也不是日期的标题。
 
+## v1.108.0 — 2026-11-23
+
+### 性能：手势期不再 setState（P0 v2）
+
+用户 2026-11-22 问 **「现在感觉是帧率的问题，你说 gpu 渲染有效果吗？」**。判定：画布是 DOM+SVG，
+平移写 `#canvas-viewport-content` 的 `translate3d`，合成与光栅本来就在 GPU 上 —— **没有「开 GPU 渲染」
+这个开关**；只有换 WebGL 内核（PixiJS/Konva/自写）才真能提帧率，代价是节点内文本编辑 / 视频播放 /
+生成按钮 / 拖拽命中 / 切刀全部重写（vendor 树还不可改写），**现在否决**。能省的是每帧开销：读代码
+定位三处 —— ①每个 wheel tick 都 `setState` 重渲染（`canvasViewport.ts` 先 `writeTransform` 再
+`updateViewport`；`canvasEdges` 的可见性 `useMemo` 依赖 `viewport.x/y/zoom`，边每 tick 全量重算）；
+②点阵 rAF 每帧写 6 个 CSS 变量 + 3 层 `background-position` + 一层 `radial-gradient` 遮罩；
+③图片全分辨率直出 + 视口裁剪边距固定 ±1600 世界 px（与 zoom 无关）。
+
+- **改法**（vendor 整文件覆盖 `scripts/patches/aifisher/src/stable/canvas/canvasViewport.ts`）：
+  1. 每个 wheel / 拖拽平移事件**立刻**写 transform（跟手，不等 React）；
+  2. 交给 React 的状态按 **90ms** 合并通知（首发立即、期间合并、停手补齐）；
+  3. 状态换成**活快照**：`x/y/zoom` 是 getter，读的永远是最新值 —— 于是悬停、节点状态更新这类
+     与视口无关的渲染都不会把 transform 写回旧位置，事件处理里读到的也永远是最新视口；
+  4. **指针按下 / 键盘按下前同步补齐**：框选、建节点、连线都按 state 里的视口算起点，不会偏。
+- **读数**：`window.__FISHERAI_CANVAS_VIEWPORT_STATS__()` → `{ wheelTicks, stateSyncs }`
+  （打了多少 wheel vs 真正提交给 React 多少次），真机上拖一段就能读。
+- **实测**：jsdom 24 连滚（Alt+平移）→ `stateSyncs ≤ 4`（改动前每个 tick 一次 = 24 次）；
+  63 套 **3519 项**（`test:perf` 31 → **42 项**，新增合并/补齐/回写/按指针四项断言）；
+  真机 `BROWSER_ONLY=canvas,grid-pan,canvas-ui-scale` 全 **fail=0**，网格与节点仍 1:1 同速。
+- **没解决的**（下一步）：大图光栅/解码本身的开销 —— LOD 三档（zoom<0.3 只画标题色块）与
+  裁剪边距随 zoom 收缩；这两条要新传 `zoomBucket`，不能靠 `zoom` 判断（Image/Text/Video 的
+  zoom 被 `idleZoomIndependentTypes` 强制为 1）。
+
+## v1.107.0 — 2026-11-22
+
+### 性能：手势降载 + 缩略图管线（用户「画布浏览起来还是有点卡」，先做 P0+P1）
+
+用户原话（2026-11-22）：**「现在画布浏览起来还是有点卡，有没有什么开源项目能解决这个办法？
+提出解决建议？」**，我给了诊断 + 开源选型（sharp / Konva / Pixi / LiteGraph / React Flow 否决）
+之后，用户拍板 **「P0+P1」**。
+
+先量了体量（不做性能结论只凭手感）：12 个项目、最大项目 54 节点 / 40 边；素材 441 个文件
+615MB，其中 **178 张 PNG 合计 270.8 MPix**（RGBA8 解码 ≈ 1.01GB），单张最大 3840×2160 /
+12.5MB —— 而节点卡显示尺寸只有 360×420。结论：**不是节点数量级问题，是每张卡的渲染开销
+（全分辨率解码 + 全屏模糊 + 全屏重绘）**。
+
+- **P0 手势降载**（`src/client/canvas/gesture.ts`）：平移 / 缩放 / 拖拽期间给容器打
+  `data-canvas-gesture="pan|zoom|drag"`，样式把「动起来纯亏」的四样东西关掉 ——
+  65+ 处 `backdrop-filter: blur(18–20px)` 的全屏玻璃、卡片 `shadow-*` 大阴影、连线的
+  `feGaussianBlur`、点阵提亮层（带 `radial-gradient` 遮罩的全屏平铺图）；停手 **180ms**
+  恢复。只认落在画布底盘 / 缩放条上的事件（右栏对话、项目库里的滚轮不触发），按下不动不降载
+  （单击不该关模糊），拖过 3px 才算拖拽。样式规则右侧全写成具体类/属性选择器，
+  不写 `*` —— 属性一翻转就整页重匹配的话等于又添一处抖动。
+- **P0 点阵/连线一起降载**：点阵提亮层在降载期间 `visibility: hidden`（不是 opacity: 0，
+  这才真的跳过绘制），生成中噪波点阵同理。
+- **P1-1 缩略图管线**（host `src/host/canvas/mediaRouter.ts` + client
+  `src/client/canvas/thumbs.ts`）：`GET /media/<项目>/<类型>/<文件>?w=1024` 有缩略图回缩略图
+  （`x-aifisher-thumb: hit`），没有就先如实回原图（`miss` + `cache-control: no-store`，
+  否则同一 URL 永远换不成缩略图）；`POST /media/thumb` 负责落盘（只认素材库里真实存在的
+  文件，宽度白名单 256/512/1024/2048）。生成放在**浏览器**：用已经解码好的那张图
+  `createImageBitmap(img)` → `OffscreenCanvas` → webp，**不给插件加 sharp/libvips 这类原生
+  依赖**（本机连 ffmpeg 都没有，现有 `/media/thumbnail` 在这台机上是不可用的）。
+  画布侧只观察节点层里 `naturalWidth ≥ 1600` 的图（小图不缩、远程直链不动、图片预览/裁剪等
+  需要原图的浮层不在这一层），最多 2 个并发，手势期间与页面隐藏时不动手。
+  改的是 DOM 的 `src`，vendor 的 `resultUrl` 没变 → React 不会覆盖回来（与 textPreview /
+  canvasGrid / knife 同一条「DOM 侧同位观察」路线）。
+- 排查口径：`canvasAppBuildInfo()` 里多了 `gesture`（当前降载状态 / 切换次数）与
+  `thumbs`（层内图片数 / 已换缩略图数 / 生成数 / 失败数）两段读数。
+- 验证：typecheck src 0；新增 jsdom 套件 `test-canvas-perf`（**31 项**：缩略图路由的
+  miss/hit/no-store/非法宽度/外部 URL 拒绝 + 画布侧换 src 与小图跳过 + 手势四种情形）；
+  全量 **63 套 3508 项**，唯一 bad 是 `test-media-editing`（本机没装 ffmpeg 的既有例外）。
+  真机（headless Chromium）在**每个**画布场景里加了一条同步探针：打上 `data-canvas-gesture`
+  读 computedStyle —— `backdrop-filter` 必须变 `none`、`box-shadow` 变 `none`、点阵提亮层
+  `visibility: hidden`，摘掉属性后原样恢复。
+- 本轮**没做**（留给后面）：LOD 三档（`zoom < 0.3` 只画标题色块，需要给 vendor 补一个
+  `zoomBucket` prop —— 现在 Image/Text/Video 的 `zoom` 被 `idleZoomIndependentTypes`
+  强制成 1，拿不到档位）、连线流动动画从每帧 `setState` 改成 CSS `stroke-dashoffset`。
+- 已知取舍：节点卡里一律用 1024px 宽的缩略图，缩放到 **300% 以上**时大图会略软；
+  双击进图片预览看到的是原图。
+
+## v1.106.0 — 2026-11-22
+
+### 调色合成器：输入节点双口 + 缩略图可拖可拉（用户三条要求）
+
+用户原话（2026-11-22）：**「接入调色节点之后这里输入的图间距大一点，可以解散自由调整。
+并且加上阿尔法透明输出端口。输出来的是遮罩图；出现一个 bug，shift+ctrl+鼠标右键接到了
+输出端，我之前的要求是接到预览」**。
+
+- **缩略图间距 6 → 14px**：十层叠在一张卡片里时不再挤成一摞；行距与行高一起由
+  `ROW_GAP` / `params.rowHeight` 决定，端口位置仍按缩略图实测位置对齐（不写死）。
+- **缩略图可拖着换顺序**：按住某张图上下拖就是排序，落点那张会亮一圈描边。
+  换顺序换的是「哪张图占哪个端口位」，所以连线**跟着图走**（颜色口与 α 口一起重映射，
+  `remapInputPorts`）—— 否则只是挪一下缩略图，「放置 · 图层 3」那条链就接到别的图上去了。
+  顺序存进输入节点的 `params.order`（按上游原始下标记），重开合成器还是这个顺序；
+  `Ctrl+Z` 撤销时槽位与端口一起回去。
+- **节点右下角加了行高把手**：上下拖动改缩略图高度（40–260px），节点总高与所有端口
+  跟着动，双击复位 96px。十层的大卡片可以压扁到半屏，也可以拉高看清每张图。
+- **输入节点每张图两个输出口（Blender Image 节点的 Color / Alpha）**：
+  端口 `0..N-1` 仍是彩色口（老图语义完全不变），`N..2N-1` 是新增的 **α 口** ——
+  虚线边 + 口外一颗 `α` 小字，悬停提示「遮罩 N · 层名（透明通道）」。
+  α 口吐的是**黑白遮罩**：底图纹理过一次全屏 pass，把 `.a` 写进 RGB（口径与「遮罩」节点
+  一致：黑 = 透明、白 = 不透明，alpha 也等于它），所以接进混合的系数口（读 `.r`）
+  或 Alpha 上叠（读 `.a`）都不会反。遮罩按输入图版本缓存，底图换了会一起失效；
+  这一 pass 换过 program / FBO 后都会还回去（否则下游那次 draw 会画进遮罩纹理里）。
+- **修：Shift+Ctrl 的键位接错了**。以前 `Ctrl+Shift+点击` 接的是**输出**（当时按 Blender
+  的 Viewer 反过来理解），用户要的是接预览。现在：`Shift+点击` / `Shift+Ctrl+左键` = 接预览，
+  `Shift+Ctrl+右键` = 接输出（不按修饰键的右键仍然只做合线 / 切刀，不会被这个手势吞掉）。
+  README 与画布左下角提示条同步改写。
+- 验证：typecheck src 0；新增 jsdom 套件 `test-canvas-compositor-input`（33 项：双口契约 /
+  换顺序后的端口重映射 / 行高拖动与复位 / Shift+Ctrl 两种键位 / α 口拖线）；
+  `test-canvas-compositor` 325 项（1 张图的输出口断言按新契约改成 2）。
+- 真机（headless Chromium，新场景 `compositor-alpha`，截图 `docs/shots/canvas-compositor-alpha.png`）：
+  半透明素材（左半红 alpha=200 / 右半全透明）上，彩色口直通时左半读回 `[255,0,0]`；
+  把 α 口拖到预览后左半变 `[200,200,200]`、右半 `[0,0,0]` —— α 口确实是「透明程度做成的
+  黑白遮罩」，不是把原图原样递过去。
+
 ## v1.105.0 — 2026-11-22
 
 ### 新：接入 ZZAI 的 GPT Image 2.6 低价版（`zhenzhen-image-g-v2.6-lowprice`）

@@ -581,8 +581,30 @@ export const COMPOSITOR_STYLE = `
   display: block;
   background: #0a0c11;
 }
-.cg-node-body .cg-thumb + .cg-thumb { margin-top: 6px; }
+/* 用户 2026-11-22：「接入调色节点之后这里输入的图间距大一点」：6 → 14。
+   行距与 editor.ts 的 ROW_GAP 是同一个数字（拉高/换顺序的行高换算也用它）。 */
+.cg-node-body .cg-thumb + .cg-thumb { margin-top: 14px; }
+/* 缩略图可拖着换顺序：抓手光标 + 拖动中的半透明 + 落点位置的一条高亮线 */
+.cg-node-body .cg-thumb { cursor: grab; }
+.cg-node-body .cg-thumb-dragging { opacity: .55; cursor: grabbing; }
+.cg-node-body .cg-thumb-drop { box-shadow: inset 0 0 0 2px rgba(94, 234, 212, .75); }
 .cg-node-body .cg-empty { color: #7c8592; font-size: 10.5px; }
+
+/* 输入节点右下角的行高把手（拖动改缩略图高度，双击复位） */
+.cg-node-grip {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  cursor: ns-resize;
+  opacity: .5;
+  background:
+    linear-gradient(135deg, transparent 46%, rgba(255, 255, 255, .55) 46%, rgba(255, 255, 255, .55) 54%, transparent 54%),
+    linear-gradient(135deg, transparent 72%, rgba(255, 255, 255, .35) 72%, rgba(255, 255, 255, .35) 80%, transparent 80%);
+}
+.cg-node-grip:hover { opacity: 1; }
 
 /* ---------------- 节点体内的参数控件（参数直接长在节点上，没有右侧面板） ---------------- */
 .cg-param {
@@ -976,6 +998,27 @@ export const COMPOSITOR_STYLE = `
 }
 .cg-port.cg-in { left: -6px; }
 .cg-port.cg-out { right: -6px; }
+/* α 口（v1.106）：同一张图的第二路输出 —— 黑白遮罩。虚线边 + 口外一颗 α 小字，
+   和彩色口一眼分得开；接上后同样填成实心。 */
+.cg-port.cg-alpha {
+  border-style: dashed;
+  border-color: #9aa6b6;
+  background: #11161d;
+}
+.cg-port-tag {
+  position: absolute;
+  right: 15px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 0 3px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 255, 255, .1);
+  background: rgba(13, 17, 24, .88);
+  color: #cfd7e2;
+  font-size: 8px;
+  line-height: 1.4;
+  pointer-events: none;
+}
 /* 多输入口外挂的小标（混合节点的 A / B / 系数）：悬停提示不够直观，直接挂在口左侧。
    深色小药丸 + 描边，压在连线上也读得清；不接鼠标事件，口子的 28px 命中区不受影响。 */
 .cg-port-badge {

@@ -18,8 +18,8 @@
  */
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createReadStream, existsSync, statSync } from 'node:fs';
-import { readFile } from 'node:fs/promises';
-import { basename, extname, resolve } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { basename, dirname, extname, join, resolve } from 'node:path';
 import { readJsonBody, readRawBody, sendJson } from '../http/httpUtil';
 import {
   assertExtensionForType,
@@ -72,6 +72,7 @@ function serveMediaFile(
   req: IncomingMessage,
   res: ServerResponse,
   filePath: string,
+  extraHeaders: Record<string, string> = {},
 ): void {
   const stat = statSync(filePath);
   const type = MIME[extname(filePath).toLowerCase()] ?? 'application/octet-stream';
@@ -81,6 +82,7 @@ function serveMediaFile(
     'content-type': type,
     'accept-ranges': 'bytes',
     'cache-control': 'private, max-age=31536000, immutable',
+    ...extraHeaders,
   };
   if (range) {
     const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
@@ -175,6 +177,35 @@ async function proxyRemote(
 }
 
 /**
+ * 画布缩略图（v1.107 性能 P1-1）。
+ *
+ * 为什么要有：用户画布上 178 张 PNG 合计 270.8 MPix（RGBA8 解码 ≈ 1.01GB），而节点卡
+ * 显示尺寸只有 360×420 —— 每张 3840×2160 的原图都被完整解码进内存，缩放时整层重新栅格化，
+ * 54 个节点的项目在平移时就掉帧。这里给素材加一层「按宽取图」：
+ *
+ *   GET  /media/<项目>/<类型>/<文件>?w=1024   → 有缩略图就回缩略图（x-aifisher-thumb: hit），
+ *                                              没有就先如实回原图（x-aifisher-thumb: miss,
+ *                                              cache-control: no-store，别把原图缓存进这个 URL）
+ *   POST /media/thumb { url, width, data }    → 浏览器把降采样好的 webp 交回来落盘
+ *
+ * 生成放在**浏览器**（createImageBitmap + OffscreenCanvas）而不是 host：这样不用给插件加
+ * 原生依赖（sharp/libvips 要预编译二进制），而 Chromium 本来就已经把原图解码在手上了。
+ * 落盘位置是原图同目录下的 `.thumbs/`（媒体列表只认 `.json` sidecar，多一个隐藏目录不影响它）。
+ */
+export const THUMB_WIDTHS = [256, 512, 1024, 2048] as const;
+
+/** 解析 `?w=` → 合法宽度；不合法（缺省/乱填）返回 null（=按原图处理）。 */
+export function thumbWidthOf(raw: string | null | undefined): number | null {
+  const width = Number(raw);
+  return THUMB_WIDTHS.includes(width as (typeof THUMB_WIDTHS)[number]) ? width : null;
+}
+
+/** 某张原图对应哪个缩略图文件。 */
+export function thumbPathFor(filePath: string, width: number): string {
+  return join(dirname(filePath), '.thumbs', `${basename(filePath)}.w${width}.webp`);
+}
+
+/**
  * 处理画布命名空间下与素材/媒体文件相关的请求。
  * 已处理返回 true；未匹配返回 false（交回 restRouter 走 NOT_PORTED）。
  */
@@ -188,6 +219,47 @@ export async function handleMediaApi(input: {
   const { req, res, url, parts, deps } = input;
   const { mediaStore } = deps;
   const method = (req.method ?? 'GET').toUpperCase();
+
+  // ---- 缩略图落盘：POST /media/thumb（浏览器降采样后交回来） ----
+  if (parts[0] === 'media' && parts.length === 2 && parts[1] === 'thumb') {
+    if (method !== 'POST') {
+      sendJson(res, 405, { error: 'method not allowed' });
+      return true;
+    }
+    try {
+      const body = (await readJsonBody(req, 16 * 1024 * 1024)) as {
+        url?: unknown;
+        width?: unknown;
+        data?: unknown;
+      } | null;
+      const rawUrl = typeof body?.url === 'string' ? body.url : '';
+      const width = thumbWidthOf(
+        typeof body?.width === 'number' || typeof body?.width === 'string'
+          ? String(body.width)
+          : null,
+      );
+      const data = typeof body?.data === 'string' ? body.data : '';
+      if (!rawUrl || !width || !data.startsWith('data:image/')) {
+        sendJson(res, 422, { error: 'url / width / data 不合法。', code: 'INVALID_THUMB_REQUEST' });
+        return true;
+      }
+      // 只允许给**本插件素材库里真实存在**的文件生成缩略图（url 来自客户端，不能信）。
+      const local = mediaStore.localPathForUrl(rawUrl);
+      if (!local) {
+        sendJson(res, 404, { error: '素材不存在。', code: 'MEDIA_NOT_FOUND' });
+        return true;
+      }
+      const { buffer } = parseDataUrl(data);
+      const target = thumbPathFor(local.path, width);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, buffer);
+      sendJson(res, 200, { ok: true, width, bytes: buffer.length, path: target });
+      return true;
+    } catch (error) {
+      fail(res, error);
+      return true;
+    }
+  }
 
   // ---- 素材文件本体：/media/<projectId>/<kind>s/<file> ----
   if (
@@ -204,6 +276,25 @@ export async function handleMediaApi(input: {
     const resolved = mediaStore.resolveFile(parts[1], parts[2] as MediaType, parts[3]);
     if (!resolved) {
       sendJson(res, 404, { error: '素材不存在。', code: 'MEDIA_NOT_FOUND' });
+      return true;
+    }
+    const width = thumbWidthOf(url.searchParams.get('w'));
+    if (width) {
+      const thumb = thumbPathFor(resolved.path, width);
+      if (existsSync(thumb)) {
+        serveMediaFile(req, res, thumb, {
+          'x-aifisher-thumb': 'hit',
+          'x-aifisher-thumb-width': String(width),
+        });
+        return true;
+      }
+      // 还没生成：先如实回原图（画布不能空着），且**不让浏览器把这个 URL 缓存成原图** ——
+      // 客户端后台生成完缩略图后，同一个 URL 要能拿到新内容。
+      serveMediaFile(req, res, resolved.path, {
+        'x-aifisher-thumb': 'miss',
+        'x-aifisher-thumb-width': String(width),
+        'cache-control': 'no-store',
+      });
       return true;
     }
     serveMediaFile(req, res, resolved.path);

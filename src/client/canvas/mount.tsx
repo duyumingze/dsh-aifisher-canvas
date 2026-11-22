@@ -25,6 +25,8 @@ import { CanvasStage, canvasBindingReport, canvasViewInjectionReport } from './s
 import { installCanvasDiagnostics, installImageLoadTelemetry, reportCanvasError, reportCanvasInfo } from './diagnostics';
 import { installSaveTelemetry } from './saveTelemetry';
 import { canvasGridReport, mountCanvasGrid } from './canvasGrid';
+import { canvasGestureReport, installCanvasGesture } from './gesture';
+import { canvasThumbsReport, installCanvasThumbs } from './thumbs';
 import { mountBootSplash } from './bootSplash';
 import { generationDotsReport, installCanvasGenerationDots } from './genDots';
 import {
@@ -126,6 +128,9 @@ export function canvasAppBuildInfo(): Record<string, unknown> {
     bindings: canvasBindingReport(),
     injections: canvasViewInjectionReport(),
     grid: canvasGridReport(),
+    // v1.107：手势降载（卡不卡先看这里：active 有值就说明正在降载）+ 缩略图管线读数
+    gesture: canvasGestureReport(),
+    thumbs: canvasThumbsReport(),
     // v1.81：界面缩放读数 + 生成中噪波点阵（排查「胶囊没反应 / 点阵不出现」用）
     uiScale: canvasUiScaleReport(),
     generationDots: generationDotsReport(),
@@ -215,6 +220,12 @@ export type { StoryboardShot } from '../../canvas-ui/canvas/CanvasStoryboard';
 /** 排查用：画布点阵底纹的实时状态（原样转出 canvasGrid 的探针）。 */
 export { canvasGridReport } from './canvasGrid';
 
+/** 排查用：手势降载状态（v1.107：卡顿时先看有没有真的进降载）。 */
+export { canvasGestureReport } from './gesture';
+
+/** 排查用：缩略图管线状态（v1.107：命中/生成/回退各多少张）。 */
+export { canvasThumbsReport } from './thumbs';
+
 /**
  * v1.81：界面缩放与生成中噪波点阵的纯逻辑出口（回归直接在构建产物上验，
  * 不必先摆一屏节点）。生成点阵的挂载本身也可以单独跑：它只依赖 DOM。
@@ -235,6 +246,7 @@ export { generationDotsReport, installCanvasGenerationDots } from './genDots';
  * 图结构、求值顺序、输入口规则都在这一层，编辑器与 WebGL 引擎只消费它。
  */
 export {
+  alphaPortOfSlot,
   canInsertIntoEdge,
   chooseApplyTargets,
   connect,
@@ -242,12 +254,18 @@ export {
   createLayerCompositeGraph,
   disconnectEdge,
   evaluationOrder,
+  inputColorPortCount,
   inputSlots,
+  inputTotalPortCount,
   insertNodeIntoEdge,
+  isAlphaInputPort,
   normalizeGraph,
+  normalizeSlotOrder,
   outputPortCount,
   paramsOf,
+  remapInputPorts,
   removeNode,
+  slotOfInputPort,
   slotsHaveLayers,
   targetIsRawInput,
 } from './compositor/graph';
@@ -686,6 +704,14 @@ export function mountCanvas(container: HTMLElement): CanvasHandle {
   // MutationObserver 等它出现（dashboard 视图下没有底盘，切进画布时才挂上）。
   const releaseGrid = mountCanvasGrid({ container });
 
+  // 手势降载（v1.107 P0）：平移/缩放/拖拽期间把全屏玻璃模糊、卡片大阴影、连线高斯模糊、
+  // 点阵提亮层整体关掉，停手 180ms 恢复。见 gesture.ts 文件头。
+  const releaseGesture = installCanvasGesture(container);
+
+  // 缩略图管线（v1.107 P1）：节点里的原图（常常 4K）换成 host 侧的 1024 缩略图，首次在后台生成。
+  // 见 thumbs.ts 文件头。只改 `<img>` 的 src，不碰 vendor 树。
+  const releaseThumbs = installCanvasThumbs(container);
+
   // 启动动画（v1.91）：打开「无限画布」时先盖一层全屏动画，播完溶解露出项目库。
   // 挂在 root.render 之后 = container 的最后一个孩子，z-index 压住画布；
   // 只加 DOM、不碰 vendor 树，失败一律放行（见 bootSplash.ts 文件头）。
@@ -727,6 +753,8 @@ export function mountCanvas(container: HTMLElement): CanvasHandle {
         root.unmount();
       } finally {
         releaseBootSplash();
+        releaseThumbs();
+        releaseGesture();
         releaseGrid();
         setCanvasPortalTarget(null);
         releaseFileDragContainment();

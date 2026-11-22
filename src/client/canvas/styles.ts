@@ -20,6 +20,7 @@ import { canvasTextPreviewStyleText } from './textPreview';
 import { CANVAS_SKIN_CSS } from './skin';
 import { WORKBENCH_SKIN_CSS } from './workbenchSkin';
 import { PAGE_SKIN_CSS } from './pageSkin';
+import { canvasGestureStyleText } from './gesture';
 
 const STYLE_ID = 'dsh-aifisher-canvas-styles';
 
@@ -73,7 +74,9 @@ export function installCanvasStyles(): () => void {
     style.setAttribute('data-dsh-aifisher-canvas', 'styles');
     // 网格底纹的样式来自 canvasGrid.ts（与它自己的实现放一起，改观感只需动那一处）。
     // 皮肤（方案 C 玻璃面板）放在最后：它覆盖 --af-* 令牌与 chrome/节点样式，必须在最上层。
-    style.textContent = `${TAILWIND_CSS}\n${AIFISHER_CSS}\n${PANEL_ADAPTATION_CSS}\n${canvasGridStyleText()}\n${canvasTextPreviewStyleText()}\n${CANVAS_SKIN_CSS}\n${WORKBENCH_SKIN_CSS}\n${PAGE_SKIN_CSS}`;
+    // 手势降载（v1.107）放最后：它靠 `[data-canvas-gesture]` 提权覆盖皮肤里的
+    // backdrop-filter / box-shadow，顺序在皮肤之后更直观（虽然它带了 !important）。
+    style.textContent = `${TAILWIND_CSS}\n${AIFISHER_CSS}\n${PANEL_ADAPTATION_CSS}\n${canvasGridStyleText()}\n${canvasTextPreviewStyleText()}\n${CANVAS_SKIN_CSS}\n${WORKBENCH_SKIN_CSS}\n${PAGE_SKIN_CSS}\n${canvasGestureStyleText()}`;
     document.head.appendChild(style);
   }
   let released = false;
@@ -98,6 +101,7 @@ export function canvasStyleBytes(): number {
     canvasTextPreviewStyleText().length +
     CANVAS_SKIN_CSS.length +
     WORKBENCH_SKIN_CSS.length +
-    PAGE_SKIN_CSS.length
+    PAGE_SKIN_CSS.length +
+    canvasGestureStyleText().length
   );
 }
